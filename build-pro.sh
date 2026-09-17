@@ -1,0 +1,29 @@
+#!/bin/bash
+# Haven Pro prototype regeneration pipeline — mirrors the Customer App's
+# build.sh convention exactly (same sync rule, same rationale).
+#
+# Regenerates prototype-pro.html from home_services_pro_app.jsx as a single
+# self-contained file: no external <script src="*.jsx"> reference. That
+# external-reference approach is what caused the blank-screen bug — Babel
+# fetches an external .jsx via XHR at runtime, which silently fails under
+# file:// (double-clicked HTML) and on hosts that don't serve the sibling
+# file. Inlining removes the failure mode entirely.
+#
+# home_services_pro_app.jsx keeps `import React, {...} from "react"` and
+# `export default function HavenProApp(){` so it stays portable to a real
+# bundler-based project. Neither line is valid inside a plain
+# <script type="text/babel"> tag (no module loader, React is already a
+# global from the CDN tag). This script strips exactly those two lines.
+set -e
+cd "$(dirname "$0")"
+
+SRC="home_services_pro_app.jsx"
+OUT="prototype-pro.html"
+
+BODY=$(grep -v '^import React' "$SRC" | sed 's/^export default function HavenProApp/function HavenProApp/')
+
+cat _shell_pre_pro.txt > "$OUT"
+echo "$BODY" >> "$OUT"
+cat _shell_post_pro.txt >> "$OUT"
+
+echo "Built $OUT ($(wc -l < "$OUT") lines)"
