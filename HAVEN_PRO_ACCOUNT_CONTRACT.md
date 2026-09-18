@@ -13,7 +13,7 @@ Companion to `HAVEN_JOB_CONTRACT.md` (job/pricing schema, includes Job Earnings 
 - Onboarding steps (exact order from code):  
   `["welcome","createAccount","verifyContact","createProfile","chooseCategories","serviceArea","identity","background","payout","tax","credentials","ready"]`
 - Verification Center readiness rows (display and gate ordering): Profile → Identity → Background Check → Payouts → Tax Information.
-- `acceptJob()` gating order remains: marketplace readiness check first, then online.
+- `acceptJob()` gating order: active-job gate first, then marketplace readiness, then online.
 
 **v0.4 (this update)** — True blank-slate app + first-time onboarding + one-active-job-at-a-time. The app no longer boots into a pre-seeded demo; it starts genuinely empty, and the same production-shaped verification screens/logic from v0.2 (not a simplified copy) are sequenced into a real onboarding wizard. Also added the one-active-job-at-a-time rule and optional job notes/before-after photos plus a completion-review step before finalizing a job.
 
