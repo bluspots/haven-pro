@@ -1,12 +1,19 @@
 # HAVEN PRO — ACCOUNT & ELIGIBILITY CONTRACT
 
-**Status:** Living document · **Version:** 0.4 · **Scope:** Pro App only (not yet shared with Customer App)
+**Status:** Living document · **Version:** 0.5 · **Scope:** Pro App only (not yet shared with Customer App)
 
 Companion to `HAVEN_JOB_CONTRACT.md` (job/pricing schema, includes Job Earnings Statement below). Covers Pro account readiness — verification, credentials, payouts, tax — and how it gates job acceptance. Sandbox/prototype only: no real Persona, Checkr, Stripe Connect, or license-registry integration is connected.
 
 ---
 
 ## 0. Changelog
+
+**v0.5 (this update)** — Aligns the documented onboarding sequence and readiness gate order with the live code in `home_services_pro_app.jsx`. Editorial-only; no code changes:
+
+- Onboarding steps (exact order from code):  
+  `["welcome","createAccount","verifyContact","createProfile","chooseCategories","serviceArea","identity","background","payout","tax","credentials","ready"]`
+- Verification Center readiness rows (display and gate ordering): Profile → Identity → Background Check → Payouts → Tax Information.
+- `acceptJob()` gating order: active-job gate first, then marketplace readiness, then online.
 
 **v0.4 (this update)** — True blank-slate app + first-time onboarding + one-active-job-at-a-time. The app no longer boots into a pre-seeded demo; it starts genuinely empty, and the same production-shaped verification screens/logic from v0.2 (not a simplified copy) are sequenced into a real onboarding wizard. Also added the one-active-job-at-a-time rule and optional job notes/before-after photos plus a completion-review step before finalizing a job.
 
@@ -74,6 +81,9 @@ marketplaceReady = profileComplete
 
 `acceptJob()` checks `marketplaceReady` first (toast + route to Verification Center if false), then `online` — independent gates, in that order.
 
+Verification Center readiness rows render and are interpreted in this exact order (matching code):  
+1) Profile, 2) Identity, 3) Background Check, 4) Payouts, 5) Tax Information.
+
 ## 7. Insurance — Removed
 
 Removed from Profile, Verification Center, Account Readiness, all state models, forms, and sandbox controls. Haven does not require or claim its Pros are insured. Revisit only with a deliberate insurance/protection program backed by legal and insurance advice — not carried forward as a placeholder concept.
@@ -104,7 +114,12 @@ earningsStatement = {
 
 The app's true starting state (`accountStatus: "signed_out"`) has no seeded profile, categories, verification, credentials, payout/tax setup, or job history — `availableJobs` (the job market) is the one exception, since it's environmental data a new pro sees exactly like an established one, not pro-specific.
 
-`accountStatus` (`signed_out`|`signed_in`) and `onboardingStatus` (`not_started`|`in_progress`|`completed`) are independent — signed-in-but-mid-onboarding is a real, valid state. `onboardingStep` tracks position through a fixed sequence (`ONBOARDING_STEPS`): Welcome → Create Account → Verify Contact → Create Profile → Choose Categories → Service Area → Identity → Background → Payout → Tax → Credentials (optional) → Ready. `needsOnboarding = accountStatus === "signed_out" || onboardingStatus !== "completed"` gates whether the app renders the wizard or the normal 5-tab shell.
+`accountStatus` (`signed_out`|`signed_in`) and `onboardingStatus` (`not_started`|`in_progress`|`completed`) are independent — signed-in-but-mid-onboarding is a real, valid state. `onboardingStep` tracks position through a fixed sequence (`ONBOARDING_STEPS`), exactly as implemented in code:
+
+`["welcome","createAccount","verifyContact","createProfile","chooseCategories","serviceArea","identity","background","payout","tax","credentials","ready"]`
+
+For readability in prose: Welcome → Create Account → Verify Contact → Create Profile → Choose Categories → Service Area → Identity → Background → Payout → Tax → Credentials (optional) → Ready.  
+`needsOnboarding = accountStatus === "signed_out" || onboardingStatus !== "completed"` gates whether the app renders the wizard or the normal 5-tab shell.
 
 The four provider steps (Identity/Background/Payout/Tax) reuse the exact same state, actions, and Dev Testing panels as their standalone Profile screens — onboarding is not a simplified preview of verification. Their "Continue" is enabled once the pro has taken the primary action (status `!== "not_started"`), not only once fully verified — a real background check can take days, and onboarding shouldn't block on that. Only Accept Job enforces the full `marketplaceReady` gate.
 
