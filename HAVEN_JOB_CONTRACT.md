@@ -1,6 +1,6 @@
 # HAVEN — SHARED JOB DATA CONTRACT
 
-**Status:** Living document · **Version:** 0.8 · **Scope:** Customer App ↔ Pro App ↔ (future) Backend
+**Status:** Living document · **Version:** 0.9 · **Scope:** Customer App ↔ Pro App ↔ (future) Backend
 
 **Purpose.** This is the one document both the Customer App chat and the Pro App chat should be given before either one writes or changes anything touching job data or job status. It exists so the two prototypes stop drifting from each other silently. It is deliberately narrow — a data contract, not a full spec — so it's cheap to paste into a fresh conversation as authoritative context.
 
@@ -14,6 +14,17 @@ Nothing below is aspirational-passed-off-as-real. Where the two apps already dis
 ---
 
 ## 0. Changelog
+
+**v0.9 (this update) — locked economics (Pro copy) and materials-decline wording; docs-only.**
+
+- Locked economics (Pro copy):  
+  - Service price = labor.  
+  - Materials are additive to labor — never carved out of the service/labor price.  
+  - Haven takes $0 on materials, $0 on tips, and $0 on Inspection Visits.  
+  - Pro receives: labor payout + 100% of materials + 100% of tips + any applicable diagnosis/service fee.  
+  - Customer App code that carves materials out of the labor/service price is NOT canonical for economics. Do not change Customer or Pro code as part of this update — this note documents the product decision only.
+- Standard (non‑diagnosis) materials‑decline outcome — approved in principle as a product decision: label it “Job Ended — Materials Declined” (distinct from the diagnosis path). A flat visit fee for that outcome is FOUNDER‑TBD. Existing diagnosis fees and the `inspection_completed` path remain as-is. Implementation is DEFERRED and not part of this PR; no enum/code changes.
+- Platform/labor margin wording: any platform/labor margin lives in the Customer-side labor price and is FOUNDER‑TBD. This document continues to discuss labor margin conceptually without asserting a specific percentage. No numbers are set here.
 
 **v0.8 (this update) — corrects a real modeling error from v0.2, not an additive change.** Two coordinated fixes:
 
@@ -125,6 +136,8 @@ AVAILABLE → ACCEPTED → DRIVING → ARRIVED → DIAGNOSING → WORKING → CO
 
 **Explicitly rejected:** `AVAILABLE` and `ACCEPTED` as separate statuses. In the Customer App's actual model, "posted" *is* "waiting to be accepted" — there is no gap between posting and a pro seeing it in their feed, and the job never has a state that means "accepted but not yet en route." If the Pro App needs to distinguish "I've accepted, haven't started driving yet" as a UI moment, that's a Pro-App-local UI state, not a shared job status — see §6.
 
+Terminology note (DEFERRED implementation): For standard (non‑diagnosis) jobs where materials are declined mid‑`in_progress`, the approved product label is “Job Ended — Materials Declined” with a flat visit fee (FOUNDER‑TBD). Current code ends standard jobs with $0 in this path; diagnosis jobs continue to use `inspection_completed`. Do not introduce a new canonical enum in this PR; alignment across apps is DEFERRED.
+
 ---
 
 ## 3. Canonical Job Object — target shape
@@ -209,7 +222,7 @@ A real backend is what actually enforces this table. Until then, this table is t
 ## 7. Open questions this document surfaces (not resolved here)
 
 1. ~~Should `materials_requested` (the general capability) be available on any job, or scoped only to the five `requiresDiagnosis` categories?~~ **Resolved in v0.3**: any job, per product decision — architecture doc v2's recommendation was adopted as-is.
-2. **Still open, and now live in shipped code, not just a documented risk**: standard (non-diagnosis) categories have no fallback compensation if materials are discovered mid-job and declined — a pro who does real work on a standard job, discovers a need for materials, and gets declined, is paid $0. As of v0.3 this is an actual behavior a pro can hit, not a hypothetical. Extending the Inspection Visit pattern (a guaranteed floor fee) to standard categories was considered and deliberately *not* done unilaterally, since it would mean adding a new line to already-approved Job Board card UI. This needs an explicit product decision before it's treated as acceptable long-term, not just before it's convenient to fix.
+2. **Approved in principle; DEFERRED to implement:** for standard (non‑diagnosis) jobs, the materials‑declined path should end as “Job Ended — Materials Declined” with a flat visit fee (FOUNDER‑TBD). Current code continues to pay $0 in this path until implemented. Diagnosis jobs remain unchanged (`inspection_completed` with the diagnosis/inspection fee). Do not change enums or code in this PR; align naming across apps later.
 3. Whole-request materials approval only (no line-item negotiation) — confirmed acceptable for v1; `materialsRequest` is one object per request, not an array of individually-approvable line items. As of v0.3, the live implementation stores this as `pendingMaterialsRequest: {items, totalCost}` on the active job while pending — matches this shape.
 4. Should `requiresDiagnosis` be promoted to a real field on live job records (both `availableJobs`/`SIM_JOBS` and the `completedJobsHistory` records `finalizeJob` produces), per the standing recommendation in §3 — it still isn't; every consumer that needs it calls `DIAGNOSIS_CATEGORIES.has(job.category)` fresh.
 5. The seed/historical entries in `completedJobsHistory` and genuinely-live completions from v0.3 onward are now indistinguishable by inspection once appended to the same array. If "real vs. demo data" ever needs to be told apart (e.g., a reset-to-seed-data action), that distinction isn't tracked today and would need to be added retroactively.
