@@ -24,7 +24,7 @@ Nothing below is aspirational-passed-off-as-real. Where the two apps already dis
   - Pro receives: labor payout + 100% of materials + 100% of tips + any applicable diagnosis/service fee.  
   - Customer App code that carves materials out of the labor/service price is NOT canonical for economics. Do not change Customer or Pro code as part of this update — this note documents the product decision only.
 - Standard (non‑diagnosis) materials‑decline outcome — approved in principle as a product decision: label it “Job Ended — Materials Declined” (distinct from the diagnosis path). A flat visit fee for that outcome is FOUNDER‑TBD. Existing diagnosis fees and the `inspection_completed` path remain as-is. Implementation is DEFERRED and not part of this PR; no enum/code changes.
-- Labor economics — founder‑locked for now: the Pro keeps 100% of the labor price and Haven takes $0 from labor. The founder may revisit labor later; this PR records today’s locked posture without changing code.
+- Labor economics — current, founder‑confirmed: Haven's cut is 20% of the labor price. The Pro receives 80%. The customer's listed labor price does not increase. The 20% comes out of the Pro's labor payout. The founder may change the labor cut later.
 
 **v0.8 (this update) — corrects a real modeling error from v0.2, not an additive change.** Two coordinated fixes:
 
