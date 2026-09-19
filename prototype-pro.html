@@ -807,7 +807,9 @@ function HavenProApp() {
       showToast(`Customer approved materials for ${job.title} (simulated) — go ahead and purchase, then submit your receipt`);
     } else {
       setActiveJobs(prev => prev.filter(j => j.id !== jobId));
-      showToast(`Customer declined materials for ${job.title} (simulated) — Job Ended — Materials Declined`);
+      const hasInspectionFee = (job.inspectionFee || 0) > 0;
+      const endLabel = hasInspectionFee ? "Inspection Completed" : "Job Ended — Materials Declined";
+      showToast(`Customer declined materials for ${job.title} (simulated) — ${endLabel}`);
       finalizeJob(job, "inspection_completed");
       setMyJobsStack([{ view: "list" }]);
     }
