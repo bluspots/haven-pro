@@ -5,12 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="mobile-web-app-capable" content="yes"/>
-<meta name="apple-mobile-web-app-status-bar-style" content="black"/>
-<meta name="apple-mobile-web-app-title" content="Haven Pro"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="theme-color" content="#0b1a16"/>
-<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=20260919-1"/>
-<link rel="manifest" href="manifest.webmanifest?v=20260919-1"/>
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=3"/>
+<link rel="manifest" href="manifest.webmanifest?v=3"/>
 <title>Haven Pro — Prototype</title>
+<!-- PWA: Haven Pro -->
+<link rel="manifest" href="manifest.json?v=20260919">
+<meta name="theme-color" content="#1C2B3A">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Haven Pro">
+<link rel="apple-touch-icon" href="apple-touch-icon.png?v=20260919">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=20260919">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
@@ -1053,7 +1060,21 @@ function HavenProApp() {
       { key: "profile", label: "Profile", icon: "👷" },
     ];
     return (
-      <div style={{ display: "flex", borderTop: `1px solid ${T.bd}`, background: T.w, padding: "8px 4px 22px" }}>
+      <div
+        style={{
+          // Fixed within the app frame so it never scrolls off-screen
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 30,
+          display: "flex",
+          borderTop: `1px solid ${T.bd}`,
+          background: T.w,
+          // Respect iOS home-indicator safe area
+          padding: "8px 4px calc(10px + env(safe-area-inset-bottom))",
+        }}
+      >
         {items.map(it => {
           const active = tab === it.key;
           return (
@@ -3426,7 +3447,7 @@ function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
-    .hp-scroll { scrollbar-width: none; }
+    .hp-scroll { scrollbar-width: none; padding-bottom: calc(84px + env(safe-area-inset-bottom)) !important; }
     .hp-tab-btn { background:none; border:none; cursor:pointer; }
     .hp-accept-btn:active { transform: scale(0.97); }
     .hp-toggle:active { transform: scale(0.98); }
@@ -3452,7 +3473,7 @@ function HavenProApp() {
       };
   const frameStyle = showFrameChrome
     ? { width: 390, height: 844, background: T.bg, borderRadius: 46, overflow: "hidden", boxShadow: "0 32px 80px rgba(15,26,23,.30), 0 0 0 1px rgba(15,26,23,.08)", display: "flex", flexDirection: "column", position: "relative" }
-    : { width: "100%", minHeight: "100dvh", background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
+    : { width: "100%", height: "100dvh", background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
 
   return (
     <>
