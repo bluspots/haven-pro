@@ -47,6 +47,7 @@ const CATEGORY_GROUPS = [
 ];
 const CATEGORIES = CATEGORY_GROUPS.flatMap(g => g.categories);
 const DIAGNOSIS_CATEGORIES = new Set(["Plumbing", "Electrical", "HVAC", "Appliance Repair"]);
+const INSPECTION_VISIT_FEE = 45;
 const STATUS_LABELS = {
   en_route: "Driving to Job",
   arrived: "Arrived",
@@ -795,9 +796,9 @@ export default function HavenProApp() {
     } else {
       setActiveJobs(prev => prev.filter(j => j.id !== jobId));
       const hasInspectionFee = (job.inspectionFee || 0) > 0;
-      const endLabel = hasInspectionFee ? "Inspection Completed" : "Job Ended — Materials Declined";
-      showToast(`Customer declined materials for ${job.title} (simulated) — ${endLabel}`);
-      finalizeJob(job, "inspection_completed");
+      const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
+      showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed`);
+      finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
       setMyJobsStack([{ view: "list" }]);
     }
   }
@@ -1776,9 +1777,7 @@ export default function HavenProApp() {
      or a week-day swap. ── */
   function ledgerRow(job) {
     const a = jobAmount(job);
-    const isDiagnosisInspection = job.status === "inspection_completed" && ((job.inspectionFee || 0) > 0);
-    const isMaterialsDeclinedOnly = job.status === "inspection_completed" && ((job.inspectionFee || 0) <= 0);
-    const isNonRepair = isDiagnosisInspection || isMaterialsDeclinedOnly;
+    const isInspectionOnly = job.status === "inspection_completed";
     return (
       <button
         key={job.id}
@@ -1796,12 +1795,12 @@ export default function HavenProApp() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: isNonRepair ? T.dxTx : T.pgd, background: isNonRepair ? T.dxBg : T.pgt, border: `1px solid ${isNonRepair ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
-            {isDiagnosisInspection ? "Inspection Completed" : isMaterialsDeclinedOnly ? "Job Ended — Materials Declined" : "Full Repair"}
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: isInspectionOnly ? T.dxTx : T.pgd, background: isInspectionOnly ? T.dxBg : T.pgt, border: `1px solid ${isInspectionOnly ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
+            {isInspectionOnly ? "Inspection Completed" : "Full Repair"}
           </span>
         </div>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, fontWeight: 600, color: T.ts, borderTop: `1px solid ${T.bd}`, paddingTop: 8 }}>
-          <span>{isDiagnosisInspection ? "Inspection Visit" : "Labor Payout"} ${a.gross}</span>
+          <span>{isInspectionOnly ? "Inspection Visit" : "Labor Payout"} ${a.gross}</span>
           {a.tip > 0 && <span>Tip +${a.tip}</span>}
           {a.materials > 0 && <span>Materials +${a.materials}</span>}
         </div>
@@ -2044,8 +2043,7 @@ export default function HavenProApp() {
 
   function earningsStatementBody(job) {
     const a = jobAmount(job);
-    const isDiagnosisInspection = job.status === "inspection_completed" && ((job.inspectionFee || 0) > 0);
-    const isNonRepair = job.status === "inspection_completed";
+    const isInspectionOnly = job.status === "inspection_completed";
     const statement = earningsStatements.find(s => s.jobId === job.id);
     const row = (label, value, muted) => (
       <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.bd}` }}>
@@ -2064,8 +2062,8 @@ export default function HavenProApp() {
             ⏱ On the job {job.actualDurationMin} min (est. ~{job.durationMin} min)
           </div>
         )}
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: isNonRepair ? T.dxTx : T.pgd, background: isNonRepair ? T.dxBg : T.pgt, border: `1px solid ${isNonRepair ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
-          {isDiagnosisInspection ? "Inspection Completed" : job.status === "inspection_completed" ? "Job Ended — Materials Declined" : "Full Repair"}
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: isInspectionOnly ? T.dxTx : T.pgd, background: isInspectionOnly ? T.dxBg : T.pgt, border: `1px solid ${isInspectionOnly ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
+          {isInspectionOnly ? "Inspection Completed" : "Full Repair"}
         </span>
 
         {job.jobNotes && (
@@ -2082,7 +2080,7 @@ export default function HavenProApp() {
         )}
 
         <div style={{ marginTop: 18 }}>
-          {row(isDiagnosisInspection ? "Inspection Visit" : "Labor Payout", `$${a.gross}`)}
+          {row(isInspectionOnly ? "Inspection Visit" : "Labor Payout", `$${a.gross}`)}
           {a.tip > 0 && row("Tip (100% to you)", `+$${a.tip}`)}
           {a.materials > 0 && row(`Materials Reimbursed (pass-through)${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
         </div>
@@ -2829,7 +2827,7 @@ export default function HavenProApp() {
 
   const FAQ_ITEMS = [
     { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job — it's exactly what you receive, with no fee deducted. Materials reimbursement and tips are 100% yours too." },
-  { q: "What happens if a customer declines materials?", a: "The job ends as Job Ended — Materials Declined. If your category includes a predefined Inspection/Diagnosis Visit, that visit is paid as usual. Otherwise, there is no payout." },
+  { q: "What happens if a customer declines materials?", a: "The job ends as Inspection Completed and you're paid the Inspection Visit amount ($45). If your category already includes a predefined Inspection/Diagnosis Visit fee, that still applies." },
     { q: "How do I get reimbursed for materials?", a: "Once a customer approves your request, go make the purchase, then submit the actual cost and a receipt photo in the app. You're reimbursed 100% — no platform fee, even if the actual cost differs from your estimate." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." },
   ];
