@@ -3092,7 +3092,6 @@ export default function HavenProApp() {
             Passwords don't match
           </div>
         )}
-        <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 4 }}>🍎 Sign in with Apple · G Sign in with Google — coming soon</div>
       </>
     ), { enabled: !!valid, onClick: submit });
   }
