@@ -810,7 +810,7 @@ function HavenProApp() {
       setActiveJobs(prev => prev.filter(j => j.id !== jobId));
       const hasInspectionFee = (job.inspectionFee || 0) > 0;
       const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
-      showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed`);
+      showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed — Inspection Visit $${fee}`);
       finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
       setMyJobsStack([{ view: "list" }]);
     }
