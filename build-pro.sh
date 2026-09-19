@@ -27,3 +27,7 @@ echo "$BODY" >> "$OUT"
 cat _shell_post_pro.txt >> "$OUT"
 
 echo "Built $OUT ($(wc -l < "$OUT") lines)"
+
+# Also publish as index.html for GitHub Pages entry
+cp "$OUT" "index.html"
+echo "Synced index.html ($(wc -l < "index.html") lines)"
