@@ -1033,7 +1033,21 @@ export default function HavenProApp() {
       { key: "profile", label: "Profile", icon: "👷" },
     ];
     return (
-      <div style={{ display: "flex", borderTop: `1px solid ${T.bd}`, background: T.w, padding: "8px 4px 22px" }}>
+      <div
+        style={{
+          // Fixed within the app frame so it never scrolls off-screen
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 30,
+          display: "flex",
+          borderTop: `1px solid ${T.bd}`,
+          background: T.w,
+          // Respect iOS home-indicator safe area
+          padding: "8px 4px calc(10px + env(safe-area-inset-bottom))",
+        }}
+      >
         {items.map(it => {
           const active = tab === it.key;
           return (
@@ -3406,7 +3420,7 @@ export default function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
-    .hp-scroll { scrollbar-width: none; }
+    .hp-scroll { scrollbar-width: none; padding-bottom: calc(84px + env(safe-area-inset-bottom)) !important; }
     .hp-tab-btn { background:none; border:none; cursor:pointer; }
     .hp-accept-btn:active { transform: scale(0.97); }
     .hp-toggle:active { transform: scale(0.98); }
@@ -3432,7 +3446,7 @@ export default function HavenProApp() {
       };
   const frameStyle = showFrameChrome
     ? { width: 390, height: 844, background: T.bg, borderRadius: 46, overflow: "hidden", boxShadow: "0 32px 80px rgba(15,26,23,.30), 0 0 0 1px rgba(15,26,23,.08)", display: "flex", flexDirection: "column", position: "relative" }
-    : { width: "100%", minHeight: "100dvh", background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
+    : { width: "100%", height: "100dvh", background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
 
   return (
     <>
