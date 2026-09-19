@@ -19,6 +19,7 @@ cd "$(dirname "$0")"
 
 SRC="home_services_pro_app.jsx"
 OUT="prototype-pro.html"
+OUT_INDEX="index.html"
 
 BODY=$(grep -v '^import React' "$SRC" | sed 's/^export default function HavenProApp/function HavenProApp/')
 
@@ -28,6 +29,6 @@ cat _shell_post_pro.txt >> "$OUT"
 
 echo "Built $OUT ($(wc -l < "$OUT") lines)"
 
-# Also publish as index.html for GitHub Pages entry
-cp "$OUT" "index.html"
-echo "Synced index.html ($(wc -l < "index.html") lines)"
+# Also publish as index.html for GitHub Pages entrypoint
+cp "$OUT" "$OUT_INDEX"
+echo "Synced $OUT_INDEX"

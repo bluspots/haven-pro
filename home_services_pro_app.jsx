@@ -401,6 +401,14 @@ export default function HavenProApp() {
 
   const T = theme === "dark" ? DARK : LIGHT;
 
+  // Standalone/mobile detection — remove desktop phone-frame chrome on real phones
+  const isStandalone = (typeof window !== "undefined" && (
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+    (window.navigator && window.navigator.standalone === true) // iOS Safari legacy flag
+  )) || false;
+  const isNarrow = typeof window !== "undefined" ? window.innerWidth <= 480 : false;
+  const showFrameChrome = !(isStandalone || isNarrow);
+
   // Tapping any bottom tab — including the one already active — pops
   // back to that tab's root, matching standard "tap active tab to go
   // home" behavior. Filter preferences (ledgerCategoryFilter) persist;
@@ -3406,11 +3414,31 @@ export default function HavenProApp() {
     .hp-nav-btn:active { transform: scale(0.92); }
   `;
 
+  // Compute outer and inner frame styles to support full-bleed on phones
+  const outerStyle = showFrameChrome
+    ? { minHeight: "100vh", background: "linear-gradient(155deg,#C7D2CB 0%,#B9C7BE 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT }
+    : {
+        minHeight: "100dvh",
+        background: T.bg,
+        display: "flex",
+        flexDirection: "column",
+        fontFamily: FONT,
+        padding: 0,
+        // Respect iOS safe areas when launched standalone
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+      };
+  const frameStyle = showFrameChrome
+    ? { width: 390, height: 844, background: T.bg, borderRadius: 46, overflow: "hidden", boxShadow: "0 32px 80px rgba(15,26,23,.30), 0 0 0 1px rgba(15,26,23,.08)", display: "flex", flexDirection: "column", position: "relative" }
+    : { width: "100%", minHeight: "100dvh", background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
+
   return (
     <>
       <style>{CSS}</style>
-      <div className="haven-pro-frame-outer" style={{ minHeight: "100vh", background: "linear-gradient(155deg,#C7D2CB 0%,#B9C7BE 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT }}>
-        <div className="hp-phone-frame" style={{ width: 390, height: 844, background: T.bg, borderRadius: 46, overflow: "hidden", boxShadow: "0 32px 80px rgba(15,26,23,.30), 0 0 0 1px rgba(15,26,23,.08)", display: "flex", flexDirection: "column", position: "relative" }}>
+      <div className="haven-pro-frame-outer" style={outerStyle}>
+        <div className="hp-phone-frame" style={frameStyle}>
           <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
             {needsOnboarding ? onboardingScreen() : (
               <>
