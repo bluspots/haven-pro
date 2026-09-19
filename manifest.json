@@ -1,7 +1,7 @@
 {
   "name": "Haven Pro",
   "short_name": "Haven Pro",
-  "description": "Book vetted home service pros with fixed pricing and same-day availability.",
+  "description": "Find nearby jobs and manage your schedule — the Haven Pro app for home service professionals.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
