@@ -60,6 +60,7 @@ const CATEGORY_GROUPS = [
 ];
 const CATEGORIES = CATEGORY_GROUPS.flatMap(g => g.categories);
 const DIAGNOSIS_CATEGORIES = new Set(["Plumbing", "Electrical", "HVAC", "Appliance Repair"]);
+const INSPECTION_VISIT_FEE = 45;
 const STATUS_LABELS = {
   en_route: "Driving to Job",
   arrived: "Arrived",
@@ -807,8 +808,10 @@ function HavenProApp() {
       showToast(`Customer approved materials for ${job.title} (simulated) — go ahead and purchase, then submit your receipt`);
     } else {
       setActiveJobs(prev => prev.filter(j => j.id !== jobId));
-      showToast(`Customer declined materials for ${job.title} (simulated) — job ends as Inspection Completed`);
-      finalizeJob(job, "inspection_completed");
+      const hasInspectionFee = (job.inspectionFee || 0) > 0;
+      const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
+      showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed — Inspection Visit $${fee}`);
+      finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
       setMyJobsStack([{ view: "list" }]);
     }
   }
@@ -2837,7 +2840,7 @@ function HavenProApp() {
 
   const FAQ_ITEMS = [
     { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job — it's exactly what you receive, with no fee deducted. Materials reimbursement and tips are 100% yours too." },
-    { q: "What happens if a customer declines materials?", a: "The job ends as Inspection Completed and you're paid the full Inspection Visit amount — no deduction." },
+  { q: "What happens if a customer declines materials?", a: "The job ends as Inspection Completed and you're paid the Inspection Visit amount ($45). If your category already includes a predefined Inspection/Diagnosis Visit fee, that still applies." },
     { q: "How do I get reimbursed for materials?", a: "Once a customer approves your request, go make the purchase, then submit the actual cost and a receipt photo in the app. You're reimbursed 100% — no platform fee, even if the actual cost differs from your estimate." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." },
   ];
