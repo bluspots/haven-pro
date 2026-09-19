@@ -3094,7 +3094,17 @@ function HavenProApp() {
         {formField("Email", d.email, v => set("email", v), "you@example.com")}
         {formField("Phone Number", d.phone, v => set("phone", v), "(555) 123-4567")}
         {formField("Password", d.password, v => set("password", v), "At least 6 characters")}
+        {d.password.length > 0 && d.password.length < 6 && (
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginTop: 4 }}>
+            Password must be at least 6 characters
+          </div>
+        )}
         {formField("Confirm Password", d.confirm, v => set("confirm", v), "Re-enter your password")}
+        {d.confirm.length > 0 && d.password !== d.confirm && (
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginTop: 4 }}>
+            Passwords don't match
+          </div>
+        )}
         <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 4 }}>🍎 Sign in with Apple · G Sign in with Google — coming soon</div>
       </>
     ), { enabled: !!valid, onClick: submit });
