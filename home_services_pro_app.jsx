@@ -307,6 +307,93 @@ export default function HavenProApp() {
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("all");
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
 
+  // ── CHUNK 2: Supabase-backed available jobs (read-only)
+  // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
+  const SUPABASE_URL_KEY = "haven_supabase_url";
+  const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
+
+  function getSupabaseConfig() {
+    try {
+      const urlRaw = window.localStorage.getItem(SUPABASE_URL_KEY);
+      const anon = window.localStorage.getItem(SUPABASE_ANON_KEY);
+      if (!urlRaw || !anon) return null;
+      const url = urlRaw.replace(/\\/+$/, ""); // strip trailing slash
+      return { url, anon };
+    } catch {
+      return null;
+    }
+  }
+
+  function mapSupabaseRowToJob(row) {
+    // Canonical mapping — see Customer Chunk 1 schema
+    const inspectionFeeCents = row.inspection_fee_cents ?? 0;
+    return {
+      id: String(row.id), // MUST be the backend UUID
+      customerName: "Haven customer", // no PII yet
+      category: row.category,
+      title: row.title,
+      payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : 0,
+      inspectionFee: inspectionFeeCents > 0 ? Math.round(inspectionFeeCents / 100) : undefined,
+      // Distance and duration are not provided by backend yet — UI tolerates missing values (see tradeBoardCard/eligibleJobs).
+      distanceMi: undefined,
+      durationMin: undefined,
+      city: row.city_label || "",
+      lat: row.lat ?? null,
+      lng: row.lng ?? null,
+      requested: "ASAP",
+      emergency: !!row.emergency,
+      postedAt: row.posted_at ? Date.parse(row.posted_at) : Date.now(),
+    };
+  }
+
+  async function fetchPostedJobsFromSupabase() {
+    const cfg = getSupabaseConfig();
+    if (!cfg) return null; // not configured — leave SIM_JOBS in place
+    const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&order=posted_at.desc`;
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "apikey": cfg.anon,
+          "Authorization": `Bearer ${cfg.anon}`,
+          "Accept": "application/json",
+          "Prefer": "count=exact",
+        },
+      });
+      if (!res.ok) {
+        console.warn("Supabase jobs fetch failed", res.status, await res.text());
+        return [];
+      }
+      const rows = await res.json();
+      if (!Array.isArray(rows)) return [];
+      return rows.map(mapSupabaseRowToJob);
+    } catch (e) {
+      console.warn("Supabase jobs fetch error", e);
+      return [];
+    }
+  }
+
+  // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
+  useEffect(() => {
+    let cancelled = false;
+    let timerId = null;
+    async function load() {
+      const jobs = await fetchPostedJobsFromSupabase();
+      if (jobs && !cancelled) {
+        // Replace SIM_JOBS entirely when backend is configured (even if empty)
+        setAvailableJobs(jobs);
+      }
+    }
+    if (tab === "home" && getSupabaseConfig()) {
+      load();
+      timerId = window.setInterval(load, 30000); // ~30s refresh cadence
+    }
+    return () => {
+      cancelled = true;
+      if (timerId) window.clearInterval(timerId);
+    };
+  }, [tab]);
+
   // Profile sub-navigation + drafts (draft/commit pattern so typing never silently saves)
   const [profileView, setProfileView] = useState("main"); // main | edit | categories | settings
   const [editDraft, setEditDraft] = useState(null);
@@ -589,7 +676,8 @@ export default function HavenProApp() {
      the board's own structure, not a separate filter step. ── */
   const proState = stateOf(homeCity);
   const geoCategoryPassed = availableJobs.filter(j => stateOf(j.city) === proState && workCategories.has(j.category));
-  const eligibleJobs = geoCategoryPassed.filter(j => j.distanceMi <= travelRadius);
+  // Treat missing distanceMi as eligible so backend jobs without simulated distances still surface.
+  const eligibleJobs = geoCategoryPassed.filter(j => j.distanceMi == null || j.distanceMi <= travelRadius);
   const boardJobs = eligibleJobs.filter(j => !emergencyOnly || j.emergency);
 
   // Sections ordered by sectionOrder — defaults to the pro's own
@@ -1113,11 +1201,18 @@ export default function HavenProApp() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{job.title}</div>
-            <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 1 }}>📍 {job.distanceMi} mi · ⏱ ~{job.durationMin} min</div>
+            {(() => {
+              const parts = [];
+              if (job.distanceMi != null) parts.push(`📍 ${job.distanceMi} mi`);
+              if (job.durationMin != null) parts.push(`⏱ ~${job.durationMin} min`);
+              return parts.length > 0
+                ? <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 1 }}>{parts.join(" · ")}</div>
+                : null;
+            })()}
           </div>
           <div style={{ fontSize: 21, fontWeight: 900, color: T.pg, fontFamily: FONT, letterSpacing: -0.4, flexShrink: 0, marginLeft: 10 }}>${job.payout}</div>
         </div>
-        {diagnosis && (
+        {diagnosis && job.inspectionFee != null && (
           <div style={{ fontSize: 11, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 6 }}>
             Inspection Visit: ${job.inspectionFee} if repair can't proceed
           </div>
@@ -1426,11 +1521,11 @@ export default function HavenProApp() {
             <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 10 }}>{job.category} · {job.city}</div>
             <div style={{ fontSize: 11, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3 }}>Labor Payout</div>
             <div style={{ fontSize: 26, fontWeight: 900, color: T.pg, fontFamily: FONT, marginBottom: diagnosis ? 6 : 12 }}>${job.payout}</div>
-            {diagnosis && <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 12 }}>Inspection Visit: ${job.inspectionFee} if the repair can't proceed</div>}
+            {diagnosis && job.inspectionFee != null && <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 12 }}>Inspection Visit: ${job.inspectionFee} if the repair can't proceed</div>}
             <div style={{ display: "flex", gap: 18 }}>
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" }}>Distance</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 }}>📍 {job.distanceMi} mi</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 }}>{job.distanceMi != null ? `📍 ${job.distanceMi} mi` : "—"}</div>
               </div>
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" }}>Requested</div>
