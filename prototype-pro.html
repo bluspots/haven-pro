@@ -344,7 +344,8 @@ function HavenProApp() {
       const urlRaw = window.localStorage.getItem(SUPABASE_URL_KEY);
       const anon = window.localStorage.getItem(SUPABASE_ANON_KEY);
       if (!urlRaw || !anon) return null;
-      const url = urlRaw.replace(/\\/+$/, ""); // strip trailing slash
+      let url = urlRaw;
+      while (url.endsWith("/")) url = url.slice(0, -1); // strip trailing slash
       return { url, anon };
     } catch {
       return null;
