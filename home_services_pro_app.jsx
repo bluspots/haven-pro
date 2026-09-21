@@ -48,6 +48,12 @@ const CATEGORY_GROUPS = [
 const CATEGORIES = CATEGORY_GROUPS.flatMap(g => g.categories);
 const DIAGNOSIS_CATEGORIES = new Set(["Plumbing", "Electrical", "HVAC", "Appliance Repair"]);
 const INSPECTION_VISIT_FEE = 45;
+const CONVENIENCE_FEE = 30;
+function jobRequiresDiagnosis(job) {
+  return job && Object.prototype.hasOwnProperty.call(job, "requiresDiagnosis")
+    ? !!job.requiresDiagnosis
+    : DIAGNOSIS_CATEGORIES.has(job.category);
+}
 const STATUS_LABELS = {
   en_route: "Driving to Job",
   arrived: "Arrived",
@@ -131,7 +137,12 @@ function dayOffsetThisWeek(dayIndex, hour) {
   return d.getTime();
 }
 function jobAmount(job) {
-  const gross = job.status === "inspection_completed" ? job.inspectionFee : job.payout;
+  const gross =
+    job.status === "inspection_completed"
+      ? job.inspectionFee
+      : job.status === "materials_declined"
+        ? (job.convenienceFee || CONVENIENCE_FEE)
+        : job.payout;
   const materials = job.materialsReimbursed || 0;
   const tip = job.tipAmount || 0;
   const net = gross + materials + tip;
@@ -306,11 +317,16 @@ export default function HavenProApp() {
   const [selectedBucket, setSelectedBucket] = useState(null); // { start, end, fullLabel } — inline swap on the main screen's chart, any period
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("all");
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
+  const [acceptingJobId, setAcceptingJobId] = useState(null);
 
   // ── CHUNK 2: Supabase-backed available jobs (read-only)
   // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
   const SUPABASE_URL_KEY = "haven_supabase_url";
   const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
+  const DEMO_PRO_ID = "22222222-2222-4222-8222-222222222222"; // demo pro_id used when claiming backend jobs
+  function looksLikeUuid(id) {
+    return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+  }
 
   function getSupabaseConfig() {
     try {
@@ -335,6 +351,7 @@ export default function HavenProApp() {
       title: row.title,
       payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : 0,
       inspectionFee: inspectionFeeCents > 0 ? Math.round(inspectionFeeCents / 100) : undefined,
+      requiresDiagnosis: !!row.requires_diagnosis,
       // Distance and duration are not provided by backend yet — UI tolerates missing values (see tradeBoardCard/eligibleJobs).
       distanceMi: undefined,
       durationMin: undefined,
@@ -371,6 +388,39 @@ export default function HavenProApp() {
     } catch (e) {
       console.warn("Supabase jobs fetch error", e);
       return [];
+    }
+  }
+
+  // Best-effort terminal status sync back to Supabase after a decline (only if this job was backend-claimed)
+  async function bestEffortPatchTerminalStatus(job, finalStatus) {
+    try {
+      const cfg = getSupabaseConfig();
+      if (!cfg) return;
+      if (!looksLikeUuid(job.id)) return;
+      if (!job.backendClaimed) return;
+      const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}`;
+      const body = { status: finalStatus };
+      if (finalStatus === "inspection_completed") {
+        const cents = Math.round(((job.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
+        body.inspection_fee_cents = cents;
+      } else if (finalStatus === "materials_declined") {
+        body.convenience_fee_cents = CONVENIENCE_FEE * 100;
+      }
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: {
+          "apikey": cfg.anon,
+          "Authorization": `Bearer ${cfg.anon}`,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        console.warn("Supabase terminal status sync failed", res.status, await res.text());
+      }
+    } catch (e) {
+      console.warn("Supabase terminal status sync error", e);
     }
   }
 
@@ -762,7 +812,7 @@ export default function HavenProApp() {
      App connection here, it's simulated: auto-resolves after a short
      delay, weighted toward approval, and every simulated resolution says
      so explicitly in its toast rather than pretending to be real. ── */
-  function acceptJob(job) {
+  async function acceptJob(job) {
     if (activeJobs.length > 0) {
       showToast("Finish your current job to accept another.");
       return;
@@ -774,6 +824,54 @@ export default function HavenProApp() {
       return;
     }
     if (!online) { showToast("Go online to accept jobs"); return; }
+    const cfg = getSupabaseConfig();
+    const isBackendJob = !!cfg && looksLikeUuid(job.id);
+    if (isBackendJob) {
+      if (acceptingJobId === job.id) return;
+      setAcceptingJobId(job.id);
+      try {
+        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.posted&pro_id=is.null`;
+        const body = { status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: new Date().toISOString() };
+        const res = await fetch(url, {
+          method: "PATCH",
+          headers: {
+            "apikey": cfg.anon,
+            "Authorization": `Bearer ${cfg.anon}`,
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+          },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          if (res.status === 409) {
+            showToast("You already have an active job — finish it before accepting another.");
+          } else {
+            console.warn("Supabase accept failed", res.status, text);
+            showToast("Claim failed — already taken or network issue. Try another job.");
+          }
+          return;
+        }
+        const rows = await res.json();
+        if (!Array.isArray(rows) || rows.length === 0) {
+          showToast("Claim failed — already taken. Try another job.");
+          return;
+        }
+        // Success — perform local accept
+        setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
+        setActiveJobs(prev => [...prev, { ...job, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed: true }]);
+        setTab("jobs");
+        setMyJobsStack([{ view: "detail", jobId: job.id }]);
+        showToast(`Accepted — ${job.title}`);
+      } catch (e) {
+        console.warn("Supabase accept error", e);
+        showToast("Claim failed — network issue. Try again.");
+      } finally {
+        setAcceptingJobId(null);
+      }
+      return;
+    }
+    // Local-only accept (SIM or no Supabase config / non-UUID id)
     setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
     setActiveJobs(prev => [...prev, { ...job, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null }]);
     setTab("jobs");
@@ -892,10 +990,17 @@ export default function HavenProApp() {
       showToast(`Customer approved materials for ${job.title} (simulated) — go ahead and purchase, then submit your receipt`);
     } else {
       setActiveJobs(prev => prev.filter(j => j.id !== jobId));
-      const hasInspectionFee = (job.inspectionFee || 0) > 0;
-      const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
-      showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed — Inspection Visit $${fee}`);
-      finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
+      const diagnosisPath = jobRequiresDiagnosis(job);
+      if (diagnosisPath) {
+        const hasInspectionFee = (job.inspectionFee || 0) > 0;
+        const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
+        showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed — Inspection Visit $${fee}`);
+        finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
+      } else {
+        const convenienceFee = CONVENIENCE_FEE;
+        showToast(`Materials declined — job could not be completed — Convenience Fee $${convenienceFee}`);
+        finalizeJob({ ...job, convenienceFee }, "materials_declined");
+      }
       setMyJobsStack([{ view: "list" }]);
     }
   }
@@ -916,6 +1021,7 @@ export default function HavenProApp() {
       status: finalStatus,
       payout: job.payout,
       inspectionFee: job.inspectionFee || 0,
+      convenienceFee: job.convenienceFee || 0,
       tipAmount, tipStatus: tipAmount > 0 ? "paid" : "notAdded",
       materialsReimbursed: job.materialsReimbursed || 0,
       materialsReceiptPhoto: job.materialsReceiptPhoto || null,
@@ -929,6 +1035,10 @@ export default function HavenProApp() {
     };
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
+    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
+      // fire-and-forget; local history is authoritative in the prototype
+      bestEffortPatchTerminalStatus(job, finalStatus);
+    }
     return record;
   }
 
@@ -1189,8 +1299,9 @@ export default function HavenProApp() {
      fit per category section, but still leads with the exact labor payout
      and never hides the Inspection Visit line. ── */
   function tradeBoardCard(job) {
-    const diagnosis = DIAGNOSIS_CATEGORIES.has(job.category);
+    const diagnosis = jobRequiresDiagnosis(job);
     const blockedLabel = activeJobs.length > 0 ? "Finish Current Job First" : !marketplaceReady ? "Complete Verification" : !online ? "Go Online to Accept" : null;
+    const disabled = !!blockedLabel || acceptingJobId === job.id;
     return (
       <div key={job.id} style={{ background: T.w, borderRadius: 16, padding: 14, marginBottom: 8, border: `1px solid ${T.bd}` }}>
         {(job.emergency || diagnosis) && (
@@ -1223,13 +1334,13 @@ export default function HavenProApp() {
         </div>
         <button
           className="hp-accept-btn"
-          onClick={() => acceptJob(job)}
+          onClick={disabled ? undefined : () => acceptJob(job)}
           style={{
             width: "100%", padding: "10px 0", borderRadius: 12, border: "none", fontSize: 13.5, fontWeight: 800, fontFamily: FONT,
-            cursor: "pointer", color: blockedLabel ? T.tm : "#FFFFFF", background: blockedLabel ? T.soonBg : T.pgb,
+            cursor: "pointer", color: disabled ? T.tm : "#FFFFFF", background: disabled ? T.soonBg : T.pgb,
           }}
         >
-          {blockedLabel || "Accept Job"}
+          {blockedLabel || (acceptingJobId === job.id ? "Accepting…" : "Accept Job")}
         </button>
       </div>
     );
@@ -1343,7 +1454,7 @@ export default function HavenProApp() {
      on the compact My Jobs card and the full detail screen, so behavior
      never diverges between the two. ── */
   function statusActions(job) {
-    const diagnosis = DIAGNOSIS_CATEGORIES.has(job.category);
+    const diagnosis = jobRequiresDiagnosis(job);
     const btnStyle = (primary) => ({
       flex: 1, padding: "12px 18px", borderRadius: 12, border: "none", fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer",
       color: primary ? "#FFFFFF" : T.pg, background: primary ? T.pgb : T.pgt, textAlign: "center",
@@ -1504,7 +1615,7 @@ export default function HavenProApp() {
   function activeJobDetailScreen(jobId) {
     const job = activeJobs.find(j => j.id === jobId);
     if (!job) return myJobsListScreen();
-    const diagnosis = DIAGNOSIS_CATEGORIES.has(job.category);
+    const diagnosis = jobRequiresDiagnosis(job);
     const steps = diagnosis
       ? ["en_route", "arrived", "diagnosing", "in_progress", "complete"]
       : ["en_route", "arrived", "in_progress", "complete"];
@@ -1896,6 +2007,7 @@ export default function HavenProApp() {
   function ledgerRow(job) {
     const a = jobAmount(job);
     const isInspectionOnly = job.status === "inspection_completed";
+    const isMaterialsDeclined = job.status === "materials_declined";
     return (
       <button
         key={job.id}
@@ -1913,12 +2025,12 @@ export default function HavenProApp() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: isInspectionOnly ? T.dxTx : T.pgd, background: isInspectionOnly ? T.dxBg : T.pgt, border: `1px solid ${isInspectionOnly ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
-            {isInspectionOnly ? "Inspection Completed" : "Full Repair"}
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: (isInspectionOnly || isMaterialsDeclined) ? T.dxTx : T.pgd, background: (isInspectionOnly || isMaterialsDeclined) ? T.dxBg : T.pgt, border: `1px solid ${(isInspectionOnly || isMaterialsDeclined) ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
+            {isInspectionOnly ? "Inspection Completed" : isMaterialsDeclined ? "Materials declined — job could not be completed" : "Full Repair"}
           </span>
         </div>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, fontWeight: 600, color: T.ts, borderTop: `1px solid ${T.bd}`, paddingTop: 8 }}>
-          <span>{isInspectionOnly ? "Inspection Visit" : "Labor Payout"} ${a.gross}</span>
+          <span>{isInspectionOnly ? "Inspection Visit" : isMaterialsDeclined ? "Convenience Fee" : "Labor Payout"} ${a.gross}</span>
           {a.tip > 0 && <span>Tip +${a.tip}</span>}
           {a.materials > 0 && <span>Materials +${a.materials}</span>}
         </div>
@@ -2162,6 +2274,7 @@ export default function HavenProApp() {
   function earningsStatementBody(job) {
     const a = jobAmount(job);
     const isInspectionOnly = job.status === "inspection_completed";
+    const isMaterialsDeclined = job.status === "materials_declined";
     const statement = earningsStatements.find(s => s.jobId === job.id);
     const row = (label, value, muted) => (
       <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.bd}` }}>
@@ -2180,8 +2293,8 @@ export default function HavenProApp() {
             ⏱ On the job {job.actualDurationMin} min (est. ~{job.durationMin} min)
           </div>
         )}
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: isInspectionOnly ? T.dxTx : T.pgd, background: isInspectionOnly ? T.dxBg : T.pgt, border: `1px solid ${isInspectionOnly ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
-          {isInspectionOnly ? "Inspection Completed" : "Full Repair"}
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: (isInspectionOnly || isMaterialsDeclined) ? T.dxTx : T.pgd, background: (isInspectionOnly || isMaterialsDeclined) ? T.dxBg : T.pgt, border: `1px solid ${(isInspectionOnly || isMaterialsDeclined) ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
+          {isInspectionOnly ? "Inspection Completed" : isMaterialsDeclined ? "Materials declined — job could not be completed" : "Full Repair"}
         </span>
 
         {job.jobNotes && (
@@ -2198,7 +2311,7 @@ export default function HavenProApp() {
         )}
 
         <div style={{ marginTop: 18 }}>
-          {row(isInspectionOnly ? "Inspection Visit" : "Labor Payout", `$${a.gross}`)}
+          {row(isInspectionOnly ? "Inspection Visit" : isMaterialsDeclined ? "Convenience Fee" : "Labor Payout", `$${a.gross}`)}
           {a.tip > 0 && row("Tip (100% to you)", `+$${a.tip}`)}
           {a.materials > 0 && row(`Materials Reimbursed (pass-through)${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
         </div>
