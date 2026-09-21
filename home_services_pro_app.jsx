@@ -3058,7 +3058,7 @@ export default function HavenProApp() {
 
   const FAQ_ITEMS = [
     { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job — it's exactly what you receive, with no fee deducted. Materials reimbursement and tips are 100% yours too." },
-  { q: "What happens if a customer declines materials?", a: "The job ends as Inspection Completed and you're paid the Inspection Visit amount ($45). If your category already includes a predefined Inspection/Diagnosis Visit fee, that still applies." },
+  { q: "What happens if a customer declines materials?", a: "The outcome depends on the path. Diagnosis: Inspection Completed + $45 Inspection Visit (Haven $0). Standard: Materials declined — job could not be completed + $30 convenience fee (Haven $0)." },
     { q: "How do I get reimbursed for materials?", a: "Once a customer approves your request, go make the purchase, then submit the actual cost and a receipt photo in the app. You're reimbursed 100% — no platform fee, even if the actual cost differs from your estimate." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." },
   ];
