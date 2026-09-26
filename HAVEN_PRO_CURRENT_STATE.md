@@ -1,5 +1,9 @@
 # HAVEN PRO — CURRENT STATE
 
+Source of truth for product/job rules:  
+`HAVEN_JOB_CONTRACT.md` (Customer repo) — https://github.com/bluspots/bluspots.github.io/blob/master/HAVEN_JOB_CONTRACT.md  
+Technical schema/enforcement: `HAVEN_SHARED_BACKEND_CONTRACT.md` (Customer/shared; link there when available).
+
 **Last updated:** First-Time Experience + Blank-Slate App + Active Job Workflow
 
 ## CURRENTLY BUILT
@@ -19,7 +23,7 @@ None open. This slice closed out the onboarding/blank-slate milestone.
 Job-specific credential eligibility (`isEligibleForJob`) — stub exists, always returns true, not wired to anything. Needs a reviewed jurisdiction/service rules matrix. Otherwise, awaiting next direction — likely shared-sandbox integration with the Customer App, per the project's original phasing.
 
 ## IMPORTANT OPEN DECISIONS
-- Standard (non-diagnosis) categories still have no fallback fee if materials are declined mid-job — pro is paid $0 in that case. Flagged repeatedly, never resolved.
+- Standard (non-diagnosis) categories now use a flat $30 Convenience Fee when materials are declined mid-job. Diagnosis-required paths continue to end at “Inspection Completed” with a $45 Inspection Visit. These economics are locked; Customer-side alignment remains a follow-up.
 - Which specific 1099 Haven will issue is explicitly not hardcoded anywhere — needs tax/legal review first.
 - Contextual first-time tips (Job Board explainer, "we'll guide you through each step" on first accepted job) were specified but not built this slice — onboarding and the readiness gate cover the substance; the lightweight in-context nudges are still open.
 

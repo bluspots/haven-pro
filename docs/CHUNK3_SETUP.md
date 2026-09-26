@@ -2,6 +2,10 @@
 
 This slice wires Pro Accept against the shared Supabase backend and adds a standard materials-decline ending distinct from the diagnosis path.
 
+Source of truth for product/job rules:  
+`HAVEN_JOB_CONTRACT.md` (Customer repo) — https://github.com/bluspots/bluspots.github.io/blob/master/HAVEN_JOB_CONTRACT.md  
+Technical schema/enforcement: `HAVEN_SHARED_BACKEND_CONTRACT.md` (Customer/shared; link there when available).
+
 ## Supabase-backed Accept
 
 - Demo `pro_id` used when claiming: `22222222-2222-4222-8222-222222222222`.
