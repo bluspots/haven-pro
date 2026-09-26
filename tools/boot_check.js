@@ -140,6 +140,15 @@ async function main() {
     console.log("Boot check: executed and rendered content.");
   }
   console.log(`OK: Verified concat-built HTML (${path.basename(htmlPath)}).`);
+  // Explicitly close jsdom window and exit to avoid lingering handles
+  try {
+    if (dom && dom.window && typeof dom.window.close === "function") {
+      dom.window.close();
+    }
+  } catch (_) {
+    // ignore cleanup errors
+  }
+  process.exit(0);
 }
 
 main().catch((err) => {
