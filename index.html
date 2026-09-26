@@ -26,29 +26,7 @@
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useRef, useEffect } = React;
-
-/* ══════════════════════════════════════════════════════════════════════
-   HAVEN PRO — DESIGN TOKENS
-   Approved green accent system is unchanged. Neutrals are now themed
-   (light/dark) since Settings > Appearance is real in this slice.
-   ══════════════════════════════════════════════════════════════════════ */
-
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
-
-const LIGHT = {
-  bg: "#F3F4F1", w: "#FFFFFF", tx: "#16211D", ts: "#57645D", tm: "#94A39B", bd: "#DEE5DF",
-  pg: "#0F6E4E", pgd: "#0A4F38", pgt: "#E7F4EC", pgb: "#16A34A",
-  emTx: "#C2410C", emBg: "#FFF1EE", emBd: "#FFD4C7",
-  dxTx: "#43536B", dxBg: "#EEF1F5", dxBd: "#D7DEE6",
-  soonBg: "#EDEFEC",
-};
-const DARK = {
-  bg: "#111815", w: "#1A2320", tx: "#EDF3EF", ts: "#9FB3AA", tm: "#5E7368", bd: "#293832",
-  pg: "#34C48E", pgd: "#1C8A61", pgt: "#123B2C", pgb: "#22C55E",
-  emTx: "#FF8A65", emBg: "#3A1F14", emBd: "#5C2E1C",
-  dxTx: "#AEBBD1", dxBg: "#232B36", dxBd: "#333F4E",
-  soonBg: "#22302B",
-};
+// Duplicated constants across apps; consolidate later in Phase 3.
 
 /* ── Category taxonomy — the complete platform list, grouped for the
    Manage Work Categories screen ── */
@@ -76,11 +54,7 @@ const CATEGORIES = CATEGORY_GROUPS.flatMap(g => g.categories);
 const DIAGNOSIS_CATEGORIES = new Set(["Plumbing", "Electrical", "HVAC", "Appliance"]);
 const INSPECTION_VISIT_FEE = 45;
 const CONVENIENCE_FEE = 30;
-function jobRequiresDiagnosis(job) {
-  return job && Object.prototype.hasOwnProperty.call(job, "requiresDiagnosis")
-    ? !!job.requiresDiagnosis
-    : DIAGNOSIS_CATEGORIES.has(job.category);
-}
+
 const STATUS_LABELS = {
   en_route: "Driving to Job",
   arrived: "Arrived",
@@ -98,6 +72,14 @@ const ACTIVE_BLOCK_STATUSES = new Set([
   "materials_approved",
   "in_progress",
 ]);
+
+const DEFAULT_WORK_CATEGORIES = ["Plumbing", "Electrical", "HVAC", "Appliance", "Handyman"];
+
+function jobRequiresDiagnosis(job) {
+  return job && Object.prototype.hasOwnProperty.call(job, "requiresDiagnosis")
+    ? !!job.requiresDiagnosis
+    : DIAGNOSIS_CATEGORIES.has(job.category);
+}
 function hasBlockingActiveJob(jobs) {
   return jobs.some(j => ACTIVE_BLOCK_STATUSES.has(j.status));
 }
@@ -121,6 +103,19 @@ function haversineMiles(lat1, lng1, lat2, lng2) {
 }
 const ARRIVAL_THRESHOLD_MI = 0.15; // roughly "on the same block"
 
+function jobAmount(job) {
+  const gross =
+    job.status === "inspection_completed"
+      ? job.inspectionFee
+      : job.status === "materials_declined"
+        ? (job.convenienceFee || CONVENIENCE_FEE)
+        : job.payout;
+  const materials = job.materialsReimbursed || 0;
+  const tip = job.tipAmount || 0;
+  const net = gross + materials + tip;
+  return { gross, materials, tip, net };
+}
+
 /* ── Simulated job feed. Includes deliberate exclusion cases:
    j2/j4/j5 are outside the pro's default work categories.
    j7 matches category + is emergency, but is in NY — proves
@@ -137,11 +132,6 @@ const SIM_JOBS = [
   { id: "j5", customerName: "Monique D.",  category: "Cleaning",          title: "House Cleaning",      payout: 80,                     distanceMi: 4.2, durationMin: 90, city: "Orlando, FL",     lat: 28.5440, lng: -81.3690, requested: "Today, 4:00 PM",    emergency: false, postedAt: Date.now() - 3 * 60 * 1000 },
   { id: "j7", customerName: "Ethan V.",  category: "Plumbing",          title: "Leak Repair",         payout: 175, inspectionFee: 45, distanceMi: 3.0, durationMin: 60, city: "Brooklyn, NY",    lat: 40.6782, lng: -73.9442, requested: "ASAP",              emergency: true,  postedAt: Date.now() - 10 * 60 * 1000 },
 ];
-
-
-const DEFAULT_WORK_CATEGORIES = ["Plumbing", "Electrical", "HVAC", "Appliance", "Handyman"];
-const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
-const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
 /* ── Earnings — simulated completed-job history. Field names follow the
    contract's canonical shape: status ('complete' | 'inspection_completed'),
@@ -175,21 +165,7 @@ function dayOffsetThisWeek(dayIndex, hour) {
   d.setHours(hour || 12, 0, 0, 0);
   return d.getTime();
 }
-function jobAmount(job) {
-  const gross =
-    job.status === "inspection_completed"
-      ? job.inspectionFee
-      : job.status === "materials_declined"
-        ? (job.convenienceFee || CONVENIENCE_FEE)
-        : job.payout;
-  const materials = job.materialsReimbursed || 0;
-  const tip = job.tipAmount || 0;
-  const net = gross + materials + tip;
-  return { gross, materials, tip, net };
-}
-function formatShortDate(ts) {
-  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
+ 
 const SIM_COMPLETED_JOBS = [
   // This week (day-of-week anchored — entries land only where the date has actually occurred)
   { id: "c1", category: "Plumbing",          title: "Faucet Install",       city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 110, inspectionFee: 45, tipAmount: 20, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 30, completedAt: dayOffsetThisWeek(1, 10) },
@@ -210,19 +186,6 @@ const SIM_COMPLETED_JOBS = [
   { id: "c15", category: "Handyman",          title: "Ceiling Fan Install", city: "Winter Park, FL", requiresDiagnosis: false, status: "complete",                payout: 70,                      tipAmount: 15, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 35, completedAt: daysAgo(52) },
   { id: "c16", category: "Cleaning",          title: "House Cleaning",      city: "Orlando, FL",     requiresDiagnosis: false, status: "complete",                payout: 80,                      tipAmount: 10, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 85, completedAt: daysAgo(63) },
 ].filter(j => j.completedAt <= Date.now());
-
-/* ── Centralized job-age formatter — informational only, never used to
-   rank or highlight a job ── */
-function formatJobAge(postedAt, now) {
-  const diffMs = Math.max(0, now - postedAt);
-  const min = Math.floor(diffMs / 60000);
-  if (min < 1) return "Posted just now";
-  if (min < 60) return `Posted ${min} min ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `Posted ${hr} hr ago`;
-  if (hr < 48) return "Posted yesterday";
-  return `Posted ${Math.floor(hr / 24)} days ago`;
-}
 
 /* ── Fresh vs. Demo Pro — the two states "Reset to Fresh Pro" and "Load
    Demo Pro" (dev-only) switch between. Fresh is now the TRUE starting
@@ -275,6 +238,54 @@ function demoProDefaults() {
     earningsStatements: [],
   };
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   HAVEN PRO — DESIGN TOKENS
+   Approved green accent system is unchanged. Neutrals are now themed
+   (light/dark) since Settings > Appearance is real in this slice.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
+
+const LIGHT = {
+  bg: "#F3F4F1", w: "#FFFFFF", tx: "#16211D", ts: "#57645D", tm: "#94A39B", bd: "#DEE5DF",
+  pg: "#0F6E4E", pgd: "#0A4F38", pgt: "#E7F4EC", pgb: "#16A34A",
+  emTx: "#C2410C", emBg: "#FFF1EE", emBd: "#FFD4C7",
+  dxTx: "#43536B", dxBg: "#EEF1F5", dxBd: "#D7DEE6",
+  soonBg: "#EDEFEC",
+};
+const DARK = {
+  bg: "#111815", w: "#1A2320", tx: "#EDF3EF", ts: "#9FB3AA", tm: "#5E7368", bd: "#293832",
+  pg: "#34C48E", pgd: "#1C8A61", pgt: "#123B2C", pgb: "#22C55E",
+  emTx: "#FF8A65", emBg: "#3A1F14", emBd: "#5C2E1C",
+  dxTx: "#AEBBD1", dxBg: "#232B36", dxBd: "#333F4E",
+  soonBg: "#22302B",
+};
+
+
+const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
+const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
+
+ 
+function formatShortDate(ts) {
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+ 
+
+/* ── Centralized job-age formatter — informational only, never used to
+   rank or highlight a job ── */
+function formatJobAge(postedAt, now) {
+  const diffMs = Math.max(0, now - postedAt);
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return "Posted just now";
+  if (min < 60) return `Posted ${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `Posted ${hr} hr ago`;
+  if (hr < 48) return "Posted yesterday";
+  return `Posted ${Math.floor(hr / 24)} days ago`;
+}
+
+ 
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
