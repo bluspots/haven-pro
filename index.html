@@ -347,14 +347,8 @@ async function fetchPostedJobsFromSupabase() {
 async function fetchActiveJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave session-only behavior in place
-  const activeStatuses = [
-    "en_route",
-    "arrived",
-    "diagnosing",
-    "materials_requested",
-    "materials_approved",
-    "in_progress",
-  ];
+  // Align exactly with the local one-active gate
+  const activeStatuses = Array.from(ACTIVE_BLOCK_STATUSES);
   const statusList = activeStatuses.join(",");
   const url =
     `${cfg.url}/rest/v1/jobs?` +
@@ -377,7 +371,9 @@ async function fetchActiveJobsFromSupabase() {
     }
     const rows = await res.json();
     if (!Array.isArray(rows)) return [];
-    return rows.map(row => {
+    // Defensive: filter to statuses we consider active locally, even if backend returns extra
+    const clean = rows.filter(r => r && activeStatuses.includes(r.status));
+    return clean.map(row => {
       const base = mapSupabaseRowToJob(row);
       const acceptedAt =
         row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
@@ -1338,8 +1334,9 @@ function HavenProApp() {
     };
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
-    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
-      // fire-and-forget; local history is authoritative in the prototype
+    // Fire-and-forget terminal status sync to backend-claimed jobs so rehydrate won't resurrect them.
+    // Covers all terminal endings used in this repo per Job Contract.
+    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined" || finalStatus === "complete") {
       bestEffortPatchTerminalStatus(job, finalStatus);
     }
     return record;
