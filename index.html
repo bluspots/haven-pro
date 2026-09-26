@@ -289,6 +289,9 @@ function mapSupabaseRowToJob(row) {
   const inspectionFeeCents = row.inspection_fee_cents ?? 0;
   return {
     id: String(row.id), // MUST be the backend UUID
+    // Include backend status/assignment so callers can defensively filter claimable-only
+    status: row.status,
+    pro_id: row.pro_id,
     customerName: "Haven customer", // no PII yet
     category: row.category,
     title: row.title,
@@ -310,7 +313,13 @@ function mapSupabaseRowToJob(row) {
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave SIM_JOBS in place
-  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&order=posted_at.desc`;
+  // Claimable-only: posted and unassigned (pro_id is null), newest first.
+  // Prefer selecting just the fields we render plus status/pro_id for defensive filtering.
+  const select =
+    "id,category,title,fixed_pro_labor_payout_cents,inspection_fee_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id";
+  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=${encodeURIComponent(
+    select
+  )}`;
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -327,7 +336,9 @@ async function fetchPostedJobsFromSupabase() {
     }
     const rows = await res.json();
     if (!Array.isArray(rows)) return [];
-    return rows.map(mapSupabaseRowToJob);
+    // Map to UI shape first, then defensively keep only claimable rows
+    const mapped = rows.map(mapSupabaseRowToJob);
+    return mapped.filter(j => (j.status ? j.status === "posted" : true) && (j.pro_id ? false : true));
   } catch (e) {
     console.warn("Supabase jobs fetch error", e);
     return [];
@@ -529,7 +540,8 @@ function HavenProApp() {
   const [notifPrefs, setNotifPrefs] = useState({ newJobs: true, emergency: true, materials: true, earnings: true });
   const [openFaq, setOpenFaq] = useState(null);
   const [online, setOnline] = useState(true);
-  const [availableJobs, setAvailableJobs] = useState(SIM_JOBS);
+  // When a backend is configured, the marketplace source of truth is Supabase — start empty and load claimable jobs.
+  const [availableJobs, setAvailableJobs] = useState(getSupabaseConfig() ? [] : SIM_JOBS);
   const [activeJobs, setActiveJobs] = useState([]); // jobs a pro has accepted, mid-lifecycle
   const [completedJobsHistory, setCompletedJobsHistory] = useState([]);
   const [toast, setToast] = useState(null);
@@ -584,7 +596,9 @@ function HavenProApp() {
       const jobs = await fetchPostedJobsFromSupabase();
       if (jobs && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        setAvailableJobs(jobs);
+        // Exclude any ids already active to avoid stale double-visibility
+        const excludeIds = new Set(activeJobsRef.current.map(j => j.id));
+        setAvailableJobs(jobs.filter(j => !excludeIds.has(j.id)));
       }
     }
     if (tab === "home" && getSupabaseConfig()) {
@@ -815,7 +829,17 @@ function HavenProApp() {
     setEarningsStatements(d.earningsStatements);
     setActiveJobs([]);
     setJobMessages({});
-    setAvailableJobs(SIM_JOBS);
+    // Only reseed SIM jobs when no backend is configured; otherwise refetch claimable jobs
+    if (getSupabaseConfig()) {
+      fetchPostedJobsFromSupabase().then(jobs => {
+        if (jobs) {
+          const excludeIds = new Set(activeJobsRef.current.map(j => j.id));
+          setAvailableJobs(jobs.filter(j => !excludeIds.has(j.id)));
+        }
+      });
+    } else {
+      setAvailableJobs(SIM_JOBS);
+    }
     setTab("home");
     setEarningsStack([{ view: "main" }]);
     setMyJobsStack([{ view: "list" }]);
@@ -1063,7 +1087,10 @@ function HavenProApp() {
           }
           // Best-effort refresh of posted jobs after a failed claim
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) setAvailableJobs(refreshed);
+          if (refreshed) {
+            const excludeIds = new Set(activeJobsRef.current.map(j => j.id));
+            setAvailableJobs(refreshed.filter(j => !excludeIds.has(j.id)));
+          }
           return;
         }
         backendClaimed = true;
