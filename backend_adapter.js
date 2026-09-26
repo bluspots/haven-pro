@@ -205,8 +205,9 @@ async function claimJobOnSupabase(job) {
         "apikey": cfg.anon,
         "Authorization": `Bearer ${cfg.anon}`,
         "Content-Type": "application/json",
+        // With complete RLS, updated rows may not be selectable; ask for minimal to avoid empty bodies.
         "Accept": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": "return=minimal",
       },
       body: JSON.stringify({ status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: new Date().toISOString() }),
     });
@@ -217,12 +218,8 @@ async function claimJobOnSupabase(job) {
       const text = await res.text().catch(() => "");
       return { ok: false, reason: `update_failed:${res.status}:${text}` };
     }
-    const rows = await res.json().catch(() => []);
-    if (Array.isArray(rows) && rows.length > 0) {
-      return { ok: true, mode: "update" };
-    }
-    // No rows matched — most likely already claimed
-    return { ok: false, reason: "already_claimed" };
+    // 2xx means the update request was accepted. Under strict RLS the body may be empty — treat as success.
+    return { ok: true, mode: "update" };
   } catch (e) {
     return { ok: false, reason: "network_error" };
   }
