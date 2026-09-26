@@ -70,6 +70,61 @@ async function fetchPostedJobsFromSupabase() {
   }
 }
 
+// Fetch currently active jobs for the demo pro from Supabase (server is source of truth).
+// Returns null when Supabase is not configured (SIM mode). On error, soft-fails to [].
+async function fetchActiveJobsFromSupabase() {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return null; // not configured — leave session-only behavior in place
+  const activeStatuses = [
+    "en_route",
+    "arrived",
+    "diagnosing",
+    "materials_requested",
+    "materials_approved",
+    "in_progress",
+  ];
+  const statusList = activeStatuses.join(",");
+  const url =
+    `${cfg.url}/rest/v1/jobs?` +
+    `pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}` +
+    `&status=in.(${statusList})` +
+    `&order=accepted_at.desc`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        Accept: "application/json",
+        Prefer: "count=exact",
+      },
+    });
+    if (!res.ok) {
+      console.warn("Supabase active jobs fetch failed", res.status, await res.text());
+      return [];
+    }
+    const rows = await res.json();
+    if (!Array.isArray(rows)) return [];
+    return rows.map(row => {
+      const base = mapSupabaseRowToJob(row);
+      const acceptedAt =
+        row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
+      return {
+        ...base,
+        status: row.status,
+        acceptedAt,
+        backendClaimed: true,
+        jobNotes: "",
+        beforePhoto: null,
+        afterPhoto: null,
+      };
+    });
+  } catch (e) {
+    console.warn("Supabase active jobs fetch error", e);
+    return [];
+  }
+}
+
 // Best-effort terminal status sync back to Supabase after a decline (only if this job was backend-claimed)
 async function bestEffortPatchTerminalStatus(job, finalStatus) {
   try {

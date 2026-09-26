@@ -334,6 +334,61 @@ async function fetchPostedJobsFromSupabase() {
   }
 }
 
+// Fetch currently active jobs for the demo pro from Supabase (server is source of truth).
+// Returns null when Supabase is not configured (SIM mode). On error, soft-fails to [].
+async function fetchActiveJobsFromSupabase() {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return null; // not configured — leave session-only behavior in place
+  const activeStatuses = [
+    "en_route",
+    "arrived",
+    "diagnosing",
+    "materials_requested",
+    "materials_approved",
+    "in_progress",
+  ];
+  const statusList = activeStatuses.join(",");
+  const url =
+    `${cfg.url}/rest/v1/jobs?` +
+    `pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}` +
+    `&status=in.(${statusList})` +
+    `&order=accepted_at.desc`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        Accept: "application/json",
+        Prefer: "count=exact",
+      },
+    });
+    if (!res.ok) {
+      console.warn("Supabase active jobs fetch failed", res.status, await res.text());
+      return [];
+    }
+    const rows = await res.json();
+    if (!Array.isArray(rows)) return [];
+    return rows.map(row => {
+      const base = mapSupabaseRowToJob(row);
+      const acceptedAt =
+        row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
+      return {
+        ...base,
+        status: row.status,
+        acceptedAt,
+        backendClaimed: true,
+        jobNotes: "",
+        beforePhoto: null,
+        afterPhoto: null,
+      };
+    });
+  } catch (e) {
+    console.warn("Supabase active jobs fetch error", e);
+    return [];
+  }
+}
+
 // Best-effort terminal status sync back to Supabase after a decline (only if this job was backend-claimed)
 async function bestEffortPatchTerminalStatus(job, finalStatus) {
   try {
@@ -576,6 +631,24 @@ function HavenProApp() {
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
   const [acceptingJobId, setAcceptingJobId] = useState(null);
 
+  // Rehydrate active jobs from Supabase (server is source of truth) on startup
+  useEffect(() => {
+    let cancelled = false;
+    async function loadActive() {
+      const rows = await fetchActiveJobsFromSupabase();
+      if (rows && !cancelled) {
+        setActiveJobs(rows);
+        // Ensure claimed job(s) do not reappear on the board
+        const activeIds = new Set(rows.map(j => j.id));
+        setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
+      }
+    }
+    if (getSupabaseConfig()) {
+      loadActive();
+    }
+    return () => { cancelled = true; };
+  }, []);
+
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
     let cancelled = false;
@@ -584,7 +657,9 @@ function HavenProApp() {
       const jobs = await fetchPostedJobsFromSupabase();
       if (jobs && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        setAvailableJobs(jobs);
+        const activeIds = new Set(activeJobs.map(j => j.id));
+        const filtered = activeIds.size > 0 ? jobs.filter(j => !activeIds.has(j.id)) : jobs;
+        setAvailableJobs(filtered);
       }
     }
     if (tab === "home" && getSupabaseConfig()) {
@@ -595,7 +670,7 @@ function HavenProApp() {
       cancelled = true;
       if (timerId) window.clearInterval(timerId);
     };
-  }, [tab]);
+  }, [tab, activeJobs]);
 
   // Poll backend for status changes on active, backend-claimed jobs (e.g., materials approve/decline)
   useEffect(() => {
