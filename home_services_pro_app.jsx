@@ -62,6 +62,18 @@ const STATUS_LABELS = {
   materials_approved: "Approved — Get Receipt",
   in_progress: "Working",
 };
+// Statuses that count as an "active job" for one-active guard
+const ACTIVE_BLOCK_STATUSES = new Set([
+  "en_route",
+  "arrived",
+  "diagnosing",
+  "materials_requested",
+  "materials_approved",
+  "in_progress",
+]);
+function hasBlockingActiveJob(jobs) {
+  return jobs.some(j => ACTIVE_BLOCK_STATUSES.has(j.status));
+}
 function iconFor(category) {
   const c = CATEGORIES.find(c => c.name === category);
   return c ? c.icon : "🧰";
@@ -421,6 +433,68 @@ export default function HavenProApp() {
       }
     } catch (e) {
       console.warn("Supabase terminal status sync error", e);
+    }
+  }
+
+  // Attempt to claim a job in Supabase when configured.
+  // Success returns { ok: true }. On 409 conflict (one-active or already taken), returns { ok: false, conflict: true, reason }.
+  // On other failures, returns { ok: false, reason }.
+  async function claimJobOnSupabase(job) {
+    const cfg = getSupabaseConfig();
+    if (!cfg) return { ok: true, mode: "sim" }; // no backend configured — SIM/local only
+    // Try RPC first if available (preferred: lets the backend attach the authenticated pro id and enforce RLS/uniques)
+    try {
+      const rpcUrl = `${cfg.url}/rest/v1/rpc/pro_claim_job`;
+      let res = await fetch(rpcUrl, {
+        method: "POST",
+        headers: {
+          "apikey": cfg.anon,
+          "Authorization": `Bearer ${cfg.anon}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Prefer": "return=representation",
+        },
+        body: JSON.stringify({ job_id: job.id }),
+      });
+      if (res.status === 409) {
+        return { ok: false, conflict: true, reason: "conflict" };
+      }
+      if (res.ok) {
+        return { ok: true, mode: "rpc" };
+      }
+      // If the RPC isn't present (404/400) or unauthorized, fall back to direct update path
+    } catch (e) {
+      // Network error — fall through to direct update attempt
+    }
+    // Fallback: direct optimistic UPDATE on posted+unclaimed rows
+    try {
+      const updUrl = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.posted&pro_id=is.null`;
+      const res = await fetch(updUrl, {
+        method: "PATCH",
+        headers: {
+          "apikey": cfg.anon,
+          "Authorization": `Bearer ${cfg.anon}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Prefer": "return=representation",
+        },
+        body: JSON.stringify({ status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: new Date().toISOString() }),
+      });
+      if (res.status === 409) {
+        return { ok: false, conflict: true, reason: "conflict" };
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        return { ok: false, reason: `update_failed:${res.status}:${text}` };
+      }
+      const rows = await res.json().catch(() => []);
+      if (Array.isArray(rows) && rows.length > 0) {
+        return { ok: true, mode: "update" };
+      }
+      // No rows matched — most likely already claimed
+      return { ok: false, reason: "already_claimed" };
+    } catch (e) {
+      return { ok: false, reason: "network_error" };
     }
   }
 
@@ -813,7 +887,8 @@ export default function HavenProApp() {
      delay, weighted toward approval, and every simulated resolution says
      so explicitly in its toast rather than pretending to be real. ── */
   async function acceptJob(job) {
-    if (activeJobs.length > 0) {
+    // Local/SIM guard — block when any active job exists across en_route/materials_requested/etc.
+    if (hasBlockingActiveJob(activeJobs)) {
       showToast("Finish your current job to accept another.");
       return;
     }
@@ -824,51 +899,39 @@ export default function HavenProApp() {
       return;
     }
     if (!online) { showToast("Go online to accept jobs"); return; }
+    // If a backend is configured, claim there first and handle conflicts clearly
     const cfg = getSupabaseConfig();
-    const isBackendJob = !!cfg && looksLikeUuid(job.id);
-    if (isBackendJob) {
+    let backendClaimed = false;
+    if (cfg && looksLikeUuid(job.id)) {
       if (acceptingJobId === job.id) return;
       setAcceptingJobId(job.id);
       try {
-        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.posted&pro_id=is.null`;
-        const body = { status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: new Date().toISOString() };
-        const res = await fetch(url, {
-          method: "PATCH",
-          headers: {
-            "apikey": cfg.anon,
-            "Authorization": `Bearer ${cfg.anon}`,
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal",
-          },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          if (res.status === 409) {
-            showToast("You already have an active job — finish it before accepting another.");
+        const result = await claimJobOnSupabase(job);
+        if (!result.ok) {
+          if (result.conflict) {
+            // Backend enforced one-active (or similar) — keep message crisp
+            showToast("Finish your current job to accept another.");
+          } else if (result.reason === "already_claimed") {
+            showToast("This job was just taken by another pro.");
           } else {
-            console.warn("Supabase accept failed", res.status, text);
-            showToast("Claim failed — already taken or network issue. Try another job.");
+            showToast("Unable to claim this job right now.");
           }
+          // Best-effort refresh of posted jobs after a failed claim
+          const refreshed = await fetchPostedJobsFromSupabase();
+          if (refreshed) setAvailableJobs(refreshed);
           return;
         }
-        // Success — perform local accept
-        setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
-        setActiveJobs(prev => [...prev, { ...job, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed: true }]);
-        setTab("jobs");
-        setMyJobsStack([{ view: "detail", jobId: job.id }]);
-        showToast(`Accepted — ${job.title}`);
-      } catch (e) {
-        console.warn("Supabase accept error", e);
-        showToast("Claim failed — network issue. Try again.");
+        backendClaimed = true;
       } finally {
         setAcceptingJobId(null);
       }
-      return;
     }
-    // Local-only accept (SIM or no Supabase config / non-UUID id)
+    // Local accept (SIM-only or after successful backend claim)
     setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
-    setActiveJobs(prev => [...prev, { ...job, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null }]);
+    setActiveJobs(prev => [
+      ...prev,
+      { ...job, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed },
+    ]);
     setTab("jobs");
     setMyJobsStack([{ view: "detail", jobId: job.id }]);
     showToast(`Accepted — ${job.title}`);
@@ -1295,7 +1358,7 @@ export default function HavenProApp() {
      and never hides the Inspection Visit line. ── */
   function tradeBoardCard(job) {
     const diagnosis = jobRequiresDiagnosis(job);
-    const blockedLabel = activeJobs.length > 0 ? "Finish Current Job First" : !marketplaceReady ? "Complete Verification" : !online ? "Go Online to Accept" : null;
+    const blockedLabel = hasBlockingActiveJob(activeJobs) ? "Finish Current Job First" : !marketplaceReady ? "Complete Verification" : !online ? "Go Online to Accept" : null;
     const disabled = !!blockedLabel || acceptingJobId === job.id;
     return (
       <div key={job.id} style={{ background: T.w, borderRadius: 16, padding: 14, marginBottom: 8, border: `1px solid ${T.bd}` }}>
