@@ -1,0 +1,11 @@
+{
+  "name": "haven-pro",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Haven Pro prototype helper scripts",
+  "license": "MIT",
+  "scripts": {
+    "build": "./build-pro.sh",
+    "verify": "./build-pro.sh && echo \"verify: ok\""
+  }
+}
