@@ -424,6 +424,46 @@ export default function HavenProApp() {
     }
   }
 
+  // Write a backend-claimed job's materials request to Supabase (status + estimate/items).
+  // Soft-fails: logs and returns if Supabase isn't configured, id isn't a UUID, or backend not claimed.
+  async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
+    try {
+      const cfg = getSupabaseConfig();
+      if (!cfg) return;
+      if (!looksLikeUuid(job.id)) return;
+      if (!job.backendClaimed) return;
+      const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}`;
+      // Normalize items and include an aggregate estimate (in cents) when possible.
+      const normalizedItems = cleanItems.map(it => ({
+        name: String(it.name),
+        // store cents to avoid float issues; some backends may coerce to numeric
+        cost_cents: Math.round(Number(it.cost) * 100),
+      }));
+      const body = {
+        status: "materials_requested",
+        // Best-effort shared fields; if columns are absent, the PATCH may be a no-op and is logged below.
+        materials_items: normalizedItems,                 // JSON[] (if present)
+        materials_estimate_cents: Math.round(totalCost * 100), // integer (if present)
+        materials_requested_at: new Date().toISOString(), // timestamp (if present)
+      };
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: {
+          "apikey": cfg.anon,
+          "Authorization": `Bearer ${cfg.anon}`,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        console.warn("Supabase materials request PATCH failed", res.status, await res.text());
+      }
+    } catch (e) {
+      console.warn("Supabase materials request PATCH error", e);
+    }
+  }
+
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
     let cancelled = false;
@@ -444,6 +484,73 @@ export default function HavenProApp() {
       if (timerId) window.clearInterval(timerId);
     };
   }, [tab]);
+
+  // Poll backend for status changes on active, backend-claimed jobs (e.g., materials approve/decline)
+  useEffect(() => {
+    const cfg = getSupabaseConfig();
+    if (!cfg) return;
+    // Only poll while there is at least one backend-claimed job awaiting customer action
+    const jobsToPoll = activeJobs.filter(j =>
+      j.backendClaimed && looksLikeUuid(j.id) && (j.status === "materials_requested" || j.status === "materials_approved")
+    );
+    if (jobsToPoll.length === 0) return;
+    let cancelled = false;
+    const pollOne = async (job) => {
+      try {
+        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents`;
+        const res = await fetch(url, {
+          method: "GET",
+          headers: {
+            "apikey": cfg.anon,
+            "Authorization": `Bearer ${cfg.anon}`,
+            "Accept": "application/json",
+            "Prefer": "count=exact",
+          },
+        });
+        if (!res.ok) {
+          // Soft failure — keep local UI state; customer UI continues independently.
+          return;
+        }
+        const rows = await res.json();
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        const row = rows[0];
+        if (cancelled) return;
+        const currentJob = activeJobsRef.current.find(j => j.id === job.id);
+        if (!currentJob) return;
+        const backendStatus = row.status;
+        if (backendStatus === "materials_approved" && currentJob.status === "materials_requested") {
+          updateActiveJob(job.id, { status: "materials_approved" });
+          showToast(`Customer approved materials for ${currentJob.title} — go ahead and purchase, then submit your receipt`);
+        } else if (backendStatus === "inspection_completed" && currentJob.status !== "inspection_completed") {
+          // Terminal — remove from active, finalize with inspection fee from backend if present.
+          const cents = typeof row.inspection_fee_cents === "number" ? row.inspection_fee_cents : Math.round(((currentJob.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
+          const fee = Math.round(cents / 100);
+          setActiveJobs(prev => prev.filter(j => j.id !== job.id));
+          showToast(`Inspection Completed — Inspection Visit $${fee}`);
+          finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed");
+          setMyJobsStack([{ view: "list" }]);
+        } else if (backendStatus === "materials_declined" && currentJob.status !== "materials_declined") {
+          // Terminal — remove from active, finalize with convenience fee (default to constant if backend omitted it)
+          const cents = typeof row.convenience_fee_cents === "number" ? row.convenience_fee_cents : CONVENIENCE_FEE * 100;
+          const conv = Math.round(cents / 100);
+          setActiveJobs(prev => prev.filter(j => j.id !== job.id));
+          showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
+          finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
+          setMyJobsStack([{ view: "list" }]);
+        }
+      } catch {
+        // swallow — polling is best-effort
+      }
+    };
+    const tick = () => {
+      // Poll each (the one-active-job rule keeps this tiny)
+      jobsToPoll.forEach(pollOne);
+    };
+    // Start now and then every ~5s
+    let id = window.setInterval(tick, 5000);
+    tick();
+    return () => { cancelled = true; if (id) window.clearInterval(id); };
+  }, [activeJobs]);
 
   // Profile sub-navigation + drafts (draft/commit pattern so typing never silently saves)
   const [profileView, setProfileView] = useState("main"); // main | edit | categories | settings
@@ -895,12 +1002,22 @@ export default function HavenProApp() {
     const cleanItems = items.filter(it => it.name.trim() && Number(it.cost) > 0);
     if (cleanItems.length === 0) { showToast("Add at least one item with a cost"); return; }
     const totalCost = cleanItems.reduce((sum, it) => sum + Number(it.cost), 0);
+    // Snapshot current job to decide backend behavior before we mutate local state
+    const current = activeJobs.find(j => j.id === jobId);
+    const cfg = getSupabaseConfig();
+    const isBackendJob = !!current && !!cfg && looksLikeUuid(current.id) && !!current.backendClaimed;
     updateActiveJob(jobId, { status: "materials_requested", materialsRequestedAt: Date.now(), pendingMaterialsRequest: { items: cleanItems, totalCost } });
     setMaterialsDraft(null);
     popMyJobs();
     showToast("Materials request sent — waiting on the customer");
-    const timer = setTimeout(() => resolveMaterialsAuto(jobId), 4500);
-    materialsTimers.current[jobId] = timer;
+    if (isBackendJob) {
+      // Live path — do NOT start the local auto-resolution SIM; write to backend and rely on polling.
+      bestEffortPatchMaterialsRequested(current, cleanItems, totalCost);
+    } else {
+      // Local-only SIM — keep existing auto-resolution
+      const timer = setTimeout(() => resolveMaterialsAuto(jobId), 4500);
+      materialsTimers.current[jobId] = timer;
+    }
   }
 
   /* ── Receipt submission — the actual reimbursement gate. Approval only
