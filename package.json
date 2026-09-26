@@ -1,0 +1,19 @@
+{
+  "name": "haven-pro-harness",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Harness/CI tooling for Haven Pro to verify multi-file concat build",
+  "scripts": {
+    "build": "bash ./build-pro.sh",
+    "boot-check": "node tools/boot_check.js",
+    "verify": "npm run build && npm run boot-check"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/preset-env": "^7.26.0",
+    "@babel/preset-react": "^7.26.0",
+    "jsdom": "^24.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}
