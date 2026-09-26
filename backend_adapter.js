@@ -46,7 +46,8 @@ function mapSupabaseRowToJob(row) {
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave SIM_JOBS in place
-  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&order=posted_at.desc`;
+  // Only fetch jobs that are still posted and unclaimed; include status/pro_id defensively
+  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc`;
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -63,7 +64,13 @@ async function fetchPostedJobsFromSupabase() {
     }
     const rows = await res.json();
     if (!Array.isArray(rows)) return [];
-    return rows.map(mapSupabaseRowToJob);
+    // Defensive filter: keep claimable only (posted + pro_id null) if fields are present
+    const claimable = rows.filter(r => {
+      const statusOk = r.status ? r.status === "posted" : true;
+      const proOk = Object.prototype.hasOwnProperty.call(r, "pro_id") ? (r.pro_id == null) : true;
+      return statusOk && proOk;
+    });
+    return claimable.map(mapSupabaseRowToJob);
   } catch (e) {
     console.warn("Supabase jobs fetch error", e);
     return [];
