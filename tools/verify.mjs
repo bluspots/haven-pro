@@ -27,7 +27,16 @@ assert(fileContains("index.html", "pro_id=is.null"), "index.html missing 'pro_id
 assert(fileContains("backend_adapter.js", /status=eq\.posted&pro_id=is\.null&order=posted_at\.desc/), "backend_adapter.js fetch missing claimable filter");
 
 // 3) Home app clears SIM seeds and excludes active ids when applying fetched lists
-assert(fileContains("home_services_pro_app.jsx", /setAvailableJobs\\(\\[\\]\\)/), "home_services_pro_app.jsx did not clear SIM seeds before loading when Supabase is configured");
-assert(fileContains("home_services_pro_app.jsx", /activeJobsRef\\.current\\.map\\(j => j\\.id\\)/), "home_services_pro_app.jsx did not reference activeJobsRef when filtering posted jobs");
+{
+  const hs = readFileSync("home_services_pro_app.jsx", "utf8");
+  const hasClear = /setAvailableJobs\(\[\]\)/.test(hs);
+  if (!hasClear) {
+    console.error("DEBUG: setAvailableJobs([]) not found; sample around 'getSupabaseConfig':");
+    const idx = hs.indexOf("getSupabaseConfig");
+    console.error(hs.slice(Math.max(0, idx - 120), idx + 200));
+  }
+  assert(hasClear, "home_services_pro_app.jsx did not clear SIM seeds before loading when Supabase is configured");
+}
+assert(fileContains("home_services_pro_app.jsx", /activeJobsRef\.current\.map\(j => j\.id\)/), "home_services_pro_app.jsx did not reference activeJobsRef when filtering posted jobs");
 
 console.log("VERIFY_EXIT_0=yes");
