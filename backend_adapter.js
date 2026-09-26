@@ -25,6 +25,9 @@ function mapSupabaseRowToJob(row) {
   const inspectionFeeCents = row.inspection_fee_cents ?? 0;
   return {
     id: String(row.id), // MUST be the backend UUID
+    // Include backend status/assignment so callers can defensively filter claimable-only
+    status: row.status,
+    pro_id: row.pro_id,
     customerName: "Haven customer", // no PII yet
     category: row.category,
     title: row.title,
@@ -46,7 +49,13 @@ function mapSupabaseRowToJob(row) {
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave SIM_JOBS in place
-  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&order=posted_at.desc`;
+  // Claimable-only: posted and unassigned (pro_id is null), newest first.
+  // Prefer selecting just the fields we render plus status/pro_id for defensive filtering.
+  const select =
+    "id,category,title,fixed_pro_labor_payout_cents,inspection_fee_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id";
+  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=${encodeURIComponent(
+    select
+  )}`;
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -63,7 +72,9 @@ async function fetchPostedJobsFromSupabase() {
     }
     const rows = await res.json();
     if (!Array.isArray(rows)) return [];
-    return rows.map(mapSupabaseRowToJob);
+    // Map to UI shape first, then defensively keep only claimable rows
+    const mapped = rows.map(mapSupabaseRowToJob);
+    return mapped.filter(j => (j.status ? j.status === "posted" : true) && (j.pro_id ? false : true));
   } catch (e) {
     console.warn("Supabase jobs fetch error", e);
     return [];
