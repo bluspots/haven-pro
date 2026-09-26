@@ -59,7 +59,8 @@ export default function HavenProApp() {
   const [notifPrefs, setNotifPrefs] = useState({ newJobs: true, emergency: true, materials: true, earnings: true });
   const [openFaq, setOpenFaq] = useState(null);
   const [online, setOnline] = useState(true);
-  const [availableJobs, setAvailableJobs] = useState(SIM_JOBS);
+  // When a backend is configured, the marketplace source of truth is Supabase — start empty and load claimable jobs.
+  const [availableJobs, setAvailableJobs] = useState(getSupabaseConfig() ? [] : SIM_JOBS);
   const [activeJobs, setActiveJobs] = useState([]); // jobs a pro has accepted, mid-lifecycle
   const [completedJobsHistory, setCompletedJobsHistory] = useState([]);
   const [toast, setToast] = useState(null);
@@ -114,7 +115,9 @@ export default function HavenProApp() {
       const jobs = await fetchPostedJobsFromSupabase();
       if (jobs && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        setAvailableJobs(jobs);
+        // Exclude any ids already active to avoid stale double-visibility
+        const excludeIds = new Set(activeJobsRef.current.map(j => j.id));
+        setAvailableJobs(jobs.filter(j => !excludeIds.has(j.id)));
       }
     }
     if (tab === "home" && getSupabaseConfig()) {
@@ -345,7 +348,17 @@ export default function HavenProApp() {
     setEarningsStatements(d.earningsStatements);
     setActiveJobs([]);
     setJobMessages({});
-    setAvailableJobs(SIM_JOBS);
+    // Only reseed SIM jobs when no backend is configured; otherwise refetch claimable jobs
+    if (getSupabaseConfig()) {
+      fetchPostedJobsFromSupabase().then(jobs => {
+        if (jobs) {
+          const excludeIds = new Set(activeJobsRef.current.map(j => j.id));
+          setAvailableJobs(jobs.filter(j => !excludeIds.has(j.id)));
+        }
+      });
+    } else {
+      setAvailableJobs(SIM_JOBS);
+    }
     setTab("home");
     setEarningsStack([{ view: "main" }]);
     setMyJobsStack([{ view: "list" }]);
@@ -593,7 +606,10 @@ export default function HavenProApp() {
           }
           // Best-effort refresh of posted jobs after a failed claim
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) setAvailableJobs(refreshed);
+          if (refreshed) {
+            const excludeIds = new Set(activeJobsRef.current.map(j => j.id));
+            setAvailableJobs(refreshed.filter(j => !excludeIds.has(j.id)));
+          }
           return;
         }
         backendClaimed = true;
