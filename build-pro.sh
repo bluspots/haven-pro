@@ -24,7 +24,7 @@ OUT_INDEX="index.html"
 
 # Ordered list of source files to concatenate (behavior-identical: currently one file).
 # See Customer docs: PHASE3_MODULARIZATION_ORDER.md — Step 0.
-SOURCE_FILES=("$SRC")
+SOURCE_FILES=("locked_constants.js" "$SRC")
 
 # Concatenate in order, then apply the existing strip/rename transforms.
 BODY=$(cat "${SOURCE_FILES[@]}" | grep -v '^import React' | sed 's/^export default function HavenProApp/function HavenProApp/')
