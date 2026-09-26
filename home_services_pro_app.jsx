@@ -106,6 +106,24 @@ export default function HavenProApp() {
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
   const [acceptingJobId, setAcceptingJobId] = useState(null);
 
+  // Rehydrate active jobs from Supabase (server is source of truth) on startup
+  useEffect(() => {
+    let cancelled = false;
+    async function loadActive() {
+      const rows = await fetchActiveJobsFromSupabase();
+      if (rows && !cancelled) {
+        setActiveJobs(rows);
+        // Ensure claimed job(s) do not reappear on the board
+        const activeIds = new Set(rows.map(j => j.id));
+        setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
+      }
+    }
+    if (getSupabaseConfig()) {
+      loadActive();
+    }
+    return () => { cancelled = true; };
+  }, []);
+
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
     let cancelled = false;
@@ -114,7 +132,9 @@ export default function HavenProApp() {
       const jobs = await fetchPostedJobsFromSupabase();
       if (jobs && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        setAvailableJobs(jobs);
+        const activeIds = new Set(activeJobs.map(j => j.id));
+        const filtered = activeIds.size > 0 ? jobs.filter(j => !activeIds.has(j.id)) : jobs;
+        setAvailableJobs(filtered);
       }
     }
     if (tab === "home" && getSupabaseConfig()) {
@@ -125,7 +145,7 @@ export default function HavenProApp() {
       cancelled = true;
       if (timerId) window.clearInterval(timerId);
     };
-  }, [tab]);
+  }, [tab, activeJobs]);
 
   // Poll backend for status changes on active, backend-claimed jobs (e.g., materials approve/decline)
   useEffect(() => {
