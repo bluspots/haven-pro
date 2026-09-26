@@ -201,6 +201,7 @@ async function claimJobOnSupabase(job) {
         "apikey": cfg.anon,
         "Authorization": `Bearer ${cfg.anon}`,
         "Content-Type": "application/json",
+        // Return the updated row so we can distinguish 0-row updates deterministically.
         "Accept": "application/json",
         "Prefer": "return=representation",
       },
@@ -213,11 +214,17 @@ async function claimJobOnSupabase(job) {
       const text = await res.text().catch(() => "");
       return { ok: false, reason: `update_failed:${res.status}:${text}` };
     }
-    const rows = await res.json().catch(() => []);
+    // With return=representation, a successful update yields the updated row array.
+    // An empty array (or 204/empty) means no rows matched -> already claimed/not claimable.
+    let rows = [];
+    try {
+      rows = await res.json();
+    } catch {
+      rows = [];
+    }
     if (Array.isArray(rows) && rows.length > 0) {
       return { ok: true, mode: "update" };
     }
-    // No rows matched — most likely already claimed
     return { ok: false, reason: "already_claimed" };
   } catch (e) {
     return { ok: false, reason: "network_error" };
