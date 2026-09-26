@@ -1,0 +1,11 @@
+{
+  "name": "haven-pro",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Dev utilities for Haven Pro prototype",
+  "scripts": {
+    "verify": "node verify.js",
+    "build": "bash ./build-pro.sh"
+  }
+}
+
