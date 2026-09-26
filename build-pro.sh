@@ -14,7 +14,7 @@
 # bundler-based project. Neither line is valid inside a plain
 # <script type="text/babel"> tag (no module loader, React is already a
 # global from the CDN tag). This script strips exactly those two lines.
-# Phase 3 Modularization — Step 0 (Option A): introduce ordered concat source list.
+# Phase 3 Modularization — Step 4: presentational atoms + theme tokens.
 set -e
 cd "$(dirname "$0")"
 
@@ -22,9 +22,9 @@ SRC="home_services_pro_app.jsx"
 OUT="prototype-pro.html"
 OUT_INDEX="index.html"
 
-# Ordered list of source files to concatenate (behavior-identical; Step 3 adds SIM seeds).
-# See Customer docs: PHASE3_MODULARIZATION_ORDER.md — Step 3.
-SOURCE_FILES=("locked_constants.js" "pure_helpers.js" "sim_seeds.js" "$SRC")
+# Ordered list of source files to concatenate (behavior-identical; Step 4 adds theme tokens).
+# See Customer docs: PHASE3_MODULARIZATION_ORDER.md — Step 4.
+SOURCE_FILES=("locked_constants.js" "pure_helpers.js" "sim_seeds.js" "theme_tokens.js" "$SRC")
 
 # Concatenate in order, then apply the existing strip/rename transforms.
 BODY=$(cat "${SOURCE_FILES[@]}" | grep -v '^import React' | sed 's/^export default function HavenProApp/function HavenProApp/')
