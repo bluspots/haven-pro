@@ -2,7 +2,11 @@
 
 **Status:** Living document · **Version:** 0.5 · **Scope:** Pro App only (not yet shared with Customer App)
 
-Companion to `HAVEN_JOB_CONTRACT.md` (job/pricing schema, includes Job Earnings Statement below). Covers Pro account readiness — verification, credentials, payouts, tax — and how it gates job acceptance. Sandbox/prototype only: no real Persona, Checkr, Stripe Connect, or license-registry integration is connected.
+Companion to the canonical Customer job contract (product/job rules):  
+`HAVEN_JOB_CONTRACT.md` — https://github.com/bluspots/bluspots.github.io/blob/master/HAVEN_JOB_CONTRACT.md  
+Technical representation/enforcement lives in `HAVEN_SHARED_BACKEND_CONTRACT.md` (Customer/shared; link there when available).
+
+Covers Pro account readiness — verification, credentials, payouts, tax — and how it gates job acceptance. Sandbox/prototype only: no real Persona, Checkr, Stripe Connect, or license-registry integration is connected.
 
 ---
 

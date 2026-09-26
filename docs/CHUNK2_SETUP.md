@@ -2,6 +2,10 @@
 
 This change lets Haven Pro read canonical jobs from the same Supabase project that the Customer app writes to. No writes are performed from Pro — read-only feed to prove create → store → see. Accept/assignment remains simulated locally in Pro.
 
+Source of truth for product/job rules:  
+`HAVEN_JOB_CONTRACT.md` (Customer repo) — https://github.com/bluspots/bluspots.github.io/blob/master/HAVEN_JOB_CONTRACT.md  
+Technical schema/enforcement: `HAVEN_SHARED_BACKEND_CONTRACT.md` (Customer/shared; link there when available).
+
 ## Configure (same keys as Customer)
 
 In your browser's DevTools console (or via any localStorage editor), set these keys:
