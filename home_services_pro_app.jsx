@@ -106,6 +106,13 @@ export default function HavenProApp() {
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
   const [acceptingJobId, setAcceptingJobId] = useState(null);
 
+  // When Supabase is configured, don't show SIM seeds as the live marketplace on mount
+  useEffect(() => {
+    if (getSupabaseConfig()) {
+      setAvailableJobs([]);
+    }
+  }, []);
+
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
     let cancelled = false;
@@ -114,7 +121,9 @@ export default function HavenProApp() {
       const jobs = await fetchPostedJobsFromSupabase();
       if (jobs && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        setAvailableJobs(jobs);
+        const activeIds = new Set(activeJobsRef.current.map(j => j.id));
+        const filtered = jobs.filter(j => !activeIds.has(j.id));
+        setAvailableJobs(filtered);
       }
     }
     if (tab === "home" && getSupabaseConfig()) {
@@ -593,7 +602,10 @@ export default function HavenProApp() {
           }
           // Best-effort refresh of posted jobs after a failed claim
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) setAvailableJobs(refreshed);
+        if (refreshed) {
+          const activeIds = new Set(activeJobsRef.current.map(j => j.id));
+          setAvailableJobs(refreshed.filter(j => !activeIds.has(j.id)));
+        }
           return;
         }
         backendClaimed = true;
