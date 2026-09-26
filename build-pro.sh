@@ -22,9 +22,9 @@ SRC="home_services_pro_app.jsx"
 OUT="prototype-pro.html"
 OUT_INDEX="index.html"
 
-# Ordered list of source files to concatenate (behavior-identical; Step 2 adds pure helpers).
-# See Customer docs: PHASE3_MODULARIZATION_ORDER.md — Step 2.
-SOURCE_FILES=("locked_constants.js" "pure_helpers.js" "$SRC")
+# Ordered list of source files to concatenate (behavior-identical; Step 3 adds SIM seeds).
+# See Customer docs: PHASE3_MODULARIZATION_ORDER.md — Step 3.
+SOURCE_FILES=("locked_constants.js" "pure_helpers.js" "sim_seeds.js" "$SRC")
 
 # Concatenate in order, then apply the existing strip/rename transforms.
 BODY=$(cat "${SOURCE_FILES[@]}" | grep -v '^import React' | sed 's/^export default function HavenProApp/function HavenProApp/')
