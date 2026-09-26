@@ -1338,8 +1338,9 @@ function HavenProApp() {
     };
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
-    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
-      // fire-and-forget; local history is authoritative in the prototype
+    // Fire-and-forget terminal status sync to backend-claimed jobs so rehydrate won't resurrect them.
+    // Covers all terminal endings used in this repo per Job Contract.
+    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined" || finalStatus === "complete") {
       bestEffortPatchTerminalStatus(job, finalStatus);
     }
     return record;
