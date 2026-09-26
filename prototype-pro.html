@@ -57,7 +57,7 @@ const CATEGORY_GROUPS = [
     { name: "Plumbing", icon: "🔧" },
     { name: "Electrical", icon: "💡" },
     { name: "HVAC", icon: "❄️" },
-    { name: "Appliance Repair", icon: "🧺" },
+    { name: "Appliance", icon: "🧺" },
     { name: "Handyman", icon: "🛠️" },
   ]},
   { group: "Installation & Setup", categories: [
@@ -73,7 +73,7 @@ const CATEGORY_GROUPS = [
   ]},
 ];
 const CATEGORIES = CATEGORY_GROUPS.flatMap(g => g.categories);
-const DIAGNOSIS_CATEGORIES = new Set(["Plumbing", "Electrical", "HVAC", "Appliance Repair"]);
+const DIAGNOSIS_CATEGORIES = new Set(["Plumbing", "Electrical", "HVAC", "Appliance"]);
 const INSPECTION_VISIT_FEE = 45;
 const CONVENIENCE_FEE = 30;
 function jobRequiresDiagnosis(job) {
@@ -127,11 +127,11 @@ const ARRIVAL_THRESHOLD_MI = 0.15; // roughly "on the same block"
    geographic exclusion is unconditional, checked before anything else. ── */
 const SIM_JOBS = [
   { id: "j1", customerName: "Marcus T.",  category: "Plumbing",          title: "Leak Repair",         payout: 180, inspectionFee: 45, distanceMi: 2.1, durationMin: 60, city: "Orlando, FL",     lat: 28.5421, lng: -81.3790, requested: "ASAP",              emergency: true,  postedAt: Date.now() - 45 * 1000 },
-  { id: "j3", customerName: "Priya S.",  category: "Electrical",        title: "Outlet Repair",       payout: 150, inspectionFee: 40, distanceMi: 3.8, durationMin: 45, city: "Winter Park, FL", lat: 28.6021, lng: -81.3389, requested: "Today, 3:00 PM",    emergency: false, postedAt: Date.now() - 2 * 60 * 60 * 1000 },
+  { id: "j3", customerName: "Priya S.",  category: "Electrical",        title: "Outlet Repair",       payout: 150, inspectionFee: 45, distanceMi: 3.8, durationMin: 45, city: "Winter Park, FL", lat: 28.6021, lng: -81.3389, requested: "Today, 3:00 PM",    emergency: false, postedAt: Date.now() - 2 * 60 * 60 * 1000 },
   { id: "j6", customerName: "Danielle W.",  category: "Handyman",          title: "Ceiling Fan Install", payout: 70,                     distanceMi: 5.5, durationMin: 35, city: "Winter Park, FL", lat: 28.5975, lng: -81.3435, requested: "Tomorrow, 10:00 AM",emergency: false, postedAt: Date.now() - 60 * 60 * 1000 },
-  { id: "j8", customerName: "Robert K.",  category: "HVAC",              title: "AC Not Cooling",      payout: 220, inspectionFee: 55, distanceMi: 6.7, durationMin: 50, city: "Orlando, FL",     lat: 28.5310, lng: -81.3720, requested: "Today, 5:30 PM",    emergency: false, postedAt: Date.now() - 38 * 60 * 1000 },
-  { id: "j9", customerName: "Angela F.",  category: "Appliance Repair",  title: "Dishwasher Repair",   payout: 140, inspectionFee: 35, distanceMi: 1.2, durationMin: 40, city: "Orlando, FL",     lat: 28.5395, lng: -81.3812, requested: "Tomorrow, 1:00 PM", emergency: false, postedAt: Date.now() - 4 * 60 * 1000 },
-  { id: "j10", customerName: "Chris B.", category: "Plumbing",          title: "Faucet Install",      payout: 110, inspectionFee: 30, distanceMi: 4.9, durationMin: 30, city: "Orlando, FL",     lat: 28.5462, lng: -81.3898, requested: "Today, 11:00 AM",   emergency: false, postedAt: Date.now() - 26 * 60 * 60 * 1000 },
+  { id: "j8", customerName: "Robert K.",  category: "HVAC",              title: "AC Not Cooling",      payout: 220, inspectionFee: 45, distanceMi: 6.7, durationMin: 50, city: "Orlando, FL",     lat: 28.5310, lng: -81.3720, requested: "Today, 5:30 PM",    emergency: false, postedAt: Date.now() - 38 * 60 * 1000 },
+  { id: "j9", customerName: "Angela F.",  category: "Appliance",         title: "Dishwasher Repair",   payout: 140, inspectionFee: 45, distanceMi: 1.2, durationMin: 40, city: "Orlando, FL",     lat: 28.5395, lng: -81.3812, requested: "Tomorrow, 1:00 PM", emergency: false, postedAt: Date.now() - 4 * 60 * 1000 },
+  { id: "j10", customerName: "Chris B.", category: "Plumbing",          title: "Faucet Install",      payout: 110, inspectionFee: 45, distanceMi: 4.9, durationMin: 30, city: "Orlando, FL",     lat: 28.5462, lng: -81.3898, requested: "Today, 11:00 AM",   emergency: false, postedAt: Date.now() - 26 * 60 * 60 * 1000 },
   { id: "j2", customerName: "Nina R.",  category: "TV Mounting",       title: "TV Mounting",         payout: 95,                     distanceMi: 1.4, durationMin: 30, city: "Orlando, FL",     lat: 28.5401, lng: -81.3755, requested: "Today, 2:00 PM",    emergency: false, postedAt: Date.now() - 47 * 60 * 1000 },
   { id: "j4", customerName: "Tyler H.",  category: "Furniture Assembly",title: "Furniture Assembly",  payout: 65,                     distanceMi: 0.9, durationMin: 40, city: "Orlando, FL",     lat: 28.5378, lng: -81.3781, requested: "Tomorrow, 9:00 AM", emergency: false, postedAt: Date.now() - 26 * 60 * 60 * 1000 },
   { id: "j5", customerName: "Monique D.",  category: "Cleaning",          title: "House Cleaning",      payout: 80,                     distanceMi: 4.2, durationMin: 90, city: "Orlando, FL",     lat: 28.5440, lng: -81.3690, requested: "Today, 4:00 PM",    emergency: false, postedAt: Date.now() - 3 * 60 * 1000 },
@@ -139,7 +139,7 @@ const SIM_JOBS = [
 ];
 
 
-const DEFAULT_WORK_CATEGORIES = ["Plumbing", "Electrical", "HVAC", "Appliance Repair", "Handyman"];
+const DEFAULT_WORK_CATEGORIES = ["Plumbing", "Electrical", "HVAC", "Appliance", "Handyman"];
 const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -192,21 +192,21 @@ function formatShortDate(ts) {
 }
 const SIM_COMPLETED_JOBS = [
   // This week (day-of-week anchored — entries land only where the date has actually occurred)
-  { id: "c1", category: "Plumbing",          title: "Faucet Install",       city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 110, inspectionFee: 30, tipAmount: 20, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 30, completedAt: dayOffsetThisWeek(1, 10) },
+  { id: "c1", category: "Plumbing",          title: "Faucet Install",       city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 110, inspectionFee: 45, tipAmount: 20, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 30, completedAt: dayOffsetThisWeek(1, 10) },
   { id: "c2", category: "TV Mounting",       title: "TV Mounting",          city: "Orlando, FL",     requiresDiagnosis: false, status: "complete",                payout: 95,                      tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 30, completedAt: dayOffsetThisWeek(1, 15) },
-  { id: "c3", category: "Appliance Repair",  title: "Dishwasher Repair",    city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 140, inspectionFee: 35, tipAmount: 15, tipStatus: "paid",    materialsReimbursed: 22, durationMin: 40, completedAt: dayOffsetThisWeek(2, 13) },
-  { id: "c4", category: "HVAC",              title: "AC Not Cooling",       city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 220, inspectionFee: 55, tipAmount: 30, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 50, completedAt: dayOffsetThisWeek(4, 9)  },
+  { id: "c3", category: "Appliance",         title: "Dishwasher Repair",    city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 140, inspectionFee: 45, tipAmount: 15, tipStatus: "paid",    materialsReimbursed: 22, durationMin: 40, completedAt: dayOffsetThisWeek(2, 13) },
+  { id: "c4", category: "HVAC",              title: "AC Not Cooling",       city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 220, inspectionFee: 45, tipAmount: 30, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 50, completedAt: dayOffsetThisWeek(4, 9)  },
   { id: "c5", category: "Handyman",          title: "Ceiling Fan Install",  city: "Winter Park, FL", requiresDiagnosis: false, status: "complete",                payout: 70,                      tipAmount: 10, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 35, completedAt: dayOffsetThisWeek(4, 14) },
-  { id: "c6", category: "Electrical",        title: "Outlet Repair",        city: "Winter Park, FL", requiresDiagnosis: true,  status: "inspection_completed", payout: 150, inspectionFee: 40, tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 20, completedAt: dayOffsetThisWeek(5, 11) },
+  { id: "c6", category: "Electrical",        title: "Outlet Repair",        city: "Winter Park, FL", requiresDiagnosis: true,  status: "inspection_completed", payout: 150, inspectionFee: 45, tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 20, completedAt: dayOffsetThisWeek(5, 11) },
   { id: "c7", category: "Plumbing",          title: "Leak Repair",          city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 180, inspectionFee: 45, tipAmount: 25, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 60, completedAt: dayOffsetThisWeek(5, 16) },
   { id: "c8", category: "Cleaning",          title: "House Cleaning",       city: "Orlando, FL",     requiresDiagnosis: false, status: "complete",                payout: 80,                      tipAmount: 12, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 90, completedAt: dayOffsetThisWeek(6, 10) },
   // Older — depth for Lifetime
   { id: "c9",  category: "Furniture Assembly", title: "Furniture Assembly", city: "Orlando, FL",     requiresDiagnosis: false, status: "complete",                payout: 65,                      tipAmount: 10, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 40, completedAt: daysAgo(9) },
   { id: "c10", category: "Plumbing",          title: "Leak Repair",         city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 180, inspectionFee: 45, tipAmount: 20, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 55, completedAt: daysAgo(15) },
-  { id: "c11", category: "Electrical",        title: "Outlet Repair",       city: "Winter Park, FL", requiresDiagnosis: true,  status: "inspection_completed", payout: 150, inspectionFee: 40, tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 25, completedAt: daysAgo(18) },
-  { id: "c12", category: "HVAC",              title: "AC Not Cooling",      city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 220, inspectionFee: 55, tipAmount: 35, tipStatus: "paid",    materialsReimbursed: 18, durationMin: 55, completedAt: daysAgo(24) },
+  { id: "c11", category: "Electrical",        title: "Outlet Repair",       city: "Winter Park, FL", requiresDiagnosis: true,  status: "inspection_completed", payout: 150, inspectionFee: 45, tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 25, completedAt: daysAgo(18) },
+  { id: "c12", category: "HVAC",              title: "AC Not Cooling",      city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 220, inspectionFee: 45, tipAmount: 35, tipStatus: "paid",    materialsReimbursed: 18, durationMin: 55, completedAt: daysAgo(24) },
   { id: "c13", category: "TV Mounting",       title: "TV Mounting",         city: "Orlando, FL",     requiresDiagnosis: false, status: "complete",                payout: 95,                      tipAmount: 5,  tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 30, completedAt: daysAgo(31) },
-  { id: "c14", category: "Appliance Repair",  title: "Dishwasher Repair",   city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 140, inspectionFee: 35, tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 45, completedAt: daysAgo(40) },
+  { id: "c14", category: "Appliance",         title: "Dishwasher Repair",   city: "Orlando, FL",     requiresDiagnosis: true,  status: "complete",                payout: 140, inspectionFee: 45, tipAmount: 0,  tipStatus: "notAdded", materialsReimbursed: 0,  durationMin: 45, completedAt: daysAgo(40) },
   { id: "c15", category: "Handyman",          title: "Ceiling Fan Install", city: "Winter Park, FL", requiresDiagnosis: false, status: "complete",                payout: 70,                      tipAmount: 15, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 35, completedAt: daysAgo(52) },
   { id: "c16", category: "Cleaning",          title: "House Cleaning",      city: "Orlando, FL",     requiresDiagnosis: false, status: "complete",                payout: 80,                      tipAmount: 10, tipStatus: "paid",    materialsReimbursed: 0,  durationMin: 85, completedAt: daysAgo(63) },
 ].filter(j => j.completedAt <= Date.now());
