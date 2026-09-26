@@ -9,10 +9,9 @@ This slice wires Pro Accept against the shared Supabase backend and adds a stand
 - When both keys are present AND a job id is a UUID (backend job), `Accept` PATCHes:
   - `PATCH {url}/rest/v1/jobs?id=eq.{JOB_ID}&status=eq.posted&pro_id=is.null`
   - Body: `{ status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: <ISO timestamp> }`
-  - Headers: `apikey`, `Authorization: Bearer <anon>`, `Content-Type: application/json`, `Prefer: return=representation`
-- Success (row returned): the app performs a normal local accept (removes from available, adds to active with `status: "en_route"`) and marks the job `backendClaimed: true`.
-- Failure/empty: a toast explains the claim failed (already taken / network) and the job is not added to Active.
-- 409 unique-violation (one-active-job constraint): a clear toast tells the Pro they already have an active job.
+  - Headers: `apikey`, `Authorization: Bearer <anon>`, `Content-Type: application/json`, `Prefer: return=minimal`
+- Success (HTTP 2xx, body may be empty/[] due to RLS): the app performs a normal local accept (removes from available, adds to active with `status: "en_route"`) and marks the job `backendClaimed: true`.
+- Failure: non-2xx or network error show a toast. A 409 conflict (one-active-job constraint) shows a clear dedicated toast.
 - If Supabase is not configured or the id is not a UUID (SIM), Accept behaves exactly as before (local-only).
 
 ## Materials decline (simulated customer response)

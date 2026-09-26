@@ -838,7 +838,7 @@ export default function HavenProApp() {
             "apikey": cfg.anon,
             "Authorization": `Bearer ${cfg.anon}`,
             "Content-Type": "application/json",
-            "Prefer": "return=representation",
+            "Prefer": "return=minimal",
           },
           body: JSON.stringify(body),
         });
@@ -850,11 +850,6 @@ export default function HavenProApp() {
             console.warn("Supabase accept failed", res.status, text);
             showToast("Claim failed — already taken or network issue. Try another job.");
           }
-          return;
-        }
-        const rows = await res.json();
-        if (!Array.isArray(rows) || rows.length === 0) {
-          showToast("Claim failed — already taken. Try another job.");
           return;
         }
         // Success — perform local accept
