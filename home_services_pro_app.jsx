@@ -132,12 +132,15 @@ export default function HavenProApp() {
       const jobs = await fetchPostedJobsFromSupabase();
       if (jobs && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        const activeIds = new Set(activeJobs.map(j => j.id));
-        const filtered = activeIds.size > 0 ? jobs.filter(j => !activeIds.has(j.id)) : jobs;
+        // Exclude any jobs that are currently active so they don't reappear on the board.
+        const activeIds = new Set(activeJobsRef.current.map(j => j.id));
+        const filtered = jobs.filter(j => !activeIds.has(j.id));
         setAvailableJobs(filtered);
       }
     }
     if (tab === "home" && getSupabaseConfig()) {
+      // Clear SIM seeds immediately so they don't linger/flash while backend loads.
+      setAvailableJobs([]);
       load();
       timerId = window.setInterval(load, 30000); // ~30s refresh cadence
     }
@@ -613,7 +616,11 @@ export default function HavenProApp() {
           }
           // Best-effort refresh of posted jobs after a failed claim
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) setAvailableJobs(refreshed);
+          if (refreshed) {
+            const activeIds = new Set(activeJobsRef.current.map(j => j.id));
+            const filtered = refreshed.filter(j => !activeIds.has(j.id));
+            setAvailableJobs(filtered);
+          }
           return;
         }
         backendClaimed = true;
