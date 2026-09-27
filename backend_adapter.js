@@ -117,6 +117,7 @@ async function fetchActiveJobsFromSupabase() {
       // arrived, diagnosing, and in_progress are copied as stored —
       // never rewritten to en_route or an earlier step.
       const backendStatus = row.status;
+      const materialsCents = row.materials_reimbursed_cents;
       return {
         ...base,
         status: backendStatus,
@@ -125,6 +126,8 @@ async function fetchActiveJobsFromSupabase() {
         jobNotes: "",
         beforePhoto: null,
         afterPhoto: null,
+        // Existing jobs.materials_reimbursed_cents column (0001). Dollars, same as local receipts.
+        materialsReimbursed: typeof materialsCents === "number" && materialsCents > 0 ? Math.round(materialsCents / 100) : 0,
       };
     });
   } catch (e) {
@@ -293,8 +296,7 @@ async function backendAllowsWorkAfterArrival(job) {
 // Pro arrival: PATCH status=arrived on an assigned en_route job.
 // Success requires a returned row whose status is arrived (same bar as claim).
 // A 0-row update re-reads status so a lost response after a successful write still counts.
-// RLS does not yet allow this transition (Customer policies stop at claim, materials,
-// decline terminals, and complete). A blocked write returns ok: false — do not treat it as arrived.
+// 0013 allows en_route → arrived. A blocked write returns ok: false — do not treat it as arrived.
 async function patchJobArrivedOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" };
@@ -341,20 +343,24 @@ async function patchJobArrivedOnSupabase(job) {
 }
 
 // Allowed predecessors for the post-arrival work writes.
-// diagnosing only from arrived. in_progress from arrived (fixed service) or diagnosing.
+// diagnosing only from arrived. in_progress from arrived (fixed service),
+// diagnosing, or materials_approved (receipt submitted — SQL 0015).
 // en_route is intentionally absent — that hop is refused.
 const WORK_STATUS_FROM = {
   diagnosing: ["arrived"],
-  in_progress: ["arrived", "diagnosing"],
+  in_progress: ["arrived", "diagnosing", "materials_approved"],
 };
 
 // Pro work start: PATCH status=diagnosing or status=in_progress on an assigned job.
 // Filter is id + pro_id + the job's current allowed status.
 // Success requires a returned row whose status is the target (same bar as arrived / claim).
 // A 0-row update re-reads status so a lost response after a successful write still counts.
-// RLS does not yet allow these transitions (Customer policies stop before 0014).
-// A blocked write returns ok: false — do not advance the local status.
-async function patchJobWorkStatusOnSupabase(job, toStatus) {
+// 0014/0015 allow diagnosing and in_progress, including materials_approved → in_progress.
+// materials_approved → diagnosing stays refused. A blocked write returns ok: false —
+// do not advance the local status.
+// extraFields is optional and only merged for the receipt → in_progress write
+// (materials_reimbursed_cents). Diagnosing / Start Job do not pass it.
+async function patchJobWorkStatusOnSupabase(job, toStatus, extraFields) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" };
   if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
@@ -366,6 +372,10 @@ async function patchJobWorkStatusOnSupabase(job, toStatus) {
   const url =
     `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
     `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.${fromStatus}`;
+  const body = { status: toStatus };
+  if (extraFields && typeof extraFields.materials_reimbursed_cents === "number" && Number.isFinite(extraFields.materials_reimbursed_cents) && extraFields.materials_reimbursed_cents >= 0) {
+    body.materials_reimbursed_cents = Math.round(extraFields.materials_reimbursed_cents);
+  }
   try {
     const res = await fetch(url, {
       method: "PATCH",
@@ -376,7 +386,7 @@ async function patchJobWorkStatusOnSupabase(job, toStatus) {
         Accept: "application/json",
         Prefer: "return=representation",
       },
-      body: JSON.stringify({ status: toStatus }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -400,6 +410,56 @@ async function patchJobWorkStatusOnSupabase(job, toStatus) {
     return { ok: false, reason: "not_updated" };
   } catch (e) {
     console.warn(`Supabase ${toStatus} PATCH error`, e);
+    return { ok: false, reason: "network_error" };
+  }
+}
+
+// Awaited complete write for a backend-claimed in_progress job.
+// Success requires a returned row whose status is complete (same bar as arrived / work).
+// A 0-row update re-reads status so a lost response after a successful write still counts.
+// 0012 allows assigned → complete. Decline terminals stay on the best-effort path.
+// jobs.completed_at already exists on the shared schema (0001) as the terminal timestamp,
+// so this write stamps it. Decline paths do not.
+async function patchJobCompleteOnSupabase(job) {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: true, mode: "sim" };
+  if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
+  if (job.status !== "in_progress") return { ok: false, reason: "bad_from_status" };
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
+    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.in_progress`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ status: "complete", completed_at: new Date().toISOString() }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn("Supabase complete PATCH failed", res.status, text);
+      return { ok: false, reason: `update_failed:${res.status}:${text}` };
+    }
+    let rows = [];
+    try {
+      rows = await res.json();
+    } catch {
+      rows = [];
+    }
+    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === "complete")) {
+      return { ok: true, mode: "update" };
+    }
+    const current = await fetchAssignedJobStatus(job.id);
+    if (current === "complete") return { ok: true, mode: "already" };
+    console.warn("Supabase complete PATCH returned no complete row", current);
+    return { ok: false, reason: "not_updated" };
+  } catch (e) {
+    console.warn("Supabase complete PATCH error", e);
     return { ok: false, reason: "network_error" };
   }
 }

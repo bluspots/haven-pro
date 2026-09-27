@@ -164,7 +164,7 @@ export default function HavenProApp() {
     let cancelled = false;
     const pollOne = async (job) => {
       try {
-        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents`;
+        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents,materials_reimbursed_cents`;
         const res = await fetch(url, {
           method: "GET",
           headers: {
@@ -204,6 +204,29 @@ export default function HavenProApp() {
           showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
           finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
           setMyJobsStack([{ view: "list" }]);
+        } else if (
+          (backendStatus === "in_progress" || backendStatus === "complete") &&
+          (currentJob.status === "materials_requested" || currentJob.status === "materials_approved")
+        ) {
+          // Backend moved past the receipt wait. Follow it so a local
+          // materials_approved row cannot snap back over in_progress / complete.
+          if (backendStatus === "in_progress") {
+            const materialsCents = row.materials_reimbursed_cents;
+            const updates = {
+              status: "in_progress",
+              workStartedAt: currentJob.workStartedAt || Date.now(),
+            };
+            if (typeof materialsCents === "number" && materialsCents > 0) {
+              updates.materialsReimbursed = Math.round(materialsCents / 100);
+            }
+            updates.pendingMaterialsRequest = null;
+            updateActiveJob(job.id, updates);
+          } else {
+            setActiveJobs(prev => prev.filter(j => j.id !== job.id));
+            setReceiptDraft(prev => (prev && prev.jobId === job.id ? null : prev));
+            showToast(`${currentJob.title} is no longer active`);
+            setMyJobsStack([{ view: "list" }]);
+          }
         }
       } catch {
         // swallow — polling is best-effort
@@ -309,6 +332,8 @@ export default function HavenProApp() {
   useEffect(() => { activeJobsRef.current = activeJobs; }, [activeJobs]);
   const arrivingJobIdRef = useRef(null);
   const advancingJobIdRef = useRef(null);
+  const submittingReceiptRef = useRef(false);
+  const completingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
@@ -768,26 +793,52 @@ export default function HavenProApp() {
     popMyJobs();
   }
   async function submitReceipt() {
+    if (submittingReceiptRef.current) return;
     if (!receiptDraft) return;
     const { jobId, cost, photo } = receiptDraft;
     if (!(Number(cost) > 0)) { showToast("Enter the actual amount you paid"); return; }
     if (!photo) { showToast("Attach a photo of the receipt"); return; }
     const job = activeJobsRef.current.find(j => j.id === jobId);
-    // Receipt returns the job to in_progress. Claimed jobs stay blocked until the backend shows arrived.
-    if (job) {
-      const gate = await backendAllowsWorkAfterArrival(job);
-      if (!gate.ok) {
-        showToast("Confirm arrival before starting work.");
-        return;
+    submittingReceiptRef.current = true;
+    try {
+      // Receipt returns the job to in_progress. Claimed jobs stay blocked until the backend shows arrived.
+      if (job) {
+        const gate = await backendAllowsWorkAfterArrival(job);
+        if (!gate.ok) {
+          showToast("Confirm arrival before starting work.");
+          return;
+        }
       }
+      const current = activeJobsRef.current.find(j => j.id === jobId) || job;
+      // Snapshot before the PATCH so a poll that copies materials_reimbursed_cents
+      // back onto the job cannot add the receipt amount a second time.
+      const localUpdates = prevJobUpdatesForReceipt(current, Number(cost), photo);
+      // Backend-claimed receipt: PATCH in_progress before any local advance.
+      // A failed write leaves the job on materials_approved and keeps this form open.
+      if (current && isBackendClaimedJob(current)) {
+        if (current.status !== "materials_approved") {
+          showToast("Couldn't submit the receipt. Try again.");
+          return;
+        }
+        const reimbursedCents = Math.round(localUpdates.materialsReimbursed * 100);
+        const extraFields = Number.isFinite(reimbursedCents) && reimbursedCents >= 0
+          ? { materials_reimbursed_cents: reimbursedCents }
+          : undefined;
+        const result = await patchJobWorkStatusOnSupabase(current, "in_progress", extraFields);
+        if (!result.ok) {
+          showToast("Couldn't submit the receipt. Try again.");
+          return;
+        }
+      }
+      updateActiveJob(jobId, localUpdates);
+      setReceiptDraft(null);
+      popMyJobs();
+      showToast("Receipt submitted — reimbursement added, job continues");
+    } finally {
+      submittingReceiptRef.current = false;
     }
-    updateActiveJob(jobId, prevJobUpdatesForReceipt(jobId, Number(cost), photo));
-    setReceiptDraft(null);
-    popMyJobs();
-    showToast("Receipt submitted — reimbursement added, job continues");
   }
-  function prevJobUpdatesForReceipt(jobId, actualCost, photo) {
-    const job = activeJobs.find(j => j.id === jobId);
+  function prevJobUpdatesForReceipt(job, actualCost, photo) {
     const already = (job && job.materialsReimbursed) || 0;
     return {
       status: "in_progress",
@@ -860,12 +911,29 @@ export default function HavenProApp() {
     }
   }
 
-  function completeJob(jobId) {
-    const job = activeJobs.find(j => j.id === jobId);
+  async function completeJob(jobId) {
+    if (completingJobIdRef.current === jobId) return;
+    const job = activeJobsRef.current.find(j => j.id === jobId);
     if (!job) return;
-    setActiveJobs(prev => prev.filter(j => j.id !== jobId));
-    finalizeJob(job, "complete");
-    setMyJobsStack([{ view: "list" }, { view: "jobComplete", jobId }]);
+    completingJobIdRef.current = jobId;
+    try {
+      // Claimed jobs: await complete on the server before local history.
+      // A failed write keeps the job active (still in_progress) and skips earnings.
+      if (isBackendClaimedJob(job)) {
+        const result = await patchJobCompleteOnSupabase(job);
+        if (!result.ok) {
+          showToast("Couldn't complete the job. Try again.");
+          return;
+        }
+      }
+      const current = activeJobsRef.current.find(j => j.id === jobId);
+      if (!current) return;
+      setActiveJobs(prev => prev.filter(j => j.id !== jobId));
+      finalizeJob(current, "complete");
+      setMyJobsStack([{ view: "list" }, { view: "jobComplete", jobId }]);
+    } finally {
+      completingJobIdRef.current = null;
+    }
   }
 
   function finalizeJob(job, finalStatus) {
@@ -890,9 +958,9 @@ export default function HavenProApp() {
     };
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
-    // Fire-and-forget terminal status sync to backend-claimed jobs so rehydrate won't resurrect them.
-    // Covers all terminal endings used in this repo per Job Contract.
-    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined" || finalStatus === "complete") {
+    // Decline terminals stay best-effort. complete is awaited in completeJob
+    // before this local history write, so a failed complete never lands here.
+    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
       bestEffortPatchTerminalStatus(job, finalStatus);
     }
     return record;
