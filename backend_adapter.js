@@ -113,8 +113,9 @@ async function fetchActiveJobsFromSupabase() {
       const base = mapSupabaseRowToJob(row);
       const acceptedAt =
         row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
-      // Backend status is source of truth on rehydrate, including `arrived`.
-      // Diagnosing / in_progress stay blocked until this status is arrived (or later).
+      // Backend status is source of truth on rehydrate.
+      // arrived, diagnosing, and in_progress are copied as stored —
+      // never rewritten to en_route or an earlier step.
       const backendStatus = row.status;
       return {
         ...base,
@@ -335,6 +336,70 @@ async function patchJobArrivedOnSupabase(job) {
     return { ok: false, reason: "not_updated" };
   } catch (e) {
     console.warn("Supabase arrived PATCH error", e);
+    return { ok: false, reason: "network_error" };
+  }
+}
+
+// Allowed predecessors for the post-arrival work writes.
+// diagnosing only from arrived. in_progress from arrived (fixed service) or diagnosing.
+// en_route is intentionally absent — that hop is refused.
+const WORK_STATUS_FROM = {
+  diagnosing: ["arrived"],
+  in_progress: ["arrived", "diagnosing"],
+};
+
+// Pro work start: PATCH status=diagnosing or status=in_progress on an assigned job.
+// Filter is id + pro_id + the job's current allowed status.
+// Success requires a returned row whose status is the target (same bar as arrived / claim).
+// A 0-row update re-reads status so a lost response after a successful write still counts.
+// RLS does not yet allow these transitions (Customer policies stop before 0014).
+// A blocked write returns ok: false — do not advance the local status.
+async function patchJobWorkStatusOnSupabase(job, toStatus) {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: true, mode: "sim" };
+  if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
+  const allowedFrom = WORK_STATUS_FROM[toStatus];
+  const fromStatus = job.status;
+  if (!allowedFrom || !allowedFrom.includes(fromStatus)) {
+    return { ok: false, reason: "bad_from_status" };
+  }
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
+    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.${fromStatus}`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ status: toStatus }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn(`Supabase ${toStatus} PATCH failed`, res.status, text);
+      return { ok: false, reason: `update_failed:${res.status}:${text}` };
+    }
+    let rows = [];
+    try {
+      rows = await res.json();
+    } catch {
+      rows = [];
+    }
+    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === toStatus)) {
+      return { ok: true, mode: "update" };
+    }
+    // Empty representation: either no matching row, or the write was filtered.
+    // If the server already shows the target, the transition landed.
+    const current = await fetchAssignedJobStatus(job.id);
+    if (current === toStatus) return { ok: true, mode: "already" };
+    console.warn(`Supabase ${toStatus} PATCH returned no ${toStatus} row`, current);
+    return { ok: false, reason: "not_updated" };
+  } catch (e) {
+    console.warn(`Supabase ${toStatus} PATCH error`, e);
     return { ok: false, reason: "network_error" };
   }
 }
