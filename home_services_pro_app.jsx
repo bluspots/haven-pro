@@ -105,6 +105,7 @@ export default function HavenProApp() {
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("all");
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
   const [acceptingJobId, setAcceptingJobId] = useState(null);
+  const [arrivingJobId, setArrivingJobId] = useState(null);
 
   // Rehydrate active jobs from Supabase (server is source of truth) on startup
   useEffect(() => {
@@ -305,6 +306,7 @@ export default function HavenProApp() {
   // ref always holds the latest value for exactly that kind of read.
   const activeJobsRef = useRef(activeJobs);
   useEffect(() => { activeJobsRef.current = activeJobs; }, [activeJobs]);
+  const arrivingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
@@ -642,9 +644,55 @@ export default function HavenProApp() {
   function updateActiveJob(jobId, updates) {
     setActiveJobs(prev => prev.map(j => (j.id === jobId ? { ...j, ...updates } : j)));
   }
-  function markArrived(jobId) { updateActiveJob(jobId, { status: "arrived", arrivedAt: Date.now() }); }
-  function startDiagnosis(jobId) { updateActiveJob(jobId, { status: "diagnosing", diagnosingAt: Date.now() }); }
-  function startWork(jobId) { updateActiveJob(jobId, { status: "in_progress", workStartedAt: Date.now() }); }
+  // Arrival is a backend write for claimed jobs. Local status becomes arrived only
+  // after the server row shows arrived (SIM jobs stay local-only).
+  async function markArrived(jobId) {
+    if (arrivingJobIdRef.current === jobId) return;
+    const job = activeJobsRef.current.find(j => j.id === jobId);
+    if (!job || job.status !== "en_route") return;
+    if (isBackendClaimedJob(job)) {
+      arrivingJobIdRef.current = jobId;
+      setArrivingJobId(jobId);
+      try {
+        const result = await patchJobArrivedOnSupabase(job);
+        if (!result.ok) {
+          showToast("Couldn't confirm arrival. Try again.");
+          return;
+        }
+      } finally {
+        arrivingJobIdRef.current = null;
+        setArrivingJobId(null);
+      }
+    }
+    const current = activeJobsRef.current.find(j => j.id === jobId);
+    if (!current || current.status !== "en_route") return;
+    updateActiveJob(jobId, { status: "arrived", arrivedAt: Date.now() });
+  }
+  // diagnosing and in_progress require the backend to show arrived (or later) for claimed jobs.
+  async function startDiagnosis(jobId) {
+    const job = activeJobsRef.current.find(j => j.id === jobId);
+    if (!job || job.status !== "arrived") return;
+    const gate = await backendAllowsWorkAfterArrival(job);
+    if (!gate.ok) {
+      showToast("Confirm arrival before starting diagnosis.");
+      return;
+    }
+    const current = activeJobsRef.current.find(j => j.id === jobId);
+    if (!current || current.status !== "arrived") return;
+    updateActiveJob(jobId, { status: "diagnosing", diagnosingAt: Date.now() });
+  }
+  async function startWork(jobId) {
+    const job = activeJobsRef.current.find(j => j.id === jobId);
+    if (!job || (job.status !== "arrived" && job.status !== "diagnosing")) return;
+    const gate = await backendAllowsWorkAfterArrival(job);
+    if (!gate.ok) {
+      showToast("Confirm arrival before starting work.");
+      return;
+    }
+    const current = activeJobsRef.current.find(j => j.id === jobId);
+    if (!current || (current.status !== "arrived" && current.status !== "diagnosing")) return;
+    updateActiveJob(jobId, { status: "in_progress", workStartedAt: Date.now() });
+  }
 
   function openMaterialsForm(jobId) {
     setMaterialsDraft({ jobId, items: [{ name: "", cost: "" }] });
@@ -691,11 +739,20 @@ export default function HavenProApp() {
     setReceiptDraft(null);
     popMyJobs();
   }
-  function submitReceipt() {
+  async function submitReceipt() {
     if (!receiptDraft) return;
     const { jobId, cost, photo } = receiptDraft;
     if (!(Number(cost) > 0)) { showToast("Enter the actual amount you paid"); return; }
     if (!photo) { showToast("Attach a photo of the receipt"); return; }
+    const job = activeJobsRef.current.find(j => j.id === jobId);
+    // Receipt returns the job to in_progress. Claimed jobs stay blocked until the backend shows arrived.
+    if (job) {
+      const gate = await backendAllowsWorkAfterArrival(job);
+      if (!gate.ok) {
+        showToast("Confirm arrival before starting work.");
+        return;
+      }
+    }
     updateActiveJob(jobId, prevJobUpdatesForReceipt(jobId, Number(cost), photo));
     setReceiptDraft(null);
     popMyJobs();
@@ -1232,7 +1289,12 @@ export default function HavenProApp() {
     });
     if (job.status === "en_route") {
       if (isNearJob(job)) {
-        return <button style={btnStyle(true)} onClick={() => markArrived(job.id)}>I've Arrived</button>;
+        const busy = arrivingJobId === job.id;
+        return (
+          <button style={{ ...btnStyle(true), opacity: busy ? 0.7 : 1 }} disabled={busy} onClick={() => markArrived(job.id)}>
+            {busy ? "Confirming…" : "I've Arrived"}
+          </button>
+        );
       }
       const dist = proLiveLocation && job.lat != null ? haversineMiles(proLiveLocation.lat, proLiveLocation.lng, job.lat, job.lng) : null;
       return (
