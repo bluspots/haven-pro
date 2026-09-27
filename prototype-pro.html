@@ -381,6 +381,7 @@ async function fetchActiveJobsFromSupabase() {
       // arrived, diagnosing, and in_progress are copied as stored —
       // never rewritten to en_route or an earlier step.
       const backendStatus = row.status;
+      const materialsCents = row.materials_reimbursed_cents;
       return {
         ...base,
         status: backendStatus,
@@ -389,6 +390,8 @@ async function fetchActiveJobsFromSupabase() {
         jobNotes: "",
         beforePhoto: null,
         afterPhoto: null,
+        // Existing jobs.materials_reimbursed_cents column (0001). Dollars, same as local receipts.
+        materialsReimbursed: typeof materialsCents === "number" && materialsCents > 0 ? Math.round(materialsCents / 100) : 0,
       };
     });
   } catch (e) {
@@ -557,8 +560,7 @@ async function backendAllowsWorkAfterArrival(job) {
 // Pro arrival: PATCH status=arrived on an assigned en_route job.
 // Success requires a returned row whose status is arrived (same bar as claim).
 // A 0-row update re-reads status so a lost response after a successful write still counts.
-// RLS does not yet allow this transition (Customer policies stop at claim, materials,
-// decline terminals, and complete). A blocked write returns ok: false — do not treat it as arrived.
+// 0013 allows en_route → arrived. A blocked write returns ok: false — do not treat it as arrived.
 async function patchJobArrivedOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" };
@@ -605,20 +607,24 @@ async function patchJobArrivedOnSupabase(job) {
 }
 
 // Allowed predecessors for the post-arrival work writes.
-// diagnosing only from arrived. in_progress from arrived (fixed service) or diagnosing.
+// diagnosing only from arrived. in_progress from arrived (fixed service),
+// diagnosing, or materials_approved (receipt submitted — SQL 0015).
 // en_route is intentionally absent — that hop is refused.
 const WORK_STATUS_FROM = {
   diagnosing: ["arrived"],
-  in_progress: ["arrived", "diagnosing"],
+  in_progress: ["arrived", "diagnosing", "materials_approved"],
 };
 
 // Pro work start: PATCH status=diagnosing or status=in_progress on an assigned job.
 // Filter is id + pro_id + the job's current allowed status.
 // Success requires a returned row whose status is the target (same bar as arrived / claim).
 // A 0-row update re-reads status so a lost response after a successful write still counts.
-// RLS does not yet allow these transitions (Customer policies stop before 0014).
-// A blocked write returns ok: false — do not advance the local status.
-async function patchJobWorkStatusOnSupabase(job, toStatus) {
+// 0014/0015 allow diagnosing and in_progress, including materials_approved → in_progress.
+// materials_approved → diagnosing stays refused. A blocked write returns ok: false —
+// do not advance the local status.
+// extraFields is optional and only merged for the receipt → in_progress write
+// (materials_reimbursed_cents). Diagnosing / Start Job do not pass it.
+async function patchJobWorkStatusOnSupabase(job, toStatus, extraFields) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" };
   if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
@@ -630,6 +636,10 @@ async function patchJobWorkStatusOnSupabase(job, toStatus) {
   const url =
     `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
     `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.${fromStatus}`;
+  const body = { status: toStatus };
+  if (extraFields && typeof extraFields.materials_reimbursed_cents === "number" && Number.isFinite(extraFields.materials_reimbursed_cents) && extraFields.materials_reimbursed_cents >= 0) {
+    body.materials_reimbursed_cents = Math.round(extraFields.materials_reimbursed_cents);
+  }
   try {
     const res = await fetch(url, {
       method: "PATCH",
@@ -640,7 +650,7 @@ async function patchJobWorkStatusOnSupabase(job, toStatus) {
         Accept: "application/json",
         Prefer: "return=representation",
       },
-      body: JSON.stringify({ status: toStatus }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -664,6 +674,56 @@ async function patchJobWorkStatusOnSupabase(job, toStatus) {
     return { ok: false, reason: "not_updated" };
   } catch (e) {
     console.warn(`Supabase ${toStatus} PATCH error`, e);
+    return { ok: false, reason: "network_error" };
+  }
+}
+
+// Awaited complete write for a backend-claimed in_progress job.
+// Success requires a returned row whose status is complete (same bar as arrived / work).
+// A 0-row update re-reads status so a lost response after a successful write still counts.
+// 0012 allows assigned → complete. Decline terminals stay on the best-effort path.
+// jobs.completed_at already exists on the shared schema (0001) as the terminal timestamp,
+// so this write stamps it. Decline paths do not.
+async function patchJobCompleteOnSupabase(job) {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: true, mode: "sim" };
+  if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
+  if (job.status !== "in_progress") return { ok: false, reason: "bad_from_status" };
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
+    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.in_progress`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ status: "complete", completed_at: new Date().toISOString() }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn("Supabase complete PATCH failed", res.status, text);
+      return { ok: false, reason: `update_failed:${res.status}:${text}` };
+    }
+    let rows = [];
+    try {
+      rows = await res.json();
+    } catch {
+      rows = [];
+    }
+    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === "complete")) {
+      return { ok: true, mode: "update" };
+    }
+    const current = await fetchAssignedJobStatus(job.id);
+    if (current === "complete") return { ok: true, mode: "already" };
+    console.warn("Supabase complete PATCH returned no complete row", current);
+    return { ok: false, reason: "not_updated" };
+  } catch (e) {
+    console.warn("Supabase complete PATCH error", e);
     return { ok: false, reason: "network_error" };
   }
 }
@@ -873,7 +933,7 @@ function HavenProApp() {
     let cancelled = false;
     const pollOne = async (job) => {
       try {
-        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents`;
+        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents,materials_reimbursed_cents`;
         const res = await fetch(url, {
           method: "GET",
           headers: {
@@ -913,6 +973,29 @@ function HavenProApp() {
           showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
           finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
           setMyJobsStack([{ view: "list" }]);
+        } else if (
+          (backendStatus === "in_progress" || backendStatus === "complete") &&
+          (currentJob.status === "materials_requested" || currentJob.status === "materials_approved")
+        ) {
+          // Backend moved past the receipt wait. Follow it so a local
+          // materials_approved row cannot snap back over in_progress / complete.
+          if (backendStatus === "in_progress") {
+            const materialsCents = row.materials_reimbursed_cents;
+            const updates = {
+              status: "in_progress",
+              workStartedAt: currentJob.workStartedAt || Date.now(),
+            };
+            if (typeof materialsCents === "number" && materialsCents > 0) {
+              updates.materialsReimbursed = Math.round(materialsCents / 100);
+            }
+            updates.pendingMaterialsRequest = null;
+            updateActiveJob(job.id, updates);
+          } else {
+            setActiveJobs(prev => prev.filter(j => j.id !== job.id));
+            setReceiptDraft(prev => (prev && prev.jobId === job.id ? null : prev));
+            showToast(`${currentJob.title} is no longer active`);
+            setMyJobsStack([{ view: "list" }]);
+          }
         }
       } catch {
         // swallow — polling is best-effort
@@ -1018,6 +1101,8 @@ function HavenProApp() {
   useEffect(() => { activeJobsRef.current = activeJobs; }, [activeJobs]);
   const arrivingJobIdRef = useRef(null);
   const advancingJobIdRef = useRef(null);
+  const submittingReceiptRef = useRef(false);
+  const completingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
@@ -1477,26 +1562,52 @@ function HavenProApp() {
     popMyJobs();
   }
   async function submitReceipt() {
+    if (submittingReceiptRef.current) return;
     if (!receiptDraft) return;
     const { jobId, cost, photo } = receiptDraft;
     if (!(Number(cost) > 0)) { showToast("Enter the actual amount you paid"); return; }
     if (!photo) { showToast("Attach a photo of the receipt"); return; }
     const job = activeJobsRef.current.find(j => j.id === jobId);
-    // Receipt returns the job to in_progress. Claimed jobs stay blocked until the backend shows arrived.
-    if (job) {
-      const gate = await backendAllowsWorkAfterArrival(job);
-      if (!gate.ok) {
-        showToast("Confirm arrival before starting work.");
-        return;
+    submittingReceiptRef.current = true;
+    try {
+      // Receipt returns the job to in_progress. Claimed jobs stay blocked until the backend shows arrived.
+      if (job) {
+        const gate = await backendAllowsWorkAfterArrival(job);
+        if (!gate.ok) {
+          showToast("Confirm arrival before starting work.");
+          return;
+        }
       }
+      const current = activeJobsRef.current.find(j => j.id === jobId) || job;
+      // Snapshot before the PATCH so a poll that copies materials_reimbursed_cents
+      // back onto the job cannot add the receipt amount a second time.
+      const localUpdates = prevJobUpdatesForReceipt(current, Number(cost), photo);
+      // Backend-claimed receipt: PATCH in_progress before any local advance.
+      // A failed write leaves the job on materials_approved and keeps this form open.
+      if (current && isBackendClaimedJob(current)) {
+        if (current.status !== "materials_approved") {
+          showToast("Couldn't submit the receipt. Try again.");
+          return;
+        }
+        const reimbursedCents = Math.round(localUpdates.materialsReimbursed * 100);
+        const extraFields = Number.isFinite(reimbursedCents) && reimbursedCents >= 0
+          ? { materials_reimbursed_cents: reimbursedCents }
+          : undefined;
+        const result = await patchJobWorkStatusOnSupabase(current, "in_progress", extraFields);
+        if (!result.ok) {
+          showToast("Couldn't submit the receipt. Try again.");
+          return;
+        }
+      }
+      updateActiveJob(jobId, localUpdates);
+      setReceiptDraft(null);
+      popMyJobs();
+      showToast("Receipt submitted — reimbursement added, job continues");
+    } finally {
+      submittingReceiptRef.current = false;
     }
-    updateActiveJob(jobId, prevJobUpdatesForReceipt(jobId, Number(cost), photo));
-    setReceiptDraft(null);
-    popMyJobs();
-    showToast("Receipt submitted — reimbursement added, job continues");
   }
-  function prevJobUpdatesForReceipt(jobId, actualCost, photo) {
-    const job = activeJobs.find(j => j.id === jobId);
+  function prevJobUpdatesForReceipt(job, actualCost, photo) {
     const already = (job && job.materialsReimbursed) || 0;
     return {
       status: "in_progress",
@@ -1569,12 +1680,29 @@ function HavenProApp() {
     }
   }
 
-  function completeJob(jobId) {
-    const job = activeJobs.find(j => j.id === jobId);
+  async function completeJob(jobId) {
+    if (completingJobIdRef.current === jobId) return;
+    const job = activeJobsRef.current.find(j => j.id === jobId);
     if (!job) return;
-    setActiveJobs(prev => prev.filter(j => j.id !== jobId));
-    finalizeJob(job, "complete");
-    setMyJobsStack([{ view: "list" }, { view: "jobComplete", jobId }]);
+    completingJobIdRef.current = jobId;
+    try {
+      // Claimed jobs: await complete on the server before local history.
+      // A failed write keeps the job active (still in_progress) and skips earnings.
+      if (isBackendClaimedJob(job)) {
+        const result = await patchJobCompleteOnSupabase(job);
+        if (!result.ok) {
+          showToast("Couldn't complete the job. Try again.");
+          return;
+        }
+      }
+      const current = activeJobsRef.current.find(j => j.id === jobId);
+      if (!current) return;
+      setActiveJobs(prev => prev.filter(j => j.id !== jobId));
+      finalizeJob(current, "complete");
+      setMyJobsStack([{ view: "list" }, { view: "jobComplete", jobId }]);
+    } finally {
+      completingJobIdRef.current = null;
+    }
   }
 
   function finalizeJob(job, finalStatus) {
@@ -1599,9 +1727,9 @@ function HavenProApp() {
     };
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
-    // Fire-and-forget terminal status sync to backend-claimed jobs so rehydrate won't resurrect them.
-    // Covers all terminal endings used in this repo per Job Contract.
-    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined" || finalStatus === "complete") {
+    // Decline terminals stay best-effort. complete is awaited in completeJob
+    // before this local history write, so a failed complete never lands here.
+    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
       bestEffortPatchTerminalStatus(job, finalStatus);
     }
     return record;
