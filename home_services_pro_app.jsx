@@ -106,6 +106,7 @@ export default function HavenProApp() {
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
   const [acceptingJobId, setAcceptingJobId] = useState(null);
   const [arrivingJobId, setArrivingJobId] = useState(null);
+  const [advancingJobId, setAdvancingJobId] = useState(null);
 
   // Rehydrate active jobs from Supabase (server is source of truth) on startup
   useEffect(() => {
@@ -307,6 +308,7 @@ export default function HavenProApp() {
   const activeJobsRef = useRef(activeJobs);
   useEffect(() => { activeJobsRef.current = activeJobs; }, [activeJobs]);
   const arrivingJobIdRef = useRef(null);
+  const advancingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
@@ -669,29 +671,55 @@ export default function HavenProApp() {
     updateActiveJob(jobId, { status: "arrived", arrivedAt: Date.now() });
   }
   // diagnosing and in_progress require the backend to show arrived (or later) for claimed jobs.
-  async function startDiagnosis(jobId) {
+  // On a backend-claimed UUID job the status is a PATCH. Local status moves only when the
+  // returned row matches. A failed write keeps the prior status. SIM jobs stay local-only.
+  async function advanceClaimedStatus(jobId, { fromStatuses, toStatus, gateToast, failToast, localUpdates }) {
+    if (advancingJobIdRef.current === jobId) return;
     const job = activeJobsRef.current.find(j => j.id === jobId);
-    if (!job || job.status !== "arrived") return;
-    const gate = await backendAllowsWorkAfterArrival(job);
-    if (!gate.ok) {
-      showToast("Confirm arrival before starting diagnosis.");
-      return;
+    if (!job || !fromStatuses.includes(job.status)) return;
+    const fromStatus = job.status;
+    advancingJobIdRef.current = jobId;
+    setAdvancingJobId(jobId);
+    try {
+      const gate = await backendAllowsWorkAfterArrival(job);
+      if (!gate.ok) {
+        showToast(gateToast);
+        return;
+      }
+      const afterGate = activeJobsRef.current.find(j => j.id === jobId);
+      if (!afterGate || afterGate.status !== fromStatus) return;
+      if (isBackendClaimedJob(afterGate)) {
+        const result = await patchJobWorkStatusOnSupabase(afterGate, toStatus);
+        if (!result.ok) {
+          showToast(failToast);
+          return;
+        }
+      }
+      const current = activeJobsRef.current.find(j => j.id === jobId);
+      if (!current || current.status !== fromStatus) return;
+      updateActiveJob(jobId, typeof localUpdates === "function" ? localUpdates() : localUpdates);
+    } finally {
+      advancingJobIdRef.current = null;
+      setAdvancingJobId(null);
     }
-    const current = activeJobsRef.current.find(j => j.id === jobId);
-    if (!current || current.status !== "arrived") return;
-    updateActiveJob(jobId, { status: "diagnosing", diagnosingAt: Date.now() });
+  }
+  async function startDiagnosis(jobId) {
+    await advanceClaimedStatus(jobId, {
+      fromStatuses: ["arrived"],
+      toStatus: "diagnosing",
+      gateToast: "Confirm arrival before starting diagnosis.",
+      failToast: "Couldn't start diagnosis. Try again.",
+      localUpdates: () => ({ status: "diagnosing", diagnosingAt: Date.now() }),
+    });
   }
   async function startWork(jobId) {
-    const job = activeJobsRef.current.find(j => j.id === jobId);
-    if (!job || (job.status !== "arrived" && job.status !== "diagnosing")) return;
-    const gate = await backendAllowsWorkAfterArrival(job);
-    if (!gate.ok) {
-      showToast("Confirm arrival before starting work.");
-      return;
-    }
-    const current = activeJobsRef.current.find(j => j.id === jobId);
-    if (!current || (current.status !== "arrived" && current.status !== "diagnosing")) return;
-    updateActiveJob(jobId, { status: "in_progress", workStartedAt: Date.now() });
+    await advanceClaimedStatus(jobId, {
+      fromStatuses: ["arrived", "diagnosing"],
+      toStatus: "in_progress",
+      gateToast: "Confirm arrival before starting work.",
+      failToast: "Couldn't start the job. Try again.",
+      localUpdates: () => ({ status: "in_progress", workStartedAt: Date.now() }),
+    });
   }
 
   function openMaterialsForm(jobId) {
@@ -1304,14 +1332,20 @@ export default function HavenProApp() {
       );
     }
     if (job.status === "arrived") {
-      return diagnosis
-        ? <button style={btnStyle(true)} onClick={() => startDiagnosis(job.id)}>Start Diagnosis</button>
-        : <button style={btnStyle(true)} onClick={() => startWork(job.id)}>Start Job</button>;
+      const busy = advancingJobId === job.id;
+      const label = diagnosis ? "Start Diagnosis" : "Start Job";
+      const onClick = diagnosis ? () => startDiagnosis(job.id) : () => startWork(job.id);
+      return (
+        <button style={{ ...btnStyle(true), opacity: busy ? 0.7 : 1 }} disabled={busy} onClick={onClick}>
+          {busy ? "Starting…" : label}
+        </button>
+      );
     }
     if (job.status === "diagnosing") {
+      const busy = advancingJobId === job.id;
       return (
         <div style={{ display: "flex", gap: 8 }}>
-          <button style={btnStyle(true)} onClick={() => startWork(job.id)}>Start Job</button>
+          <button style={{ ...btnStyle(true), opacity: busy ? 0.7 : 1 }} disabled={busy} onClick={() => startWork(job.id)}>{busy ? "Starting…" : "Start Job"}</button>
           <button style={btnStyle(false)} onClick={() => openMaterialsForm(job.id)}>Request Materials</button>
         </div>
       );

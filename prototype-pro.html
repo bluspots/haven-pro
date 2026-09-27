@@ -377,8 +377,9 @@ async function fetchActiveJobsFromSupabase() {
       const base = mapSupabaseRowToJob(row);
       const acceptedAt =
         row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
-      // Backend status is source of truth on rehydrate, including `arrived`.
-      // Diagnosing / in_progress stay blocked until this status is arrived (or later).
+      // Backend status is source of truth on rehydrate.
+      // arrived, diagnosing, and in_progress are copied as stored —
+      // never rewritten to en_route or an earlier step.
       const backendStatus = row.status;
       return {
         ...base,
@@ -603,6 +604,70 @@ async function patchJobArrivedOnSupabase(job) {
   }
 }
 
+// Allowed predecessors for the post-arrival work writes.
+// diagnosing only from arrived. in_progress from arrived (fixed service) or diagnosing.
+// en_route is intentionally absent — that hop is refused.
+const WORK_STATUS_FROM = {
+  diagnosing: ["arrived"],
+  in_progress: ["arrived", "diagnosing"],
+};
+
+// Pro work start: PATCH status=diagnosing or status=in_progress on an assigned job.
+// Filter is id + pro_id + the job's current allowed status.
+// Success requires a returned row whose status is the target (same bar as arrived / claim).
+// A 0-row update re-reads status so a lost response after a successful write still counts.
+// RLS does not yet allow these transitions (Customer policies stop before 0014).
+// A blocked write returns ok: false — do not advance the local status.
+async function patchJobWorkStatusOnSupabase(job, toStatus) {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: true, mode: "sim" };
+  if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
+  const allowedFrom = WORK_STATUS_FROM[toStatus];
+  const fromStatus = job.status;
+  if (!allowedFrom || !allowedFrom.includes(fromStatus)) {
+    return { ok: false, reason: "bad_from_status" };
+  }
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
+    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.${fromStatus}`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ status: toStatus }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn(`Supabase ${toStatus} PATCH failed`, res.status, text);
+      return { ok: false, reason: `update_failed:${res.status}:${text}` };
+    }
+    let rows = [];
+    try {
+      rows = await res.json();
+    } catch {
+      rows = [];
+    }
+    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === toStatus)) {
+      return { ok: true, mode: "update" };
+    }
+    // Empty representation: either no matching row, or the write was filtered.
+    // If the server already shows the target, the transition landed.
+    const current = await fetchAssignedJobStatus(job.id);
+    if (current === toStatus) return { ok: true, mode: "already" };
+    console.warn(`Supabase ${toStatus} PATCH returned no ${toStatus} row`, current);
+    return { ok: false, reason: "not_updated" };
+  } catch (e) {
+    console.warn(`Supabase ${toStatus} PATCH error`, e);
+    return { ok: false, reason: "network_error" };
+  }
+}
+
 // Write a backend-claimed job's materials request to Supabase (status + estimate/items).
 // Soft-fails: logs and returns if Supabase isn't configured, id isn't a UUID, or backend not claimed.
 async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
@@ -750,6 +815,7 @@ function HavenProApp() {
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
   const [acceptingJobId, setAcceptingJobId] = useState(null);
   const [arrivingJobId, setArrivingJobId] = useState(null);
+  const [advancingJobId, setAdvancingJobId] = useState(null);
 
   // Rehydrate active jobs from Supabase (server is source of truth) on startup
   useEffect(() => {
@@ -951,6 +1017,7 @@ function HavenProApp() {
   const activeJobsRef = useRef(activeJobs);
   useEffect(() => { activeJobsRef.current = activeJobs; }, [activeJobs]);
   const arrivingJobIdRef = useRef(null);
+  const advancingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
@@ -1313,29 +1380,55 @@ function HavenProApp() {
     updateActiveJob(jobId, { status: "arrived", arrivedAt: Date.now() });
   }
   // diagnosing and in_progress require the backend to show arrived (or later) for claimed jobs.
-  async function startDiagnosis(jobId) {
+  // On a backend-claimed UUID job the status is a PATCH. Local status moves only when the
+  // returned row matches. A failed write keeps the prior status. SIM jobs stay local-only.
+  async function advanceClaimedStatus(jobId, { fromStatuses, toStatus, gateToast, failToast, localUpdates }) {
+    if (advancingJobIdRef.current === jobId) return;
     const job = activeJobsRef.current.find(j => j.id === jobId);
-    if (!job || job.status !== "arrived") return;
-    const gate = await backendAllowsWorkAfterArrival(job);
-    if (!gate.ok) {
-      showToast("Confirm arrival before starting diagnosis.");
-      return;
+    if (!job || !fromStatuses.includes(job.status)) return;
+    const fromStatus = job.status;
+    advancingJobIdRef.current = jobId;
+    setAdvancingJobId(jobId);
+    try {
+      const gate = await backendAllowsWorkAfterArrival(job);
+      if (!gate.ok) {
+        showToast(gateToast);
+        return;
+      }
+      const afterGate = activeJobsRef.current.find(j => j.id === jobId);
+      if (!afterGate || afterGate.status !== fromStatus) return;
+      if (isBackendClaimedJob(afterGate)) {
+        const result = await patchJobWorkStatusOnSupabase(afterGate, toStatus);
+        if (!result.ok) {
+          showToast(failToast);
+          return;
+        }
+      }
+      const current = activeJobsRef.current.find(j => j.id === jobId);
+      if (!current || current.status !== fromStatus) return;
+      updateActiveJob(jobId, typeof localUpdates === "function" ? localUpdates() : localUpdates);
+    } finally {
+      advancingJobIdRef.current = null;
+      setAdvancingJobId(null);
     }
-    const current = activeJobsRef.current.find(j => j.id === jobId);
-    if (!current || current.status !== "arrived") return;
-    updateActiveJob(jobId, { status: "diagnosing", diagnosingAt: Date.now() });
+  }
+  async function startDiagnosis(jobId) {
+    await advanceClaimedStatus(jobId, {
+      fromStatuses: ["arrived"],
+      toStatus: "diagnosing",
+      gateToast: "Confirm arrival before starting diagnosis.",
+      failToast: "Couldn't start diagnosis. Try again.",
+      localUpdates: () => ({ status: "diagnosing", diagnosingAt: Date.now() }),
+    });
   }
   async function startWork(jobId) {
-    const job = activeJobsRef.current.find(j => j.id === jobId);
-    if (!job || (job.status !== "arrived" && job.status !== "diagnosing")) return;
-    const gate = await backendAllowsWorkAfterArrival(job);
-    if (!gate.ok) {
-      showToast("Confirm arrival before starting work.");
-      return;
-    }
-    const current = activeJobsRef.current.find(j => j.id === jobId);
-    if (!current || (current.status !== "arrived" && current.status !== "diagnosing")) return;
-    updateActiveJob(jobId, { status: "in_progress", workStartedAt: Date.now() });
+    await advanceClaimedStatus(jobId, {
+      fromStatuses: ["arrived", "diagnosing"],
+      toStatus: "in_progress",
+      gateToast: "Confirm arrival before starting work.",
+      failToast: "Couldn't start the job. Try again.",
+      localUpdates: () => ({ status: "in_progress", workStartedAt: Date.now() }),
+    });
   }
 
   function openMaterialsForm(jobId) {
@@ -1948,14 +2041,20 @@ function HavenProApp() {
       );
     }
     if (job.status === "arrived") {
-      return diagnosis
-        ? <button style={btnStyle(true)} onClick={() => startDiagnosis(job.id)}>Start Diagnosis</button>
-        : <button style={btnStyle(true)} onClick={() => startWork(job.id)}>Start Job</button>;
+      const busy = advancingJobId === job.id;
+      const label = diagnosis ? "Start Diagnosis" : "Start Job";
+      const onClick = diagnosis ? () => startDiagnosis(job.id) : () => startWork(job.id);
+      return (
+        <button style={{ ...btnStyle(true), opacity: busy ? 0.7 : 1 }} disabled={busy} onClick={onClick}>
+          {busy ? "Starting…" : label}
+        </button>
+      );
     }
     if (job.status === "diagnosing") {
+      const busy = advancingJobId === job.id;
       return (
         <div style={{ display: "flex", gap: 8 }}>
-          <button style={btnStyle(true)} onClick={() => startWork(job.id)}>Start Job</button>
+          <button style={{ ...btnStyle(true), opacity: busy ? 0.7 : 1 }} disabled={busy} onClick={() => startWork(job.id)}>{busy ? "Starting…" : "Start Job"}</button>
           <button style={btnStyle(false)} onClick={() => openMaterialsForm(job.id)}>Request Materials</button>
         </div>
       );
