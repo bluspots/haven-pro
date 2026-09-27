@@ -113,9 +113,12 @@ async function fetchActiveJobsFromSupabase() {
       const base = mapSupabaseRowToJob(row);
       const acceptedAt =
         row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
+      // Backend status is source of truth on rehydrate, including `arrived`.
+      // Diagnosing / in_progress stay blocked until this status is arrived (or later).
+      const backendStatus = row.status;
       return {
         ...base,
-        status: row.status,
+        status: backendStatus,
         acceptedAt,
         backendClaimed: true,
         jobNotes: "",
@@ -227,6 +230,111 @@ async function claimJobOnSupabase(job) {
     }
     return { ok: false, reason: "already_claimed" };
   } catch (e) {
+    return { ok: false, reason: "network_error" };
+  }
+}
+
+// Statuses at or after arrival. en_route does not qualify.
+// diagnosing / in_progress are allowed only once the backend shows arrived (or a later active status).
+const WORK_AFTER_ARRIVAL_STATUSES = new Set([
+  "arrived",
+  "diagnosing",
+  "materials_requested",
+  "materials_approved",
+  "in_progress",
+]);
+
+function isBackendClaimedJob(job) {
+  return !!job && !!getSupabaseConfig() && looksLikeUuid(job.id) && !!job.backendClaimed;
+}
+
+// Read the assigned job's current status. null on miss / error (caller fail-closes).
+async function fetchAssignedJobStatus(jobId) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return null;
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}` +
+    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) {
+      console.warn("Supabase assigned job status fetch failed", res.status, await res.text());
+      return null;
+    }
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0 || !rows[0]) return null;
+    return rows[0].status || null;
+  } catch (e) {
+    console.warn("Supabase assigned job status fetch error", e);
+    return null;
+  }
+}
+
+// True when this job may enter diagnosing / in_progress.
+// SIM (no backend claim) is not gated here — callers still require local arrival.
+// Backend jobs must currently show arrived or a later active status.
+async function backendAllowsWorkAfterArrival(job) {
+  if (!isBackendClaimedJob(job)) return { ok: true, mode: "sim" };
+  const status = await fetchAssignedJobStatus(job.id);
+  if (status && WORK_AFTER_ARRIVAL_STATUSES.has(status)) {
+    return { ok: true, mode: "backend", status };
+  }
+  return { ok: false, mode: "backend", status: status || null };
+}
+
+// Pro arrival: PATCH status=arrived on an assigned en_route job.
+// Success requires a returned row whose status is arrived (same bar as claim).
+// A 0-row update re-reads status so a lost response after a successful write still counts.
+// RLS does not yet allow this transition (Customer policies stop at claim, materials,
+// decline terminals, and complete). A blocked write returns ok: false — do not treat it as arrived.
+async function patchJobArrivedOnSupabase(job) {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: true, mode: "sim" };
+  if (!looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
+    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.en_route`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${cfg.anon}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ status: "arrived" }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn("Supabase arrived PATCH failed", res.status, text);
+      return { ok: false, reason: `update_failed:${res.status}:${text}` };
+    }
+    let rows = [];
+    try {
+      rows = await res.json();
+    } catch {
+      rows = [];
+    }
+    if (Array.isArray(rows) && rows.some(r => r && r.status === "arrived")) {
+      return { ok: true, mode: "update" };
+    }
+    // Empty representation: either no en_route row matched, or the write was filtered.
+    // If the server already shows arrived, the transition landed.
+    const current = await fetchAssignedJobStatus(job.id);
+    if (current === "arrived") return { ok: true, mode: "already" };
+    console.warn("Supabase arrived PATCH returned no arrived row", current);
+    return { ok: false, reason: "not_updated" };
+  } catch (e) {
+    console.warn("Supabase arrived PATCH error", e);
     return { ok: false, reason: "network_error" };
   }
 }
