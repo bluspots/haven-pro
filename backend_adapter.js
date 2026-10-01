@@ -1,7 +1,14 @@
 // ── CHUNK 2: Supabase-backed available jobs (read-only)
 // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
+// Slice 1 adds Auth session bootstrap only. Claim / arrive / materials / complete stay on the anon
+// bearer and DEMO_PRO_ID. See docs/AUTH_SLICE1.md.
 const SUPABASE_URL_KEY = "haven_supabase_url";
 const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
+// Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
+// Coordinated with the Customer app. This slice reads the flag and does not switch job Authorization.
+const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode";
+// Supabase Auth → URL configuration for the published Pro app. Email links must be allowed to land here.
+const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
 const DEMO_PRO_ID = "22222222-2222-4222-8222-222222222222"; // demo pro_id used when claiming backend jobs
 function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
@@ -172,6 +179,7 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
 // Attempt to claim a job in Supabase when configured.
 // Success returns { ok: true }. On 409 conflict (one-active or already taken), returns { ok: false, conflict: true, reason }.
 // On other failures, returns { ok: false, reason }.
+// Slice 1: do not read the auth uid and do not replace DEMO_PRO_ID. Access token is stored for a later slice only.
 async function claimJobOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" }; // no backend configured — SIM/local only
@@ -502,5 +510,159 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
   } catch (e) {
     console.warn("Supabase materials request PATCH error", e);
   }
+}
+
+// ── Slice 1: Pro Auth session (does not authorize job REST) ──────────────
+// Missing / unrecognized values stay ON so the current demo keeps working.
+function isPrototypeAnonMode() {
+  try {
+    const raw = window.localStorage.getItem(HAVEN_PROTOTYPE_ANON_MODE_KEY);
+    if (raw == null) return true;
+    const v = String(raw).trim().toLowerCase();
+    if (v === "" || v === "1" || v === "true" || v === "on" || v === "yes") return true;
+    if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+function havenAuthLib() {
+  try {
+    if (typeof window !== "undefined" && window.supabase && typeof window.supabase.createClient === "function") {
+      return window.supabase;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+let havenSupabaseClient = null;
+let havenSupabaseClientKey = "";
+// In-memory only. Job fetches keep using the anon key until a later slice opts in.
+let havenAccessToken = null;
+let havenAuthUser = null;
+
+function rememberHavenSession(session) {
+  if (session && session.access_token && session.user) {
+    havenAccessToken = session.access_token;
+    const meta = session.user.user_metadata || {};
+    havenAuthUser = {
+      id: session.user.id || null,
+      email: session.user.email || "",
+      role: meta.role || null,
+    };
+    return;
+  }
+  havenAccessToken = null;
+  havenAuthUser = null;
+}
+
+function getHavenAccessToken() {
+  return havenAccessToken;
+}
+
+function getHavenAuthUser() {
+  return havenAuthUser;
+}
+
+function getHavenSupabaseClient() {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return null;
+  const lib = havenAuthLib();
+  if (!lib) return null;
+  const key = cfg.url + "|" + cfg.anon;
+  if (havenSupabaseClient && havenSupabaseClientKey === key) return havenSupabaseClient;
+  havenSupabaseClient = lib.createClient(cfg.url, cfg.anon, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+      storage: window.localStorage,
+    },
+  });
+  havenSupabaseClientKey = key;
+  return havenSupabaseClient;
+}
+
+function havenProAuthRedirectUrl() {
+  return HAVEN_PRO_AUTH_REDIRECT_URL;
+}
+
+// Signup metadata role "pro" is what the Customer 0016 profile trigger reads.
+async function havenAuthSignUp(creds) {
+  const client = getHavenSupabaseClient();
+  if (!client) return { ok: false, reason: "not_configured" };
+  const email = creds && creds.email ? String(creds.email).trim() : "";
+  const password = creds && creds.password ? String(creds.password) : "";
+  const { data, error } = await client.auth.signUp({
+    email: email,
+    password: password,
+    options: {
+      data: { role: "pro" },
+      emailRedirectTo: havenProAuthRedirectUrl(),
+    },
+  });
+  if (error) return { ok: false, reason: error.message || "signup_failed" };
+  const session = data && data.session ? data.session : null;
+  if (session) rememberHavenSession(session);
+  return {
+    ok: true,
+    session: session,
+    user: data && data.user ? data.user : null,
+    needsEmailConfirm: !session,
+  };
+}
+
+async function havenAuthSignIn(creds) {
+  const client = getHavenSupabaseClient();
+  if (!client) return { ok: false, reason: "not_configured" };
+  const email = creds && creds.email ? String(creds.email).trim() : "";
+  const password = creds && creds.password ? String(creds.password) : "";
+  const { data, error } = await client.auth.signInWithPassword({
+    email: email,
+    password: password,
+  });
+  if (error) return { ok: false, reason: error.message || "signin_failed" };
+  const session = data && data.session ? data.session : null;
+  if (!session) return { ok: false, reason: "signin_failed" };
+  rememberHavenSession(session);
+  return { ok: true, session: session, user: data.user || null };
+}
+
+async function havenAuthSignOut() {
+  const client = getHavenSupabaseClient();
+  if (!client) {
+    rememberHavenSession(null);
+    return { ok: true, mode: "local" };
+  }
+  const { error } = await client.auth.signOut();
+  if (error) return { ok: false, reason: error.message || "signout_failed" };
+  rememberHavenSession(null);
+  return { ok: true };
+}
+
+async function havenAuthRestoreSession() {
+  const client = getHavenSupabaseClient();
+  if (!client) return { ok: false, reason: "not_configured" };
+  const { data, error } = await client.auth.getSession();
+  if (error) return { ok: false, reason: error.message || "session_failed" };
+  const session = data && data.session ? data.session : null;
+  rememberHavenSession(session);
+  return { ok: true, session: session };
+}
+
+function subscribeHavenAuth(onChange) {
+  const client = getHavenSupabaseClient();
+  if (!client) return function () {};
+  const { data } = client.auth.onAuthStateChange(function (_event, session) {
+    rememberHavenSession(session);
+    if (typeof onChange === "function") onChange(session || null);
+  });
+  const sub = data && data.subscription;
+  return function () {
+    try {
+      if (sub && typeof sub.unsubscribe === "function") sub.unsubscribe();
+    } catch (e) { /* ignore */ }
+  };
 }
 

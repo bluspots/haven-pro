@@ -35,3 +35,7 @@ Open `prototype-pro.html` in a browser (no install). After editing `home_service
 ```bash
 ./build-pro.sh
 ```
+
+## Auth slice 1
+
+Optional Supabase email sign-up / sign-in / sign-out for role `pro`. Default demo behavior is unchanged (`haven_prototype_anon_mode` defaults on; claim still uses the anon key and `DEMO_PRO_ID`). Redirect URL to allow in Supabase: `https://bluspots.github.io/haven-pro/`. Requires Customer migration 0016 and Email Auth. See `docs/AUTH_SLICE1.md`.

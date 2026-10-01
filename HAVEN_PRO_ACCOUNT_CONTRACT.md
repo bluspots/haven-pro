@@ -12,6 +12,8 @@ Covers Pro account readiness — verification, credentials, payouts, tax — and
 
 ## 0. Changelog
 
+**v0.6** — Auth slice 1. Local `accountStatus` is unchanged. When Supabase URL + anon key are present, Create Account / email sign-in / sign-out also call Supabase Auth and signup sets metadata `role: "pro"`. Missing keys keep the local demo path. Job lifecycle is not gated on the session. Details: `docs/AUTH_SLICE1.md`.
+
 **v0.5 (this update)** — Aligns the documented onboarding sequence and readiness gate order with the live code in `home_services_pro_app.jsx`. Editorial-only; no code changes:
 
 - Onboarding steps (exact order from code):  
@@ -124,6 +126,8 @@ The app's true starting state (`accountStatus: "signed_out"`) has no seeded prof
 
 For readability in prose: Welcome → Create Account → Verify Contact → Create Profile → Choose Categories → Service Area → Identity → Background → Payout → Tax → Credentials (optional) → Ready.  
 `needsOnboarding = accountStatus === "signed_out" || onboardingStatus !== "completed"` gates whether the app renders the wizard or the normal 5-tab shell.
+
+When Supabase is configured, a restored or fresh Auth session sets `accountStatus` to `signed_in` (unless a local demo profile is already loaded). Sign-out clears that auth-linked flag and returns to Welcome. It does not change claim or `DEMO_PRO_ID`.
 
 The four provider steps (Identity/Background/Payout/Tax) reuse the exact same state, actions, and Dev Testing panels as their standalone Profile screens — onboarding is not a simplified preview of verification. Their "Continue" is enabled once the pro has taken the primary action (status `!== "not_started"`), not only once fully verified — a real background check can take days, and onboarding shouldn't block on that. Only Accept Job enforces the full `marketplaceReady` gate.
 

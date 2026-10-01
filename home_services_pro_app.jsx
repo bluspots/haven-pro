@@ -298,6 +298,13 @@ export default function HavenProApp() {
   const [phoneVerifyStatus, setPhoneVerifyStatus] = useState("not_sent"); // not_sent | pending | verified
   const [signUpDraft, setSignUpDraft] = useState({ firstName: "", lastName: "", email: "", phone: "", password: "", confirm: "" });
   const [accountCreatedAt, setAccountCreatedAt] = useState(null);
+  // Real Supabase session, when URL + anon key are configured. Independent of the local demo account.
+  const [authSession, setAuthSession] = useState(null); // { id, email, role } | null
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authNotice, setAuthNotice] = useState("");
+  const [welcomeAuthView, setWelcomeAuthView] = useState("home"); // home | signIn | confirmEmail
+  const [signInDraft, setSignInDraft] = useState({ email: "", password: "" });
+  const [settingsAuthOpen, setSettingsAuthOpen] = useState(false);
 
   /* ── Account Readiness — derived, never stored directly. Only the 5
      mandatory baseline items gate marketplaceReady; optional credentials
@@ -335,6 +342,8 @@ export default function HavenProApp() {
   const submittingReceiptRef = useRef(false);
   const completingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
+  // "local" = demo / onboarding without a Supabase session. "auth" = signed_in came from Supabase Auth.
+  const accountSourceRef = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
 
@@ -416,6 +425,10 @@ export default function HavenProApp() {
   }
   function resetToFreshPro() {
     applyProDefaults(freshProDefaults());
+    accountSourceRef.current = null;
+    setWelcomeAuthView("home");
+    setAuthNotice("");
+    setSettingsAuthOpen(false);
     setAccountStatus("signed_out");
     setOnboardingStatus("not_started");
     setOnboardingStep("welcome");
@@ -429,6 +442,8 @@ export default function HavenProApp() {
   }
   function loadDemoPro() {
     applyProDefaults(demoProDefaults());
+    accountSourceRef.current = "local";
+    setWelcomeAuthView("home");
     setAccountStatus("signed_in");
     setOnboardingStatus("completed");
     setOnboardingStep("done");
@@ -443,6 +458,7 @@ export default function HavenProApp() {
      walking through each onboarding step, for testing screens downstream
      of onboarding without re-doing it every time. */
   function devJumpToMarketplaceReady() {
+    accountSourceRef.current = "local";
     setAccountStatus("signed_in");
     if (!accountCreatedAt) setAccountCreatedAt(Date.now());
     if (!homeCity.trim()) setHomeCity("Orlando, FL");
@@ -457,6 +473,140 @@ export default function HavenProApp() {
     setOnboardingStep("done");
     showToast("Jumped to Marketplace Ready (dev)");
   }
+
+  function sessionToAuthState(session) {
+    if (!session || !session.user) return null;
+    const user = session.user;
+    const meta = user.user_metadata || {};
+    return {
+      id: user.id || null,
+      email: user.email || "",
+      role: meta.role || null,
+    };
+  }
+  // Mirror a real session into the local account flag. Never overwrites a loaded demo profile.
+  function applyAuthSession(session) {
+    const next = sessionToAuthState(session);
+    setAuthSession(next);
+    if (!next) return;
+    setWelcomeAuthView("home");
+    setSettingsAuthOpen(false);
+    if (accountSourceRef.current === "local") return;
+    accountSourceRef.current = "auth";
+    if (next.email) setAccountEmail(next.email);
+    setAccountStatus("signed_in");
+    setAccountCreatedAt(function (prev) { return prev || Date.now(); });
+  }
+  function clearAuthLinkedAccount() {
+    setAuthSession(null);
+    if (accountSourceRef.current !== "auth") return;
+    accountSourceRef.current = null;
+    setAccountStatus("signed_out");
+    setOnboardingStep("welcome");
+    setWelcomeAuthView("home");
+  }
+  async function signOutHavenAccount() {
+    setAuthBusy(true);
+    let result;
+    try {
+      result = await havenAuthSignOut();
+    } catch (e) {
+      result = { ok: false, reason: (e && e.message) || "signout_failed" };
+    }
+    setAuthBusy(false);
+    if (!result.ok) {
+      const msg = result.reason || "Sign out failed";
+      setAuthNotice(msg);
+      showToast(msg);
+      return;
+    }
+    setAuthNotice("");
+    setSettingsAuthOpen(false);
+    clearAuthLinkedAccount();
+    showToast("Signed out");
+  }
+  function continueSignedInSetup() {
+    if (!authSession) return;
+    accountSourceRef.current = "auth";
+    setAccountStatus("signed_in");
+    if (authSession.email) setAccountEmail(authSession.email);
+    setAccountCreatedAt(function (prev) { return prev || Date.now(); });
+    setWelcomeAuthView("home");
+    if (onboardingStatus === "completed") {
+      setOnboardingStep("done");
+      return;
+    }
+    setOnboardingStatus("in_progress");
+    if (onboardingStatus === "not_started" || onboardingStep === "welcome") {
+      setOnboardingStep("createProfile");
+    }
+  }
+  function openEmailSignIn() {
+    setAuthNotice("");
+    setSignInDraft({ email: accountEmail || "", password: "" });
+    setWelcomeAuthView("signIn");
+    setSettingsAuthOpen(true);
+  }
+  async function submitEmailSignIn() {
+    const email = (signInDraft.email || "").trim();
+    const password = signInDraft.password || "";
+    if (!email || !password) {
+      showToast("Enter your email and password");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthNotice("");
+    let result;
+    try {
+      result = await havenAuthSignIn({ email: email, password: password });
+    } catch (e) {
+      result = { ok: false, reason: (e && e.message) || "signin_failed" };
+    }
+    setAuthBusy(false);
+    if (!result.ok) {
+      const msg = result.reason === "not_configured"
+        ? "Supabase is configured but the auth client did not load"
+        : (result.reason || "Could not sign in");
+      setAuthNotice(msg);
+      showToast(msg);
+      return;
+    }
+    accountSourceRef.current = accountSourceRef.current === "local" ? "local" : "auth";
+    const next = sessionToAuthState(result.session);
+    setAuthSession(next);
+    setSettingsAuthOpen(false);
+    setWelcomeAuthView("home");
+    if (accountSourceRef.current !== "local") {
+      if (next && next.email) setAccountEmail(next.email);
+      setAccountStatus("signed_in");
+      setAccountCreatedAt(function (prev) { return prev || Date.now(); });
+      setEmailVerifyStatus("verified");
+      if (onboardingStatus === "not_started" || onboardingStep === "welcome") {
+        setOnboardingStatus("in_progress");
+        setOnboardingStep("createProfile");
+      }
+    }
+    showToast("Signed in");
+  }
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe = function () {};
+    (async function () {
+      if (!getSupabaseConfig() || !getHavenSupabaseClient()) return;
+      const restored = await havenAuthRestoreSession();
+      if (cancelled) return;
+      if (restored && restored.ok && restored.session) applyAuthSession(restored.session);
+      unsubscribe = subscribeHavenAuth(function (session) {
+        if (cancelled) return;
+        if (session) applyAuthSession(session);
+        else clearAuthLinkedAccount();
+      });
+    })();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   function pushEarnings(view) { setEarningsStack(prev => [...prev, view]); }
   function popEarnings() { setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
@@ -2431,7 +2581,7 @@ export default function HavenProApp() {
   }
   /* ── Shared labeled text input — used by every Earnings Setup /
      Verification form so they look and behave identically. ── */
-  function formField(label, value, onChange, placeholder, inputMode) {
+  function formField(label, value, onChange, placeholder, inputMode, type) {
     return (
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</div>
@@ -2440,6 +2590,7 @@ export default function HavenProApp() {
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
           inputMode={inputMode}
+          type={type || "text"}
           style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
         />
       </div>
@@ -3077,12 +3228,41 @@ export default function HavenProApp() {
     );
   }
 
+  function authAccountCard() {
+    const configured = !!getSupabaseConfig();
+    const anonOn = isPrototypeAnonMode();
+    let title = "Signed out";
+    let detail = configured ? "No Supabase session yet." : "Local demo only — Supabase is not configured.";
+    if (authSession) {
+      title = authSession.email || "Signed in";
+      const roleLabel = authSession.role || "pro";
+      detail = `Signed in · role ${roleLabel}`;
+    } else if (accountStatus === "signed_in") {
+      title = accountEmail || "Local demo account";
+      detail = "Local demo · not a Supabase session";
+    }
+    return (
+      <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>
+        <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
+        <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 8, lineHeight: 1.45 }}>
+          {anonOn
+            ? "Demo mode is on. Claim and job updates still use the anonymous demo pro."
+            : "Demo mode is off. This slice still leaves claim and job updates on the anonymous demo pro."}
+        </div>
+      </div>
+    );
+  }
+
   function settingsScreen() {
     const notifOnCount = Object.values(notifPrefs).filter(Boolean).length;
+    const configured = !!getSupabaseConfig();
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("main"))}>
         {backHeader("Settings", () => setProfileView("main"))}
         <div style={{ padding: "0 20px 32px" }}>
+          {authAccountCard()}
           {navRow("🔔", "Notifications", `${notifOnCount} of ${Object.keys(notifPrefs).length} on`, () => setProfileView("notifications"))}
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: "14px", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div>
@@ -3098,7 +3278,28 @@ export default function HavenProApp() {
             </button>
           </div>
           {navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport"))}
-          <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
+          {configured && !authSession && settingsAuthOpen && (
+            <div style={{ marginTop: 8 }}>
+              {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
+              {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
+              {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginBottom: 8 }}>{authNotice}</div>}
+              <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+                {authBusy ? "Signing in…" : "Sign in"}
+              </button>
+            </div>
+          )}
+          {configured && !authSession && !settingsAuthOpen && (
+            <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+              Sign in with email
+            </button>
+          )}
+          {authSession ? (
+            <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+              {authBusy ? "Signing out…" : "Sign Out"}
+            </button>
+          ) : (
+            <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
+          )}
 
           {devTestPanel("account state", [
             { label: "Reset to Fresh Pro", onClick: resetToFreshPro },
@@ -3206,12 +3407,34 @@ export default function HavenProApp() {
           ))}
         </div>
         <div>
-          <button onClick={() => { setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
-            Create Account
-          </button>
-          <button onClick={loadDemoPro} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
-            Sign In
-          </button>
+          {authSession ? (
+            <>
+              {authAccountCard()}
+              <button onClick={continueSignedInSetup} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
+                Continue
+              </button>
+              <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", marginBottom: 10 }}>
+                {authBusy ? "Signing out…" : "Sign out"}
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => { setAuthNotice(""); setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
+                Create Account
+              </button>
+              <button onClick={() => {
+                if (getSupabaseConfig() && !isPrototypeAnonMode()) openEmailSignIn();
+                else loadDemoPro();
+              }} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
+                Sign In
+              </button>
+              {getSupabaseConfig() && isPrototypeAnonMode() && (
+                <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
+                  Sign in with email
+                </button>
+              )}
+            </>
+          )}
           <div style={{ marginTop: 18, padding: 10, borderRadius: 10, border: `1px dashed ${T.tm}`, textAlign: "center" }}>
             <div style={{ fontSize: 9, fontWeight: 800, color: T.tm, textTransform: "uppercase", letterSpacing: 0.5, fontFamily: "monospace", marginBottom: 6 }}>⚙ Dev Testing</div>
             <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
@@ -3228,14 +3451,55 @@ export default function HavenProApp() {
     const d = signUpDraft;
     const set = (k, v) => setSignUpDraft(p => ({ ...p, [k]: v }));
     const valid = d.firstName.trim() && d.lastName.trim() && d.email.trim() && d.phone.trim() && d.password.length >= 6 && d.password === d.confirm;
-    function submit() {
+    async function submit() {
       if (!d.firstName.trim() || !d.lastName.trim()) { showToast("Enter your first and last name"); return; }
       if (!d.email.trim() || !d.phone.trim()) { showToast("Enter your email and phone number"); return; }
       if (d.password.length < 6) { showToast("Password must be at least 6 characters"); return; }
       if (d.password !== d.confirm) { showToast("Passwords don't match"); return; }
+      const email = d.email.trim();
+      if (getSupabaseConfig()) {
+        setAuthBusy(true);
+        setAuthNotice("");
+        let result;
+        try {
+          result = await havenAuthSignUp({ email: email, password: d.password });
+        } catch (e) {
+          result = { ok: false, reason: (e && e.message) || "signup_failed" };
+        }
+        setAuthBusy(false);
+        if (!result.ok) {
+          const msg = result.reason === "not_configured"
+            ? "Supabase is configured but the auth client did not load"
+            : (result.reason || "Could not create account");
+          setAuthNotice(msg);
+          showToast(msg);
+          return;
+        }
+        setFirstName(d.firstName.trim());
+        setLastName(d.lastName.trim());
+        setAccountEmail(email);
+        setAccountPhone(d.phone.trim());
+        setAccountCreatedAt(Date.now());
+        setEmailVerifyStatus("pending");
+        setPhoneVerifyStatus("pending");
+        if (result.session) {
+          accountSourceRef.current = "auth";
+          setAuthSession(sessionToAuthState(result.session));
+          setAccountStatus("signed_in");
+          onboardingNext();
+          return;
+        }
+        setSignInDraft({ email: email, password: "" });
+        setWelcomeAuthView("confirmEmail");
+        setOnboardingStep("welcome");
+        setAuthNotice("Account created. Confirm your email, then sign in. Signup sends role pro so your profile can be created.");
+        showToast("Confirm your email to finish signing in");
+        return;
+      }
+      accountSourceRef.current = "local";
       setFirstName(d.firstName.trim());
       setLastName(d.lastName.trim());
-      setAccountEmail(d.email.trim());
+      setAccountEmail(email);
       setAccountPhone(d.phone.trim());
       setAccountStatus("signed_in");
       setAccountCreatedAt(Date.now());
@@ -3243,26 +3507,68 @@ export default function HavenProApp() {
       setPhoneVerifyStatus("pending");
       onboardingNext();
     }
-    return onboardingChrome("Create Account", null, (
+    return onboardingChrome("Create Account", getSupabaseConfig() ? "Creates a Haven Pro login. Your profile role is pro." : null, (
       <>
         {formField("First Name", d.firstName, v => set("firstName", v), "Jordan")}
         {formField("Last Name", d.lastName, v => set("lastName", v), "Ellis")}
-        {formField("Email", d.email, v => set("email", v), "you@example.com")}
-        {formField("Phone Number", d.phone, v => set("phone", v), "(555) 123-4567")}
-        {formField("Password", d.password, v => set("password", v), "At least 6 characters")}
+        {formField("Email", d.email, v => set("email", v), "you@example.com", "email")}
+        {formField("Phone Number", d.phone, v => set("phone", v), "(555) 123-4567", "tel")}
+        {formField("Password", d.password, v => set("password", v), "At least 6 characters", null, "password")}
         {d.password.length > 0 && d.password.length < 6 && (
           <div style={{ fontSize: 11, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginTop: 4 }}>
             Password must be at least 6 characters
           </div>
         )}
-        {formField("Confirm Password", d.confirm, v => set("confirm", v), "Re-enter your password")}
+        {formField("Confirm Password", d.confirm, v => set("confirm", v), "Re-enter your password", null, "password")}
         {d.confirm.length > 0 && d.password !== d.confirm && (
           <div style={{ fontSize: 11, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginTop: 4 }}>
             Passwords don't match
           </div>
         )}
+        {authNotice && (
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginTop: 4 }}>{authNotice}</div>
+        )}
       </>
-    ), { enabled: !!valid, onClick: submit });
+    ), { enabled: !!valid && !authBusy, onClick: submit, label: authBusy ? "Creating account…" : "Continue" });
+  }
+
+  function onboardingAuthGateScreen() {
+    if (welcomeAuthView === "confirmEmail") {
+      return (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", background: T.bg, padding: "28px 24px" }}>
+          <div>
+            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0, marginBottom: 12 }}>‹</button>
+            <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginBottom: 8 }}>Confirm your email</div>
+            <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.5, marginBottom: 12 }}>
+              We created the Pro login for {signInDraft.email || accountEmail}. Open the confirmation email, then sign in here. The message returns to https://bluspots.github.io/haven-pro/.
+            </div>
+            {authNotice && <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, lineHeight: 1.45 }}>{authNotice}</div>}
+          </div>
+          <button onClick={() => { setAuthNotice(""); setWelcomeAuthView("signIn"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            Sign in
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
+        <div style={{ padding: "28px 24px 0" }}>
+          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 8 }}>Sign in</div>
+          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Job actions stay on the demo pro until a later slice.</div>
+        </div>
+        <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 24px 12px" }}>
+          {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
+          {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
+          {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT }}>{authNotice}</div>}
+        </div>
+        <div style={{ padding: "10px 24px 22px" }}>
+          <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+            {authBusy ? "Signing in…" : "Sign in"}
+          </button>
+        </div>
+      </div>
+    );
   }
 
   function onboardingVerifyContactScreen() {
@@ -3529,6 +3835,7 @@ export default function HavenProApp() {
   }
 
   function onboardingScreen() {
+    if (onboardingStep === "welcome" && (welcomeAuthView === "signIn" || welcomeAuthView === "confirmEmail")) return onboardingAuthGateScreen();
     if (onboardingStep === "welcome") return onboardingWelcomeScreen();
     if (onboardingStep === "createAccount") return onboardingCreateAccountScreen();
     if (onboardingStep === "verifyContact") return onboardingVerifyContactScreen();
