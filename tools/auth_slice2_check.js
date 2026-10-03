@@ -272,8 +272,11 @@ async function checkSignedInWrites() {
   assert.ok(Array.isArray(posted));
   const board = hits.splice(0, hits.length);
   assert.strictEqual(board.length, 1);
-  assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + ANON, "board read stays on the anon key");
+  assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + TOKEN, "signed-in board read uses the user bearer");
+  assert.strictEqual(board[0].opts.headers.apikey, ANON, "signed-in board apikey stays the anon key");
+  assert.ok(board[0].url.includes("status=eq.posted"));
   assert.ok(board[0].url.includes("pro_id=is.null"));
+  assert.ok(!board[0].url.includes(DEMO_PRO_ID));
 
   const active = await api.fetchActiveJobsFromSupabase();
   assert.ok(Array.isArray(active));
@@ -316,6 +319,20 @@ async function checkSignedOutDemo() {
   assert.strictEqual(done.ok, false);
   assert.strictEqual(done.reason, "no_session");
   assert.strictEqual(hits.length, 0, "signed-out writes must not send DEMO_PRO_ID or the anon bearer");
+
+  const posted = await api.fetchPostedJobsFromSupabase();
+  assert.ok(Array.isArray(posted));
+  const board = hits.splice(0, hits.length);
+  assert.strictEqual(board.length, 1, "signed-out posted board still reads claimable rows");
+  assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + ANON, "signed-out board stays on the anon bearer");
+  assert.strictEqual(board[0].opts.headers.apikey, ANON);
+  assert.ok(board[0].url.includes("status=eq.posted"));
+  assert.ok(board[0].url.includes("pro_id=is.null"));
+  assert.ok(!board[0].url.includes(DEMO_PRO_ID), "signed-out board must not query as DEMO_PRO");
+
+  const active = await api.fetchActiveJobsFromSupabase();
+  assert.ok(Array.isArray(active) && active.length===0, "signed-out active rehydrate returns no rows");
+  assert.strictEqual(hits.length, 0, "signed-out active rehydrate must not query as DEMO_PRO");
 }
 
 async function checkEmptyRpcClaimFails() {
@@ -348,6 +365,10 @@ async function checkNoSilentDemoFallback() {
   assert.strictEqual(claim.ok, false);
   assert.strictEqual(claim.reason, "session_identity_missing");
   assert.strictEqual(hits.length, 0, "missing uid must not call the demo write");
+  const posted = await api.fetchPostedJobsFromSupabase();
+  assert.ok(Array.isArray(posted) && posted.length===0, 'missing uid board returns no rows');
+
+  assert.strictEqual(hits.length, 0, "missing uid must not fall back to an anon board read");
 
   const tokenless = { current: { access_token: "", user: { id: AUTH_UID, email: "pro@example.com" } } };
   const api2 = loadAdapter(configuredStorage(), authLib(tokenless), fakeFetch);
