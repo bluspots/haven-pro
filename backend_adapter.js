@@ -282,7 +282,23 @@ async function claimJobOnSupabase(job) {
       return { ok: false, conflict: true, reason: "conflict" };
     }
     if (res.ok) {
-      return { ok: true, mode: "rpc" };
+      // Slice 5: Prefer return=representation. A 2xx with no claimed row is not success.
+      let rows = [];
+      try {
+        rows = await res.json();
+      } catch {
+        rows = [];
+      }
+      const list = Array.isArray(rows) ? rows : (rows && typeof rows === "object" ? [rows] : []);
+      const landed = list.some(
+        (r) =>
+          r &&
+          String(r.id).toLowerCase() === String(job.id).toLowerCase() &&
+          r.status === "en_route" &&
+          String(r.pro_id || "").toLowerCase() === String(actor.proId).toLowerCase()
+      );
+      if (landed) return { ok: true, mode: "rpc" };
+      return { ok: false, reason: "already_claimed" };
     }
     // If the RPC isn't present (404/400) or unauthorized, fall back to direct update path
   } catch (e) {

@@ -318,6 +318,24 @@ async function checkSignedOutDemo() {
   assert.strictEqual(hits.length, 0, "signed-out writes must not send DEMO_PRO_ID or the anon bearer");
 }
 
+async function checkEmptyRpcClaimFails() {
+  const sessionRef = { current: sessionFor(goodUser()) };
+  const hits = [];
+  async function fakeFetch(url, opts) {
+    hits.push({ url: String(url), opts: opts || {} });
+    if (String(url).includes("/rpc/pro_claim_job")) {
+      return { ok: true, status: 200, json: async () => [], text: async () => "" };
+    }
+    throw new Error("PATCH must not run after empty RPC claim: " + url);
+  }
+  const api = loadAdapter(configuredStorage(), authLib(sessionRef), fakeFetch);
+  const claim = await api.claimJobOnSupabase({ id: JOB_ID });
+  assert.strictEqual(claim.ok, false, "empty RPC claim body must not succeed");
+  assert.strictEqual(claim.reason, "already_claimed");
+  assert.strictEqual(hits.length, 1, "empty RPC claim must not fall through to PATCH");
+  assert.ok(hits[0].url.includes("/rpc/pro_claim_job"));
+}
+
 async function checkNoSilentDemoFallback() {
   const broken = { current: { access_token: TOKEN, user: { email: "pro@example.com", user_metadata: { role: "pro" } } } };
   const hits = [];
@@ -360,6 +378,7 @@ function checkSources() {
   assert.ok(jsx.includes('setOnboardingStep("createProfile")'));
   assert.ok(doc.includes("authenticated"));
   assert.ok(doc.includes("DEMO_PRO_ID"));
+  assert.ok(!/if \(res\.ok\) \{\s*return \{ ok: true, mode: "rpc" \}/.test(adapter), "RPC claim must read the returned row");
   assert.ok(!fs.existsSync(path.join(root, "supabase")), "Pro repo must not add SQL migrations");
   assert.ok(!adapter.includes("CREATE POLICY"));
   const statuses = ["en_route", "arrived", "diagnosing", "in_progress", "materials_requested", "materials_approved", "complete", "inspection_completed", "materials_declined"];
@@ -488,6 +507,7 @@ async function main() {
   checkSources();
   await checkSignedInWrites();
   await checkSignedOutDemo();
+  await checkEmptyRpcClaimFails();
   await checkNoSilentDemoFallback();
   await checkOnboardingWall();
   console.log("OK: auth slice 2 checks passed.");
