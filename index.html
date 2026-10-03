@@ -319,20 +319,30 @@ function mapSupabaseRowToJob(row) {
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave SIM_JOBS in place
-  // Board listing stays on the anon key. It is not a pro-identity write.
-  // Slice 2 binds claim and later pro writes, not this posted-job read.
-  // Only claimable rows: posted and unclaimed (pro_id is null), newest first.
-  // Include status and pro_id in selection for a defensive client-side filter.
+  // Posted + unclaimed only. Signed in: user access token. Signed out: anon bearer.
+  // Never query as DEMO_PRO. apikey stays the anon key.
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  let headers = {
+    "apikey": cfg.anon,
+    "Authorization": `Bearer ${cfg.anon}`,
+    "Accept": "application/json",
+    "Prefer": "count=exact",
+  };
+  if (actor.ok && actor.mode === "session") {
+    headers = {
+      "apikey": actor.headers.apikey,
+      "Authorization": actor.headers.Authorization,
+      "Accept": "application/json",
+      "Prefer": "count=exact",
+    };
+  } else if (!actor.ok && actor.reason === "session_identity_missing") {
+    return [];
+  }
   const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id,inspection_fee_cents`;
   try {
     const res = await fetch(url, {
       method: "GET",
-      headers: {
-        "apikey": cfg.anon,
-        "Authorization": `Bearer ${cfg.anon}`,
-        "Accept": "application/json",
-        "Prefer": "count=exact",
-      },
+      headers,
     });
     if (!res.ok) {
       console.warn("Supabase jobs fetch failed", res.status, await res.text());
