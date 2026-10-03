@@ -42,4 +42,4 @@ Optional Supabase email sign-up / sign-in / sign-out for role `pro`. `haven_prot
 
 ## Auth slice 2
 
-When a Pro is signed in, claim and later job writes use that user's auth uid and access token. With no session, those calls still use `DEMO_PRO_ID` and the anon key as Bearer. Signed-in writes can fail until Customer lets the `authenticated` role do the job writes `anon` can do today. This repo does not ship that SQL. See `docs/AUTH_SLICE2.md`.
+When a Pro is signed in, claim and later job writes use that user's auth uid and access token. With no session, those writes stop and do not send a demo pro id. Signed-in writes can fail until Customer lets the `authenticated` role do the job writes `anon` can do today. This repo does not ship that SQL. See `docs/AUTH_SLICE2.md`.

@@ -21,7 +21,7 @@ Key: `haven_prototype_anon_mode` (same name as the Customer app).
 | missing, empty, `true`, `1`, `on`, `yes` | **On** (default) |
 | `false`, `0`, `off`, `no` | Off |
 
-Default **on**. In slice 1, claim, arrive, materials, and complete kept `Authorization: Bearer <anon key>` and `DEMO_PRO_ID`. Turning the flag off did **not** switch those calls, and a signed-in session was not required for them. Slice 2 uses the session when one exists; the flag still does not block the signed-out demo path.
+Default **on**. In slice 1, claim, arrive, materials, and complete kept `Authorization: Bearer <anon key>` and `DEMO_PRO_ID`. Turning the flag off did **not** switch those calls, and a signed-in session was not required for them. Slice 2 used the session when one existed. Slice 4 stops signed-out claim and later writes; the current app does not write as the demo pro. The flag does not choose that identity.
 
 ```js
 localStorage.setItem("haven_prototype_anon_mode", "true"); // default even if unset
@@ -41,4 +41,4 @@ Email confirmation links use that URL (`emailRedirectTo`). Password sign-in on a
 
 ## Out of scope
 
-Ownership RLS, retiring `DEMO_PRO_ID`, requiring a session to claim, and fail-closed lifecycle changes are later slices.
+Ownership RLS and fail-closed lifecycle changes were later slices. Slice 4 now stops a signed-out claim instead of writing as the demo pro.

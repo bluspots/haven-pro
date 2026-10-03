@@ -6,7 +6,7 @@
  * - signed-in claim / arrive / diagnosing / in_progress / materials / complete
  *   use the auth uid and the user access token as Bearer
  * - apikey stays the anon key
- * - no session uses DEMO_PRO_ID and the anon bearer, even if anon mode is off
+ * - no session stops the write and does not send DEMO_PRO_ID, even if anon mode is off
  * - a session missing uid or token does not fall back to DEMO_PRO_ID
  * - anon mode on does not override a real session
  * - lifecycle status strings and fee fields stay put
@@ -92,7 +92,6 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
     "bestEffortPatchTerminalStatus",
     "fetchPostedJobsFromSupabase",
     "fetchActiveJobsFromSupabase",
-    "DEMO_PRO_ID",
   ];
   const code = read("backend_adapter.js") + "\n;globalThis.__haven = { " + names.join(", ") + " };";
   vm.runInContext(code, sandbox, { filename: "backend_adapter.js" });
@@ -186,7 +185,6 @@ async function checkSignedInWrites() {
   });
   const api = loadAdapter(configuredStorage({ haven_prototype_anon_mode: "true" }), authLib(sessionRef), fakeFetch);
   assert.strictEqual(api.isPrototypeAnonMode(), true, "anon mode on must not hide the session");
-  assert.strictEqual(api.DEMO_PRO_ID, DEMO_PRO_ID);
 
   const claim = await api.claimJobOnSupabase({ id: JOB_ID });
   assert.strictEqual(claim.ok, true);
@@ -294,41 +292,30 @@ async function checkSignedOutDemo() {
   const api = loadAdapter(configuredStorage({ haven_prototype_anon_mode: "false" }), authLib(sessionRef), fakeFetch);
   assert.strictEqual(api.isPrototypeAnonMode(), false);
   const claim = await api.claimJobOnSupabase({ id: JOB_ID });
-  assert.strictEqual(claim.ok, true);
-  const claimHits = hits.splice(0, hits.length);
-  const patch = claimHits.find(h => h.opts.method === "PATCH");
-  assertDemoBound(patch);
-  assert.strictEqual(JSON.parse(patch.opts.body).status, "en_route");
-  assert.strictEqual(JSON.parse(patch.opts.body).pro_id, DEMO_PRO_ID);
-  claimHits.forEach(hit => {
-    assert.strictEqual(hit.opts.headers.Authorization, "Bearer " + ANON);
-  });
+  assert.strictEqual(claim.ok, false);
+  assert.strictEqual(claim.reason, "no_session");
+  assert.strictEqual(hits.length, 0, "signed-out claim must not call the jobs API");
 
   const arrived = await api.patchJobArrivedOnSupabase({ id: JOB_ID, backendClaimed: true, status: "en_route" });
-  assert.strictEqual(arrived.ok, true);
-  hits.splice(0, hits.length).forEach(assertDemoBound);
+  assert.strictEqual(arrived.ok, false);
+  assert.strictEqual(arrived.reason, "no_session");
 
   const diagnosing = await api.patchJobWorkStatusOnSupabase(
     { id: JOB_ID, backendClaimed: true, status: "arrived" },
     "diagnosing"
   );
-  assert.strictEqual(diagnosing.ok, true);
-  const diag = hits.splice(0, hits.length);
-  diag.forEach(assertDemoBound);
-  assert.strictEqual(JSON.parse(diag[0].opts.body).status, "diagnosing");
+  assert.strictEqual(diagnosing.ok, false);
+  assert.strictEqual(diagnosing.reason, "no_session");
 
   await api.bestEffortPatchMaterialsRequested(
     { id: JOB_ID, backendClaimed: true },
     [{ name: "Wax ring", cost: 4 }],
     4
   );
-  hits.splice(0, hits.length).forEach(assertDemoBound);
-
   const done = await api.patchJobCompleteOnSupabase({ id: JOB_ID, backendClaimed: true, status: "in_progress" });
-  assert.strictEqual(done.ok, true);
-  const completeHits = hits.splice(0, hits.length);
-  completeHits.forEach(assertDemoBound);
-  assert.strictEqual(JSON.parse(completeHits[0].opts.body).status, "complete");
+  assert.strictEqual(done.ok, false);
+  assert.strictEqual(done.reason, "no_session");
+  assert.strictEqual(hits.length, 0, "signed-out writes must not send DEMO_PRO_ID or the anon bearer");
 }
 
 async function checkNoSilentDemoFallback() {
@@ -364,9 +351,10 @@ function checkSources() {
   const adapter = read("backend_adapter.js");
   const jsx = read("home_services_pro_app.jsx");
   const doc = read("docs/AUTH_SLICE2.md");
-  assert.ok(adapter.includes('const DEMO_PRO_ID = "22222222-2222-4222-8222-222222222222"'));
-  assert.ok(adapter.includes("proId: DEMO_PRO_ID"));
-  assert.ok(adapter.includes("Authorization: `Bearer ${cfg.anon}`"));
+  assert.ok(!adapter.includes("22222222-2222-4222-8222-222222222222"));
+  assert.ok(!adapter.includes("proId: DEMO_PRO_ID"));
+  assert.ok(adapter.includes('reason: "no_session"'));
+  assert.ok(adapter.includes('"Authorization": `Bearer ${cfg.anon}`'));
   assert.ok(adapter.includes("session_identity_missing"));
   assert.ok(jsx.includes("Verify Your Contact Info"));
   assert.ok(jsx.includes('setOnboardingStep("createProfile")'));

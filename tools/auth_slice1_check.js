@@ -6,7 +6,7 @@
  * - anon-mode flag defaults on
  * - signup metadata is role pro and redirect is the Pro Pages URL
  * - signed-in claim identity is covered by auth_slice2_check.js
- * - DEMO_PRO_ID remains the signed-out demo actor
+ * - signed-in claim uses the auth uid; the demo pro id is not the runtime actor
  * - built HTML still boots the welcome demo, and shows email sign-in once configured
  */
 
@@ -57,7 +57,7 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  const code = read("backend_adapter.js") + "\n;globalThis.__haven = { isPrototypeAnonMode, havenAuthSignUp, havenAuthSignIn, havenAuthSignOut, havenAuthRestoreSession, getHavenAccessToken, getHavenAuthUser, claimJobOnSupabase, DEMO_PRO_ID, HAVEN_PRO_AUTH_REDIRECT_URL };";
+  const code = read("backend_adapter.js") + "\n;globalThis.__haven = { isPrototypeAnonMode, havenAuthSignUp, havenAuthSignIn, havenAuthSignOut, havenAuthRestoreSession, getHavenAccessToken, getHavenAuthUser, claimJobOnSupabase, HAVEN_PRO_AUTH_REDIRECT_URL };";
   vm.runInContext(code, sandbox, { filename: "backend_adapter.js" });
   return sandbox.__haven;
 }
@@ -159,8 +159,7 @@ async function checkAuthBehavior() {
   const patch = fetches.find(h => h.opts.method === "PATCH");
   const body = JSON.parse(patch.opts.body);
   assert.strictEqual(body.pro_id, authUid);
-  assert.notStrictEqual(body.pro_id, claiming.DEMO_PRO_ID);
-  assert.strictEqual(claiming.DEMO_PRO_ID, "22222222-2222-4222-8222-222222222222");
+  assert.notStrictEqual(body.pro_id, "22222222-2222-4222-8222-222222222222");
 
   await claiming.havenAuthSignOut();
   assert.strictEqual(claiming.getHavenAccessToken(), null);
@@ -174,8 +173,9 @@ function checkSources() {
   assertIncludes(adapter, 'const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode"', "flag key");
   assertIncludes(adapter, 'data: { role: "pro" }', "signup role");
   assertIncludes(adapter, "https://bluspots.github.io/haven-pro/", "redirect");
-  assertIncludes(adapter, "proId: DEMO_PRO_ID", "demo pro id remains");
-  assertIncludes(adapter, "Authorization: `Bearer ${cfg.anon}`", "anon bearer");
+  assert.ok(!adapter.includes("proId: DEMO_PRO_ID"), "demo pro id is not a write fallback");
+  assertIncludes(adapter, 'reason: "no_session"', "signed-out write stops");
+  assertIncludes(adapter, '"Authorization": `Bearer ${cfg.anon}`', "anon bearer");
   assertIncludes(jsx, "havenAuthSignUp", "jsx signup");
   assertIncludes(jsx, "Sign in with email", "email sign-in affordance");
   assertIncludes(shell, "@supabase/supabase-js@2.117.2/dist/umd/supabase.js", "cdn");
@@ -186,7 +186,8 @@ function checkSources() {
     const html = read(built);
     assertIncludes(html, "haven_prototype_anon_mode", built + " flag");
     assertIncludes(html, 'data: { role: "pro" }', built + " role");
-    assertIncludes(html, "proId: DEMO_PRO_ID", built + " demo pro");
+    assert.ok(!html.includes("proId: DEMO_PRO_ID"), built + " has no demo pro write");
+    assertIncludes(html, 'reason: "no_session"', built + " signed-out stop");
     assertIncludes(html, "@supabase/supabase-js@2.117.2/dist/umd/supabase.js", built + " cdn");
     assert.strictEqual(html.includes("access-token"), false);
   }

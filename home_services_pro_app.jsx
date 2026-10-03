@@ -191,20 +191,20 @@ export default function HavenProApp() {
           updateActiveJob(job.id, { status: "materials_approved" });
           showToast(`Customer approved materials for ${currentJob.title} — go ahead and purchase, then submit your receipt`);
         } else if (backendStatus === "inspection_completed" && currentJob.status !== "inspection_completed") {
-          // Terminal — remove from active, finalize with inspection fee from backend if present.
           const cents = typeof row.inspection_fee_cents === "number" ? row.inspection_fee_cents : Math.round(((currentJob.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
           const fee = Math.round(cents / 100);
+          const record = await finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed");
+          if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
           showToast(`Inspection Completed — Inspection Visit $${fee}`);
-          finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed");
           setMyJobsStack([{ view: "list" }]);
         } else if (backendStatus === "materials_declined" && currentJob.status !== "materials_declined") {
-          // Terminal — remove from active, finalize with convenience fee (default to constant if backend omitted it)
           const cents = typeof row.convenience_fee_cents === "number" ? row.convenience_fee_cents : CONVENIENCE_FEE * 100;
           const conv = Math.round(cents / 100);
+          const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
+          if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
           showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
-          finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
           setMyJobsStack([{ view: "list" }]);
         } else if (
           (backendStatus === "in_progress" || backendStatus === "complete") &&
@@ -907,7 +907,7 @@ export default function HavenProApp() {
     setMaterialsDraft(null);
     popMyJobs();
   }
-  function submitMaterialsRequest() {
+  async function submitMaterialsRequest() {
     if (!materialsDraft) return;
     const { jobId, items } = materialsDraft;
     const cleanItems = items.filter(it => it.name.trim() && Number(it.cost) > 0);
@@ -917,14 +917,18 @@ export default function HavenProApp() {
     const current = activeJobs.find(j => j.id === jobId);
     const cfg = getSupabaseConfig();
     const isBackendJob = !!current && !!cfg && looksLikeUuid(current.id) && !!current.backendClaimed;
+    if (isBackendJob) {
+      const synced = await bestEffortPatchMaterialsRequested(current, cleanItems, totalCost);
+      if (!synced || !synced.ok) {
+        showToast("Couldn't send the materials request. Try again.");
+        return;
+      }
+    }
     updateActiveJob(jobId, { status: "materials_requested", materialsRequestedAt: Date.now(), pendingMaterialsRequest: { items: cleanItems, totalCost } });
     setMaterialsDraft(null);
     popMyJobs();
     showToast("Materials request sent — waiting on the customer");
-    if (isBackendJob) {
-      // Live path — do NOT start the local auto-resolution SIM; write to backend and rely on polling.
-      bestEffortPatchMaterialsRequested(current, cleanItems, totalCost);
-    } else {
+    if (!isBackendJob) {
       // Local-only SIM — keep existing auto-resolution
       const timer = setTimeout(() => resolveMaterialsAuto(jobId), 4500);
       materialsTimers.current[jobId] = timer;
@@ -1035,7 +1039,7 @@ export default function HavenProApp() {
     }, 1400);
   }
 
-  function resolveMaterialsAuto(jobId) {
+  async function resolveMaterialsAuto(jobId) {
     delete materialsTimers.current[jobId];
     const job = activeJobsRef.current.find(j => j.id === jobId);
     if (!job || job.status !== "materials_requested") return; // job already moved on — nothing to resolve
@@ -1047,18 +1051,21 @@ export default function HavenProApp() {
       updateActiveJob(jobId, { status: "materials_approved" });
       showToast(`Customer approved materials for ${job.title} (simulated) — go ahead and purchase, then submit your receipt`);
     } else {
-      setActiveJobs(prev => prev.filter(j => j.id !== jobId));
       const diagnosisPath = jobRequiresDiagnosis(job);
+      let record = null;
       if (diagnosisPath) {
         const hasInspectionFee = (job.inspectionFee || 0) > 0;
         const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
+        record = await finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
+        if (!record) return;
         showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed — Inspection Visit $${fee}`);
-        finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
       } else {
         const convenienceFee = CONVENIENCE_FEE;
+        record = await finalizeJob({ ...job, convenienceFee }, "materials_declined");
+        if (!record) return;
         showToast(`Materials declined — job could not be completed — Convenience Fee $${convenienceFee}`);
-        finalizeJob({ ...job, convenienceFee }, "materials_declined");
       }
+      setActiveJobs(prev => prev.filter(j => j.id !== jobId));
       setMyJobsStack([{ view: "list" }]);
     }
   }
@@ -1088,7 +1095,7 @@ export default function HavenProApp() {
     }
   }
 
-  function finalizeJob(job, finalStatus) {
+  async function finalizeJob(job, finalStatus) {
     const tipAmount = finalStatus === "complete" && Math.random() < 0.7 ? Math.round(job.payout * (0.05 + Math.random() * 0.15)) : 0;
     const actualDurationMs = job.workStartedAt ? Date.now() - job.workStartedAt : null;
     const record = {
@@ -1108,13 +1115,17 @@ export default function HavenProApp() {
       afterPhoto: job.afterPhoto || null,
       completedAt: Date.now(),
     };
+    // Decline terminals on a backend job must land before any local history.
+    // A skipped write (no session) leaves the active job on screen.
+    if ((finalStatus === "inspection_completed" || finalStatus === "materials_declined") && isBackendClaimedJob(job)) {
+      const synced = await bestEffortPatchTerminalStatus(job, finalStatus);
+      if (!synced || !synced.ok) {
+        showToast("Couldn't update the job. Try again.");
+        return null;
+      }
+    }
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
-    // Decline terminals stay best-effort. complete is awaited in completeJob
-    // before this local history write, so a failed complete never lands here.
-    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
-      bestEffortPatchTerminalStatus(job, finalStatus);
-    }
     return record;
   }
 

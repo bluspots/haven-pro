@@ -1,8 +1,8 @@
 // ── CHUNK 2: Supabase-backed available jobs (read-only)
 // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
 // Slice 1 stores the Supabase Auth session. Slice 2 binds claim and later Pro job writes to that
-// session (auth uid + user access token). No session keeps DEMO_PRO_ID and the anon bearer.
-// See docs/AUTH_SLICE2.md.
+// session (auth uid + user access token). Slice 4: no session stops those writes and does not
+// send a demo pro id. The posted-job board read still uses the anon key. See docs/AUTH_SLICE2.md.
 const SUPABASE_URL_KEY = "haven_supabase_url";
 const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 // Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
@@ -10,7 +10,6 @@ const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode";
 // Supabase Auth → URL configuration for the published Pro app. Email links must be allowed to land here.
 const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
-const DEMO_PRO_ID = "22222222-2222-4222-8222-222222222222"; // demo pro_id used when claiming backend jobs
 function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
@@ -89,7 +88,7 @@ async function fetchPostedJobsFromSupabase() {
 }
 
 // Fetch currently active jobs for the acting pro from Supabase (server is source of truth).
-// Signed in: auth uid + user bearer. No session: DEMO_PRO_ID + anon bearer.
+// Signed in: auth uid + user bearer. No session: skip. Do not query as a demo pro.
 // Returns null when Supabase is not configured (SIM mode). On error, soft-fails to [].
 async function fetchActiveJobsFromSupabase() {
   const cfg = getSupabaseConfig();
@@ -156,13 +155,13 @@ async function fetchActiveJobsFromSupabase() {
 async function bestEffortPatchTerminalStatus(job, finalStatus) {
   try {
     const cfg = getSupabaseConfig();
-    if (!cfg) return;
-    if (!looksLikeUuid(job.id)) return;
-    if (!job.backendClaimed) return;
+    if (!cfg) return { ok: false, reason: "not_configured" };
+    if (!looksLikeUuid(job.id)) return { ok: false, reason: "not_backend" };
+    if (!job.backendClaimed) return { ok: false, reason: "not_backend" };
     const actor = await resolveHavenJobWriteAuth(cfg);
     if (!actor.ok) {
       console.warn("Supabase terminal status sync skipped", actor.reason);
-      return;
+      return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     const body = { status: finalStatus };
@@ -184,17 +183,20 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
     });
     if (!res.ok) {
       console.warn("Supabase terminal status sync failed", res.status, await res.text());
+      return { ok: false, reason: "update_failed" };
     }
+    return { ok: true };
   } catch (e) {
     console.warn("Supabase terminal status sync error", e);
+    return { ok: false, reason: "network_error" };
   }
 }
 
 // Slice 2 job-write identity.
 // A real Supabase session binds the write to auth.uid() and that session's access token.
 // apikey stays the anon key; Authorization Bearer does not.
-// No session: explicit demo identity and the anon key as Bearer.
-// A session missing uid or access token fails closed and never uses DEMO_PRO_ID.
+// No session: stop. Do not send a demo pro id or the anon key as the user identity.
+// A session missing uid or access token fails closed and does not write.
 async function resolveHavenJobWriteAuth(cfg) {
   const client = getHavenSupabaseClient();
   if (client && client.auth && typeof client.auth.getSession === "function") {
@@ -241,22 +243,14 @@ async function resolveHavenJobWriteAuth(cfg) {
       },
     };
   }
-  return {
-    ok: true,
-    mode: "demo",
-    proId: DEMO_PRO_ID,
-    headers: {
-      apikey: cfg.anon,
-      Authorization: `Bearer ${cfg.anon}`,
-    },
-  };
+  return { ok: false, reason: "no_session" };
 }
 
 // Attempt to claim a job in Supabase when configured.
 // Success returns { ok: true }. On 409 conflict (one-active or already taken), returns { ok: false, conflict: true, reason }.
 // On other failures, returns { ok: false, reason }.
 // Signed in: pro_id is the auth uid and Bearer is the user access token.
-// Signed out: pro_id is DEMO_PRO_ID and Bearer is the anon key.
+// Signed out: the claim stops and does not send a demo pro id.
 async function claimJobOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" }; // no backend configured — SIM/local only
@@ -564,13 +558,13 @@ async function patchJobCompleteOnSupabase(job) {
 async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
   try {
     const cfg = getSupabaseConfig();
-    if (!cfg) return;
-    if (!looksLikeUuid(job.id)) return;
-    if (!job.backendClaimed) return;
+    if (!cfg) return { ok: false, reason: "not_configured" };
+    if (!looksLikeUuid(job.id)) return { ok: false, reason: "not_backend" };
+    if (!job.backendClaimed) return { ok: false, reason: "not_backend" };
     const actor = await resolveHavenJobWriteAuth(cfg);
     if (!actor.ok) {
       console.warn("Supabase materials request PATCH skipped", actor.reason);
-      return;
+      return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     // Normalize items and include an aggregate estimate (in cents) when possible.
@@ -598,15 +592,18 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
     });
     if (!res.ok) {
       console.warn("Supabase materials request PATCH failed", res.status, await res.text());
+      return { ok: false, reason: "update_failed" };
     }
+    return { ok: true };
   } catch (e) {
     console.warn("Supabase materials request PATCH error", e);
+    return { ok: false, reason: "network_error" };
   }
 }
 
 // ── Slice 1: Pro Auth session. Slice 2 sends it on pro job writes. ───────
-// Missing / unrecognized values stay ON so the current demo keeps working.
-// The flag does not override a real session and does not block signed-out demo writes.
+// Missing / unrecognized values stay ON. The flag does not choose the job writer.
+// A missing session stops claim and later writes. It does not fall back to a demo pro.
 function isPrototypeAnonMode() {
   try {
     const raw = window.localStorage.getItem(HAVEN_PROTOTYPE_ANON_MODE_KEY);

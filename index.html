@@ -267,8 +267,8 @@ const DARK = {
 // ── CHUNK 2: Supabase-backed available jobs (read-only)
 // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
 // Slice 1 stores the Supabase Auth session. Slice 2 binds claim and later Pro job writes to that
-// session (auth uid + user access token). No session keeps DEMO_PRO_ID and the anon bearer.
-// See docs/AUTH_SLICE2.md.
+// session (auth uid + user access token). Slice 4: no session stops those writes and does not
+// send a demo pro id. The posted-job board read still uses the anon key. See docs/AUTH_SLICE2.md.
 const SUPABASE_URL_KEY = "haven_supabase_url";
 const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 // Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
@@ -276,7 +276,6 @@ const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode";
 // Supabase Auth → URL configuration for the published Pro app. Email links must be allowed to land here.
 const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
-const DEMO_PRO_ID = "22222222-2222-4222-8222-222222222222"; // demo pro_id used when claiming backend jobs
 function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
@@ -355,7 +354,7 @@ async function fetchPostedJobsFromSupabase() {
 }
 
 // Fetch currently active jobs for the acting pro from Supabase (server is source of truth).
-// Signed in: auth uid + user bearer. No session: DEMO_PRO_ID + anon bearer.
+// Signed in: auth uid + user bearer. No session: skip. Do not query as a demo pro.
 // Returns null when Supabase is not configured (SIM mode). On error, soft-fails to [].
 async function fetchActiveJobsFromSupabase() {
   const cfg = getSupabaseConfig();
@@ -422,13 +421,13 @@ async function fetchActiveJobsFromSupabase() {
 async function bestEffortPatchTerminalStatus(job, finalStatus) {
   try {
     const cfg = getSupabaseConfig();
-    if (!cfg) return;
-    if (!looksLikeUuid(job.id)) return;
-    if (!job.backendClaimed) return;
+    if (!cfg) return { ok: false, reason: "not_configured" };
+    if (!looksLikeUuid(job.id)) return { ok: false, reason: "not_backend" };
+    if (!job.backendClaimed) return { ok: false, reason: "not_backend" };
     const actor = await resolveHavenJobWriteAuth(cfg);
     if (!actor.ok) {
       console.warn("Supabase terminal status sync skipped", actor.reason);
-      return;
+      return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     const body = { status: finalStatus };
@@ -450,17 +449,20 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
     });
     if (!res.ok) {
       console.warn("Supabase terminal status sync failed", res.status, await res.text());
+      return { ok: false, reason: "update_failed" };
     }
+    return { ok: true };
   } catch (e) {
     console.warn("Supabase terminal status sync error", e);
+    return { ok: false, reason: "network_error" };
   }
 }
 
 // Slice 2 job-write identity.
 // A real Supabase session binds the write to auth.uid() and that session's access token.
 // apikey stays the anon key; Authorization Bearer does not.
-// No session: explicit demo identity and the anon key as Bearer.
-// A session missing uid or access token fails closed and never uses DEMO_PRO_ID.
+// No session: stop. Do not send a demo pro id or the anon key as the user identity.
+// A session missing uid or access token fails closed and does not write.
 async function resolveHavenJobWriteAuth(cfg) {
   const client = getHavenSupabaseClient();
   if (client && client.auth && typeof client.auth.getSession === "function") {
@@ -507,22 +509,14 @@ async function resolveHavenJobWriteAuth(cfg) {
       },
     };
   }
-  return {
-    ok: true,
-    mode: "demo",
-    proId: DEMO_PRO_ID,
-    headers: {
-      apikey: cfg.anon,
-      Authorization: `Bearer ${cfg.anon}`,
-    },
-  };
+  return { ok: false, reason: "no_session" };
 }
 
 // Attempt to claim a job in Supabase when configured.
 // Success returns { ok: true }. On 409 conflict (one-active or already taken), returns { ok: false, conflict: true, reason }.
 // On other failures, returns { ok: false, reason }.
 // Signed in: pro_id is the auth uid and Bearer is the user access token.
-// Signed out: pro_id is DEMO_PRO_ID and Bearer is the anon key.
+// Signed out: the claim stops and does not send a demo pro id.
 async function claimJobOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" }; // no backend configured — SIM/local only
@@ -830,13 +824,13 @@ async function patchJobCompleteOnSupabase(job) {
 async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
   try {
     const cfg = getSupabaseConfig();
-    if (!cfg) return;
-    if (!looksLikeUuid(job.id)) return;
-    if (!job.backendClaimed) return;
+    if (!cfg) return { ok: false, reason: "not_configured" };
+    if (!looksLikeUuid(job.id)) return { ok: false, reason: "not_backend" };
+    if (!job.backendClaimed) return { ok: false, reason: "not_backend" };
     const actor = await resolveHavenJobWriteAuth(cfg);
     if (!actor.ok) {
       console.warn("Supabase materials request PATCH skipped", actor.reason);
-      return;
+      return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     // Normalize items and include an aggregate estimate (in cents) when possible.
@@ -864,15 +858,18 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
     });
     if (!res.ok) {
       console.warn("Supabase materials request PATCH failed", res.status, await res.text());
+      return { ok: false, reason: "update_failed" };
     }
+    return { ok: true };
   } catch (e) {
     console.warn("Supabase materials request PATCH error", e);
+    return { ok: false, reason: "network_error" };
   }
 }
 
 // ── Slice 1: Pro Auth session. Slice 2 sends it on pro job writes. ───────
-// Missing / unrecognized values stay ON so the current demo keeps working.
-// The flag does not override a real session and does not block signed-out demo writes.
+// Missing / unrecognized values stay ON. The flag does not choose the job writer.
+// A missing session stops claim and later writes. It does not fall back to a demo pro.
 function isPrototypeAnonMode() {
   try {
     const raw = window.localStorage.getItem(HAVEN_PROTOTYPE_ANON_MODE_KEY);
@@ -1217,20 +1214,20 @@ function HavenProApp() {
           updateActiveJob(job.id, { status: "materials_approved" });
           showToast(`Customer approved materials for ${currentJob.title} — go ahead and purchase, then submit your receipt`);
         } else if (backendStatus === "inspection_completed" && currentJob.status !== "inspection_completed") {
-          // Terminal — remove from active, finalize with inspection fee from backend if present.
           const cents = typeof row.inspection_fee_cents === "number" ? row.inspection_fee_cents : Math.round(((currentJob.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
           const fee = Math.round(cents / 100);
+          const record = await finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed");
+          if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
           showToast(`Inspection Completed — Inspection Visit $${fee}`);
-          finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed");
           setMyJobsStack([{ view: "list" }]);
         } else if (backendStatus === "materials_declined" && currentJob.status !== "materials_declined") {
-          // Terminal — remove from active, finalize with convenience fee (default to constant if backend omitted it)
           const cents = typeof row.convenience_fee_cents === "number" ? row.convenience_fee_cents : CONVENIENCE_FEE * 100;
           const conv = Math.round(cents / 100);
+          const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
+          if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
           showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
-          finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
           setMyJobsStack([{ view: "list" }]);
         } else if (
           (backendStatus === "in_progress" || backendStatus === "complete") &&
@@ -1933,7 +1930,7 @@ function HavenProApp() {
     setMaterialsDraft(null);
     popMyJobs();
   }
-  function submitMaterialsRequest() {
+  async function submitMaterialsRequest() {
     if (!materialsDraft) return;
     const { jobId, items } = materialsDraft;
     const cleanItems = items.filter(it => it.name.trim() && Number(it.cost) > 0);
@@ -1943,14 +1940,18 @@ function HavenProApp() {
     const current = activeJobs.find(j => j.id === jobId);
     const cfg = getSupabaseConfig();
     const isBackendJob = !!current && !!cfg && looksLikeUuid(current.id) && !!current.backendClaimed;
+    if (isBackendJob) {
+      const synced = await bestEffortPatchMaterialsRequested(current, cleanItems, totalCost);
+      if (!synced || !synced.ok) {
+        showToast("Couldn't send the materials request. Try again.");
+        return;
+      }
+    }
     updateActiveJob(jobId, { status: "materials_requested", materialsRequestedAt: Date.now(), pendingMaterialsRequest: { items: cleanItems, totalCost } });
     setMaterialsDraft(null);
     popMyJobs();
     showToast("Materials request sent — waiting on the customer");
-    if (isBackendJob) {
-      // Live path — do NOT start the local auto-resolution SIM; write to backend and rely on polling.
-      bestEffortPatchMaterialsRequested(current, cleanItems, totalCost);
-    } else {
+    if (!isBackendJob) {
       // Local-only SIM — keep existing auto-resolution
       const timer = setTimeout(() => resolveMaterialsAuto(jobId), 4500);
       materialsTimers.current[jobId] = timer;
@@ -2061,7 +2062,7 @@ function HavenProApp() {
     }, 1400);
   }
 
-  function resolveMaterialsAuto(jobId) {
+  async function resolveMaterialsAuto(jobId) {
     delete materialsTimers.current[jobId];
     const job = activeJobsRef.current.find(j => j.id === jobId);
     if (!job || job.status !== "materials_requested") return; // job already moved on — nothing to resolve
@@ -2073,18 +2074,21 @@ function HavenProApp() {
       updateActiveJob(jobId, { status: "materials_approved" });
       showToast(`Customer approved materials for ${job.title} (simulated) — go ahead and purchase, then submit your receipt`);
     } else {
-      setActiveJobs(prev => prev.filter(j => j.id !== jobId));
       const diagnosisPath = jobRequiresDiagnosis(job);
+      let record = null;
       if (diagnosisPath) {
         const hasInspectionFee = (job.inspectionFee || 0) > 0;
         const fee = hasInspectionFee ? job.inspectionFee : INSPECTION_VISIT_FEE;
+        record = await finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
+        if (!record) return;
         showToast(`Customer declined materials for ${job.title} (simulated) — Inspection Completed — Inspection Visit $${fee}`);
-        finalizeJob({ ...job, inspectionFee: fee }, "inspection_completed");
       } else {
         const convenienceFee = CONVENIENCE_FEE;
+        record = await finalizeJob({ ...job, convenienceFee }, "materials_declined");
+        if (!record) return;
         showToast(`Materials declined — job could not be completed — Convenience Fee $${convenienceFee}`);
-        finalizeJob({ ...job, convenienceFee }, "materials_declined");
       }
+      setActiveJobs(prev => prev.filter(j => j.id !== jobId));
       setMyJobsStack([{ view: "list" }]);
     }
   }
@@ -2114,7 +2118,7 @@ function HavenProApp() {
     }
   }
 
-  function finalizeJob(job, finalStatus) {
+  async function finalizeJob(job, finalStatus) {
     const tipAmount = finalStatus === "complete" && Math.random() < 0.7 ? Math.round(job.payout * (0.05 + Math.random() * 0.15)) : 0;
     const actualDurationMs = job.workStartedAt ? Date.now() - job.workStartedAt : null;
     const record = {
@@ -2134,13 +2138,17 @@ function HavenProApp() {
       afterPhoto: job.afterPhoto || null,
       completedAt: Date.now(),
     };
+    // Decline terminals on a backend job must land before any local history.
+    // A skipped write (no session) leaves the active job on screen.
+    if ((finalStatus === "inspection_completed" || finalStatus === "materials_declined") && isBackendClaimedJob(job)) {
+      const synced = await bestEffortPatchTerminalStatus(job, finalStatus);
+      if (!synced || !synced.ok) {
+        showToast("Couldn't update the job. Try again.");
+        return null;
+      }
+    }
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
-    // Decline terminals stay best-effort. complete is awaited in completeJob
-    // before this local history write, so a failed complete never lands here.
-    if (finalStatus === "inspection_completed" || finalStatus === "materials_declined") {
-      bestEffortPatchTerminalStatus(job, finalStatus);
-    }
     return record;
   }
 
