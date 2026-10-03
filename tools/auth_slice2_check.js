@@ -277,6 +277,7 @@ async function checkSignedInWrites() {
   assert.strictEqual(board.length, 1);
   assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + TOKEN, "signed-in board read uses the user bearer");
   assert.strictEqual(board[0].opts.headers.apikey, ANON, "signed-in board apikey stays the anon key");
+  assert.ok(board[0].url.includes("/rest/v1/jobs?"), "signed-in board still reads public.jobs");
   assert.ok(board[0].url.includes("status=eq.posted"));
   assert.ok(board[0].url.includes("pro_id=is.null"));
   assert.ok(!board[0].url.includes(DEMO_PRO_ID));
@@ -329,8 +330,8 @@ async function checkSignedOutDemo() {
   assert.strictEqual(board.length, 1, "signed-out posted board still reads claimable rows");
   assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + ANON, "signed-out board stays on the anon bearer");
   assert.strictEqual(board[0].opts.headers.apikey, ANON);
-  assert.ok(board[0].url.includes("status=eq.posted"));
-  assert.ok(board[0].url.includes("pro_id=is.null"));
+  assert.ok(board[0].url.includes("/rest/v1/posted_jobs_public"), "signed-out board uses the public view");
+  assert.ok(!board[0].url.includes("/rest/v1/jobs?"), "signed-out board must not SELECT the base jobs table");
   assert.ok(!board[0].url.includes(DEMO_PRO_ID), "signed-out board must not query as DEMO_PRO");
 
   const active = await api.fetchActiveJobsFromSupabase();
