@@ -1,3 +1,5 @@
+Slice 4 stops the signed-out demo write. The rest of this page is what Slice 2 shipped.
+
 # Haven Pro — Auth slice 2 (session-bound job writes)
 
 Slice 1 stores a Supabase Auth session and still writes jobs as `DEMO_PRO_ID` with the anon key as Bearer. Slice 2 changes the signed-in path only.
