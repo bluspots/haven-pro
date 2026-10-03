@@ -108,23 +108,8 @@ export default function HavenProApp() {
   const [arrivingJobId, setArrivingJobId] = useState(null);
   const [advancingJobId, setAdvancingJobId] = useState(null);
 
-  // Rehydrate active jobs from Supabase (server is source of truth) on startup
-  useEffect(() => {
-    let cancelled = false;
-    async function loadActive() {
-      const rows = await fetchActiveJobsFromSupabase();
-      if (rows && !cancelled) {
-        setActiveJobs(rows);
-        // Ensure claimed job(s) do not reappear on the board
-        const activeIds = new Set(rows.map(j => j.id));
-        setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
-      }
-    }
-    if (getSupabaseConfig()) {
-      loadActive();
-    }
-    return () => { cancelled = true; };
-  }, []);
+  // Active-job rehydrate effect is declared after authSession so a refresh
+  // can re-run once the restored session is known (see below).
 
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
@@ -346,6 +331,8 @@ export default function HavenProApp() {
   const longPressTimer = useRef(null);
   // "local" = demo / onboarding without a Supabase session. "auth" = signed_in came from Supabase Auth.
   const accountSourceRef = useRef(null);
+  // Tracks which auth uid already had local workspace applied this boot.
+  const workspaceAppliedForRef = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
 
@@ -486,7 +473,71 @@ export default function HavenProApp() {
       role: meta.role || null,
     };
   }
+  function buildHavenProWorkspaceSnapshot() {
+    return {
+      onboardingStatus: onboardingStatus,
+      onboardingStep: onboardingStep,
+      firstName: firstName,
+      lastName: lastName,
+      homeCity: homeCity,
+      about: about,
+      avatarEmoji: avatarEmoji,
+      travelRadius: travelRadius,
+      workCategories: Array.from(workCategories),
+      accountEmail: accountEmail,
+      accountPhone: accountPhone,
+      emailVerifyStatus: emailVerifyStatus,
+      phoneVerifyStatus: phoneVerifyStatus,
+      identityVerification: identityVerification,
+      backgroundCheck: backgroundCheck,
+      payoutAccount: payoutAccount,
+      taxProfile: taxProfile,
+      taxLegalName: taxLegalName,
+      taxClassification: taxClassification,
+      accountCreatedAt: accountCreatedAt,
+    };
+  }
+  // Apply a previously saved local workspace for this auth uid.
+  // Does not write to Supabase profiles. A completed snapshot skips Create Your Profile.
+  function applyHavenProWorkspace(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    if (typeof snapshot.firstName === "string") setFirstName(snapshot.firstName);
+    if (typeof snapshot.lastName === "string") setLastName(snapshot.lastName);
+    if (typeof snapshot.homeCity === "string") setHomeCity(snapshot.homeCity);
+    if (typeof snapshot.about === "string") setAbout(snapshot.about);
+    if (typeof snapshot.avatarEmoji === "string") setAvatarEmoji(snapshot.avatarEmoji);
+    if (typeof snapshot.travelRadius === "number" && snapshot.travelRadius > 0) setTravelRadius(snapshot.travelRadius);
+    if (Array.isArray(snapshot.workCategories)) setWorkCategories(new Set(snapshot.workCategories.filter(Boolean)));
+    if (typeof snapshot.accountEmail === "string" && snapshot.accountEmail) setAccountEmail(snapshot.accountEmail);
+    if (typeof snapshot.accountPhone === "string") setAccountPhone(snapshot.accountPhone);
+    if (typeof snapshot.emailVerifyStatus === "string") setEmailVerifyStatus(snapshot.emailVerifyStatus);
+    if (typeof snapshot.phoneVerifyStatus === "string") setPhoneVerifyStatus(snapshot.phoneVerifyStatus);
+    if (snapshot.identityVerification && typeof snapshot.identityVerification === "object") setIdentityVerification(snapshot.identityVerification);
+    if (snapshot.backgroundCheck && typeof snapshot.backgroundCheck === "object") setBackgroundCheck(snapshot.backgroundCheck);
+    if (snapshot.payoutAccount && typeof snapshot.payoutAccount === "object") setPayoutAccount(snapshot.payoutAccount);
+    if (snapshot.taxProfile && typeof snapshot.taxProfile === "object") setTaxProfile(snapshot.taxProfile);
+    if (typeof snapshot.taxLegalName === "string") setTaxLegalName(snapshot.taxLegalName);
+    if (typeof snapshot.taxClassification === "string") setTaxClassification(snapshot.taxClassification);
+    if (typeof snapshot.accountCreatedAt === "number") setAccountCreatedAt(snapshot.accountCreatedAt);
+    const cityOk = !!(snapshot.homeCity && String(snapshot.homeCity).trim());
+    const catsOk = Array.isArray(snapshot.workCategories) && snapshot.workCategories.length > 0;
+    const completed = snapshot.onboardingStatus === "completed" || (cityOk && catsOk);
+    if (completed) {
+      setOnboardingStatus("completed");
+      setOnboardingStep("done");
+      return true;
+    }
+    if (snapshot.onboardingStatus === "in_progress") {
+      setOnboardingStatus("in_progress");
+      if (typeof snapshot.onboardingStep === "string" && snapshot.onboardingStep) {
+        setOnboardingStep(snapshot.onboardingStep);
+      }
+      return true;
+    }
+    return false;
+  }
   // Mirror a real session into the local account flag. Never overwrites a loaded demo profile.
+  // Restores the local workspace for this uid so a refresh does not drop into Create Your Profile.
   function applyAuthSession(session) {
     const next = sessionToAuthState(session);
     setAuthSession(next);
@@ -498,12 +549,19 @@ export default function HavenProApp() {
     if (next.email) setAccountEmail(next.email);
     setAccountStatus("signed_in");
     setAccountCreatedAt(function (prev) { return prev || Date.now(); });
+    if (next.id && workspaceAppliedForRef.current !== next.id) {
+      const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(next.id) : null;
+      workspaceAppliedForRef.current = next.id;
+      if (snap) applyHavenProWorkspace(snap);
+    }
   }
   function clearAuthLinkedAccount() {
     setAuthSession(null);
+    workspaceAppliedForRef.current = null;
     if (accountSourceRef.current !== "auth") return;
     accountSourceRef.current = null;
     setAccountStatus("signed_out");
+    setOnboardingStatus("not_started");
     setOnboardingStep("welcome");
     setWelcomeAuthView("home");
   }
@@ -534,7 +592,17 @@ export default function HavenProApp() {
     if (authSession.email) setAccountEmail(authSession.email);
     setAccountCreatedAt(function (prev) { return prev || Date.now(); });
     setWelcomeAuthView("home");
+    if (authSession.id && workspaceAppliedForRef.current !== authSession.id) {
+      const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(authSession.id) : null;
+      workspaceAppliedForRef.current = authSession.id;
+      if (snap && applyHavenProWorkspace(snap)) return;
+    }
     if (onboardingStatus === "completed") {
+      setOnboardingStep("done");
+      return;
+    }
+    if (homeCity.trim() && workCategories.size > 0) {
+      setOnboardingStatus("completed");
       setOnboardingStep("done");
       return;
     }
@@ -583,7 +651,13 @@ export default function HavenProApp() {
       setAccountStatus("signed_in");
       setAccountCreatedAt(function (prev) { return prev || Date.now(); });
       setEmailVerifyStatus("verified");
-      if (onboardingStatus === "not_started" || onboardingStep === "welcome") {
+      let restored = false;
+      if (next && next.id) {
+        const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(next.id) : null;
+        workspaceAppliedForRef.current = next.id;
+        if (snap) restored = applyHavenProWorkspace(snap);
+      }
+      if (!restored && (onboardingStatus === "not_started" || onboardingStep === "welcome")) {
         setOnboardingStatus("in_progress");
         setOnboardingStep("createProfile");
       }
@@ -609,6 +683,63 @@ export default function HavenProApp() {
       unsubscribe();
     };
   }, []);
+
+  // Persist the local Pro workspace for the signed-in auth uid only.
+  // Never inserts or updates public.profiles — refresh restore is localStorage only.
+  useEffect(() => {
+    if (!authSession || !authSession.id) return;
+    if (accountSourceRef.current === "local") return;
+    if (typeof saveHavenProWorkspace !== "function") return;
+    saveHavenProWorkspace(authSession.id, buildHavenProWorkspaceSnapshot());
+  }, [
+    authSession,
+    onboardingStatus,
+    onboardingStep,
+    firstName,
+    lastName,
+    homeCity,
+    about,
+    avatarEmoji,
+    travelRadius,
+    workCategories,
+    accountEmail,
+    accountPhone,
+    emailVerifyStatus,
+    phoneVerifyStatus,
+    identityVerification,
+    backgroundCheck,
+    payoutAccount,
+    taxProfile,
+    taxLegalName,
+    taxClassification,
+    accountCreatedAt,
+  ]);
+
+  // Active jobs for this pro. Re-run after the session is restored so a
+  // refresh with a real profile also restores the active job.
+  // An assigned active job means this Pro already passed onboarding — never
+  // drop them back on Create Your Profile just because local state was blank.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadActive() {
+      const rows = await fetchActiveJobsFromSupabase();
+      if (cancelled) return;
+      if (rows) {
+        setActiveJobs(rows);
+        const activeIds = new Set(rows.map(j => j.id));
+        setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
+        if (rows.length > 0) {
+          setOnboardingStatus(prev => (prev === "completed" ? prev : "completed"));
+          setOnboardingStep("done");
+          setAccountStatus("signed_in");
+        }
+      }
+    }
+    if (getSupabaseConfig() && authSession && authSession.id) {
+      loadActive();
+    }
+    return () => { cancelled = true; };
+  }, [authSession && authSession.id]);
 
   function pushEarnings(view) { setEarningsStack(prev => [...prev, view]); }
   function popEarnings() { setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }

@@ -12,6 +12,7 @@
  * - lifecycle status strings and fee fields stay put
  * - local demo create-account still reaches Verify Your Contact Info
  * - a Supabase session skips that demo wall
+ * - local Pro workspace snapshot save/load for refresh rehydration
  */
 
 const fs = require("fs");
@@ -92,6 +93,8 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
     "bestEffortPatchTerminalStatus",
     "fetchPostedJobsFromSupabase",
     "fetchActiveJobsFromSupabase",
+    "loadHavenProWorkspace",
+    "saveHavenProWorkspace",
   ];
   const code = read("backend_adapter.js") + "\n;globalThis.__haven = { " + names.join(", ") + " };";
   vm.runInContext(code, sandbox, { filename: "backend_adapter.js" });
@@ -397,6 +400,10 @@ function checkSources() {
   assert.ok(adapter.includes("session_identity_missing"));
   assert.ok(jsx.includes("Verify Your Contact Info"));
   assert.ok(jsx.includes('setOnboardingStep("createProfile")'));
+  assert.ok(adapter.includes("loadHavenProWorkspace"));
+  assert.ok(adapter.includes("saveHavenProWorkspace"));
+  assert.ok(jsx.includes("applyHavenProWorkspace"));
+  assert.ok(jsx.includes("haven_pro_workspace_v1") || adapter.includes("haven_pro_workspace_v1"));
   assert.ok(doc.includes("authenticated"));
   assert.ok(doc.includes("DEMO_PRO_ID"));
   assert.ok(!/if \(res\.ok\) \{\s*return \{ ok: true, mode: "rpc" \}/.test(adapter), "RPC claim must read the returned row");
@@ -524,8 +531,31 @@ async function checkOnboardingWall() {
   }
 }
 
+async function checkWorkspacePersistence() {
+  const storage = configuredStorage();
+  const api = loadAdapter(storage, authLib({ current: null }), async () => ({ ok: true, json: async () => [], text: async () => "" }));
+  const snap = {
+    onboardingStatus: "completed",
+    onboardingStep: "done",
+    firstName: "Bart",
+    lastName: "ual",
+    homeCity: "San Francisco",
+    travelRadius: 25,
+    workCategories: ["Plumbing"],
+  };
+  assert.strictEqual(api.saveHavenProWorkspace(AUTH_UID, snap), true);
+  const loaded = api.loadHavenProWorkspace(AUTH_UID);
+  assert.ok(loaded);
+  assert.strictEqual(loaded.homeCity, "San Francisco");
+  assert.strictEqual(loaded.travelRadius, 25);
+  assert.strictEqual(loaded.onboardingStatus, "completed");
+  assert.deepStrictEqual(loaded.workCategories, ["Plumbing"]);
+  assert.strictEqual(api.loadHavenProWorkspace("00000000-0000-4000-8000-000000000099"), null);
+}
+
 async function main() {
   checkSources();
+  await checkWorkspacePersistence();
   await checkSignedInWrites();
   await checkSignedOutDemo();
   await checkEmptyRpcClaimFails();
