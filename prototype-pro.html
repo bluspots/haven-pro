@@ -266,8 +266,9 @@ const DARK = {
 
 // ── CHUNK 2: Supabase-backed available jobs (read-only)
 // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
-// Slice 1 adds Auth session bootstrap only. Claim / arrive / materials / complete stay on the anon
-// bearer and DEMO_PRO_ID. See docs/AUTH_SLICE1.md.
+// Slice 1 stores the Supabase Auth session. Slice 2 binds claim and later Pro job writes to that
+// session (auth uid + user access token). No session keeps DEMO_PRO_ID and the anon bearer.
+// See docs/AUTH_SLICE2.md.
 const SUPABASE_URL_KEY = "haven_supabase_url";
 const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 // Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
@@ -319,6 +320,8 @@ function mapSupabaseRowToJob(row) {
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave SIM_JOBS in place
+  // Board listing stays on the anon key. It is not a pro-identity write.
+  // Slice 2 binds claim and later pro writes, not this posted-job read.
   // Only claimable rows: posted and unclaimed (pro_id is null), newest first.
   // Include status and pro_id in selection for a defensive client-side filter.
   const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id,inspection_fee_cents`;
@@ -351,25 +354,31 @@ async function fetchPostedJobsFromSupabase() {
   }
 }
 
-// Fetch currently active jobs for the demo pro from Supabase (server is source of truth).
+// Fetch currently active jobs for the acting pro from Supabase (server is source of truth).
+// Signed in: auth uid + user bearer. No session: DEMO_PRO_ID + anon bearer.
 // Returns null when Supabase is not configured (SIM mode). On error, soft-fails to [].
 async function fetchActiveJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave session-only behavior in place
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) {
+    console.warn("Supabase active jobs fetch skipped", actor.reason);
+    return [];
+  }
   // Align exactly with the local one-active gate
   const activeStatuses = Array.from(ACTIVE_BLOCK_STATUSES);
   const statusList = activeStatuses.join(",");
   const url =
     `${cfg.url}/rest/v1/jobs?` +
-    `pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}` +
+    `pro_id=eq.${encodeURIComponent(actor.proId)}` +
     `&status=in.(${statusList})` +
     `&order=accepted_at.desc`;
   try {
     const res = await fetch(url, {
       method: "GET",
       headers: {
-        apikey: cfg.anon,
-        Authorization: `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         Accept: "application/json",
         Prefer: "count=exact",
       },
@@ -416,7 +425,12 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
     if (!cfg) return;
     if (!looksLikeUuid(job.id)) return;
     if (!job.backendClaimed) return;
-    const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}`;
+    const actor = await resolveHavenJobWriteAuth(cfg);
+    if (!actor.ok) {
+      console.warn("Supabase terminal status sync skipped", actor.reason);
+      return;
+    }
+    const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     const body = { status: finalStatus };
     if (finalStatus === "inspection_completed") {
       const cents = Math.round(((job.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
@@ -427,8 +441,8 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
     const res = await fetch(url, {
       method: "PATCH",
       headers: {
-        "apikey": cfg.anon,
-        "Authorization": `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
       },
@@ -442,21 +456,86 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
   }
 }
 
+// Slice 2 job-write identity.
+// A real Supabase session binds the write to auth.uid() and that session's access token.
+// apikey stays the anon key; Authorization Bearer does not.
+// No session: explicit demo identity and the anon key as Bearer.
+// A session missing uid or access token fails closed and never uses DEMO_PRO_ID.
+async function resolveHavenJobWriteAuth(cfg) {
+  const client = getHavenSupabaseClient();
+  if (client && client.auth && typeof client.auth.getSession === "function") {
+    try {
+      const { data, error } = await client.auth.getSession();
+      if (!error) {
+        const session = data && data.session ? data.session : null;
+        if (session) {
+          const uid = session.user && typeof session.user.id === "string" ? session.user.id.trim() : "";
+          const bearer = typeof session.access_token === "string" ? session.access_token.trim() : "";
+          if (!uid || !bearer) {
+            return { ok: false, reason: "session_identity_missing" };
+          }
+          rememberHavenSession(session);
+        } else if (!getHavenAuthUser() && !getHavenAccessToken()) {
+          rememberHavenSession(null);
+        }
+      } else if (!getHavenAuthUser() && !getHavenAccessToken()) {
+        return { ok: false, reason: "session_identity_missing" };
+      }
+    } catch (e) {
+      if (!getHavenAuthUser() && !getHavenAccessToken()) {
+        console.warn("Haven job auth session read failed", e);
+        return { ok: false, reason: "session_identity_missing" };
+      }
+    }
+  }
+  const user = getHavenAuthUser();
+  const token = getHavenAccessToken();
+  const hasSession = !!(user || (typeof token === "string" && token !== ""));
+  if (hasSession) {
+    const proId = user && typeof user.id === "string" ? user.id.trim() : "";
+    const bearer = typeof token === "string" ? token.trim() : "";
+    if (!proId || !bearer) {
+      return { ok: false, reason: "session_identity_missing" };
+    }
+    return {
+      ok: true,
+      mode: "session",
+      proId: proId,
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${bearer}`,
+      },
+    };
+  }
+  return {
+    ok: true,
+    mode: "demo",
+    proId: DEMO_PRO_ID,
+    headers: {
+      apikey: cfg.anon,
+      Authorization: `Bearer ${cfg.anon}`,
+    },
+  };
+}
+
 // Attempt to claim a job in Supabase when configured.
 // Success returns { ok: true }. On 409 conflict (one-active or already taken), returns { ok: false, conflict: true, reason }.
 // On other failures, returns { ok: false, reason }.
-// Slice 1: do not read the auth uid and do not replace DEMO_PRO_ID. Access token is stored for a later slice only.
+// Signed in: pro_id is the auth uid and Bearer is the user access token.
+// Signed out: pro_id is DEMO_PRO_ID and Bearer is the anon key.
 async function claimJobOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" }; // no backend configured — SIM/local only
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { ok: false, reason: actor.reason };
   // Try RPC first if available (preferred: lets the backend attach the authenticated pro id and enforce RLS/uniques)
   try {
     const rpcUrl = `${cfg.url}/rest/v1/rpc/pro_claim_job`;
     let res = await fetch(rpcUrl, {
       method: "POST",
       headers: {
-        "apikey": cfg.anon,
-        "Authorization": `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Prefer": "return=representation",
@@ -479,14 +558,14 @@ async function claimJobOnSupabase(job) {
     const res = await fetch(updUrl, {
       method: "PATCH",
       headers: {
-        "apikey": cfg.anon,
-        "Authorization": `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         // Return the updated row so we can distinguish 0-row updates deterministically.
         "Accept": "application/json",
         "Prefer": "return=representation",
       },
-      body: JSON.stringify({ status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: new Date().toISOString() }),
+      body: JSON.stringify({ status: "en_route", pro_id: actor.proId, accepted_at: new Date().toISOString() }),
     });
     if (res.status === 409) {
       return { ok: false, conflict: true, reason: "conflict" };
@@ -530,15 +609,17 @@ function isBackendClaimedJob(job) {
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();
   if (!cfg || !looksLikeUuid(jobId)) return null;
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return null;
   const url =
     `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}` +
-    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status`;
+    `&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,status`;
   try {
     const res = await fetch(url, {
       method: "GET",
       headers: {
-        apikey: cfg.anon,
-        Authorization: `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         Accept: "application/json",
       },
     });
@@ -575,15 +656,17 @@ async function patchJobArrivedOnSupabase(job) {
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: true, mode: "sim" };
   if (!looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { ok: false, reason: actor.reason };
   const url =
     `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
-    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.en_route`;
+    `&pro_id=eq.${encodeURIComponent(actor.proId)}&status=eq.en_route`;
   try {
     const res = await fetch(url, {
       method: "PATCH",
       headers: {
-        apikey: cfg.anon,
-        Authorization: `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         Accept: "application/json",
         Prefer: "return=representation",
@@ -643,9 +726,11 @@ async function patchJobWorkStatusOnSupabase(job, toStatus, extraFields) {
   if (!allowedFrom || !allowedFrom.includes(fromStatus)) {
     return { ok: false, reason: "bad_from_status" };
   }
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { ok: false, reason: actor.reason };
   const url =
     `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
-    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.${fromStatus}`;
+    `&pro_id=eq.${encodeURIComponent(actor.proId)}&status=eq.${fromStatus}`;
   const body = { status: toStatus };
   if (extraFields && typeof extraFields.materials_reimbursed_cents === "number" && Number.isFinite(extraFields.materials_reimbursed_cents) && extraFields.materials_reimbursed_cents >= 0) {
     body.materials_reimbursed_cents = Math.round(extraFields.materials_reimbursed_cents);
@@ -654,8 +739,8 @@ async function patchJobWorkStatusOnSupabase(job, toStatus, extraFields) {
     const res = await fetch(url, {
       method: "PATCH",
       headers: {
-        apikey: cfg.anon,
-        Authorization: `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         Accept: "application/json",
         Prefer: "return=representation",
@@ -699,15 +784,17 @@ async function patchJobCompleteOnSupabase(job) {
   if (!cfg) return { ok: true, mode: "sim" };
   if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
   if (job.status !== "in_progress") return { ok: false, reason: "bad_from_status" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { ok: false, reason: actor.reason };
   const url =
     `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}` +
-    `&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&status=eq.in_progress`;
+    `&pro_id=eq.${encodeURIComponent(actor.proId)}&status=eq.in_progress`;
   try {
     const res = await fetch(url, {
       method: "PATCH",
       headers: {
-        apikey: cfg.anon,
-        Authorization: `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         Accept: "application/json",
         Prefer: "return=representation",
@@ -746,7 +833,12 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
     if (!cfg) return;
     if (!looksLikeUuid(job.id)) return;
     if (!job.backendClaimed) return;
-    const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}`;
+    const actor = await resolveHavenJobWriteAuth(cfg);
+    if (!actor.ok) {
+      console.warn("Supabase materials request PATCH skipped", actor.reason);
+      return;
+    }
+    const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     // Normalize items and include an aggregate estimate (in cents) when possible.
     const normalizedItems = cleanItems.map(it => ({
       name: String(it.name),
@@ -763,8 +855,8 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
     const res = await fetch(url, {
       method: "PATCH",
       headers: {
-        "apikey": cfg.anon,
-        "Authorization": `Bearer ${cfg.anon}`,
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
       },
@@ -778,8 +870,9 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
   }
 }
 
-// ── Slice 1: Pro Auth session (does not authorize job REST) ──────────────
+// ── Slice 1: Pro Auth session. Slice 2 sends it on pro job writes. ───────
 // Missing / unrecognized values stay ON so the current demo keeps working.
+// The flag does not override a real session and does not block signed-out demo writes.
 function isPrototypeAnonMode() {
   try {
     const raw = window.localStorage.getItem(HAVEN_PROTOTYPE_ANON_MODE_KEY);
@@ -804,7 +897,7 @@ function havenAuthLib() {
 
 let havenSupabaseClient = null;
 let havenSupabaseClientKey = "";
-// In-memory only. Job fetches keep using the anon key until a later slice opts in.
+// In-memory copy of the Auth session. Job writes read it (and getSession) in resolveHavenJobWriteAuth.
 let havenAccessToken = null;
 let havenAuthUser = null;
 
@@ -1097,12 +1190,14 @@ function HavenProApp() {
     let cancelled = false;
     const pollOne = async (job) => {
       try {
-        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents,materials_reimbursed_cents`;
+        const actor = await resolveHavenJobWriteAuth(cfg);
+        if (!actor.ok) return;
+        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,status,inspection_fee_cents,convenience_fee_cents,materials_reimbursed_cents`;
         const res = await fetch(url, {
           method: "GET",
           headers: {
-            "apikey": cfg.anon,
-            "Authorization": `Bearer ${cfg.anon}`,
+            apikey: actor.headers.apikey,
+            Authorization: actor.headers.Authorization,
             "Accept": "application/json",
             "Prefer": "count=exact",
           },
@@ -4163,7 +4258,6 @@ function HavenProApp() {
 
   function authAccountCard() {
     const configured = !!getSupabaseConfig();
-    const anonOn = isPrototypeAnonMode();
     let title = "Signed out";
     let detail = configured ? "No Supabase session yet." : "Local demo only — Supabase is not configured.";
     if (authSession) {
@@ -4180,9 +4274,9 @@ function HavenProApp() {
         <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
         <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 8, lineHeight: 1.45 }}>
-          {anonOn
-            ? "Demo mode is on. Claim and job updates still use the anonymous demo pro."
-            : "Demo mode is off. This slice still leaves claim and job updates on the anonymous demo pro."}
+          {authSession
+            ? "Claim and job updates use this signed-in pro."
+            : "No Supabase session. Claim and job updates use the anonymous demo pro."}
         </div>
       </div>
     );
@@ -4284,7 +4378,11 @@ function HavenProApp() {
   const ONBOARDING_STEPS = ["welcome", "createAccount", "verifyContact", "createProfile", "chooseCategories", "serviceArea", "identity", "background", "payout", "tax", "credentials", "ready"];
   function onboardingBack() {
     const idx = ONBOARDING_STEPS.indexOf(onboardingStep);
-    if (idx > 0) setOnboardingStep(ONBOARDING_STEPS[idx - 1]);
+    if (idx <= 0) return;
+    let prev = ONBOARDING_STEPS[idx - 1];
+    // Real Auth sessions skip the demo tap-to-confirm contact wall.
+    if (prev === "verifyContact" && accountSourceRef.current === "auth") prev = "createAccount";
+    setOnboardingStep(prev);
   }
   function onboardingNext() {
     const idx = ONBOARDING_STEPS.indexOf(onboardingStep);
@@ -4419,7 +4517,9 @@ function HavenProApp() {
           accountSourceRef.current = "auth";
           setAuthSession(sessionToAuthState(result.session));
           setAccountStatus("signed_in");
-          onboardingNext();
+          setEmailVerifyStatus("verified");
+          setOnboardingStatus("in_progress");
+          setOnboardingStep("createProfile");
           return;
         }
         setSignInDraft({ email: email, password: "" });
@@ -4488,7 +4588,7 @@ function HavenProApp() {
         <div style={{ padding: "28px 24px 0" }}>
           <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
           <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 8 }}>Sign in</div>
-          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Job actions stay on the demo pro until a later slice.</div>
+          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Claiming a job and later job updates use this login.</div>
         </div>
         <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 24px 12px" }}>
           {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}

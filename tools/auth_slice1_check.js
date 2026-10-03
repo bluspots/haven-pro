@@ -5,7 +5,8 @@
  * Slice 1 checks:
  * - anon-mode flag defaults on
  * - signup metadata is role pro and redirect is the Pro Pages URL
- * - a stored access token is NOT used on claim; DEMO_PRO_ID stays
+ * - signed-in claim identity is covered by auth_slice2_check.js
+ * - DEMO_PRO_ID remains the signed-out demo actor
  * - built HTML still boots the welcome demo, and shows email sign-in once configured
  */
 
@@ -123,7 +124,7 @@ async function checkAuthBehavior() {
   };
 
   const authed = loadAdapter(storage, lib, async () => { throw new Error("unexpected fetch"); });
-  assert.strictEqual(authed.isPrototypeAnonMode(), false, "flag off is visible but must not change claim");
+  assert.strictEqual(authed.isPrototypeAnonMode(), false, "flag off is visible; it does not choose the job actor");
   const signedUp = await authed.havenAuthSignUp({ email: "pro@example.com", password: "secret12" });
   assert.strictEqual(signedUp.ok, true);
   const signUpArgs = calls.find(c => c[0] === "signUp")[1];
@@ -149,15 +150,17 @@ async function checkAuthBehavior() {
   const claim = await claiming.claimJobOnSupabase({ id: jobId });
   assert.strictEqual(claim.ok, true);
   assert.ok(fetches.length >= 2, "rpc then patch");
+  const authUid = "11111111-1111-4111-8111-111111111111";
   for (const hit of fetches) {
-    assert.strictEqual(hit.opts.headers.Authorization, "Bearer " + anon);
+    assert.strictEqual(hit.opts.headers.Authorization, "Bearer access-token-pro");
     assert.strictEqual(hit.opts.headers.apikey, anon);
-    assert.ok(!JSON.stringify(hit.opts).includes("access-token-pro"), "job call must not send the user access token");
+    assert.ok(!hit.opts.headers.Authorization.includes(anon), "signed-in job call must not use the anon key as Bearer");
   }
   const patch = fetches.find(h => h.opts.method === "PATCH");
   const body = JSON.parse(patch.opts.body);
-  assert.strictEqual(body.pro_id, claiming.DEMO_PRO_ID);
-  assert.strictEqual(body.pro_id, "22222222-2222-4222-8222-222222222222");
+  assert.strictEqual(body.pro_id, authUid);
+  assert.notStrictEqual(body.pro_id, claiming.DEMO_PRO_ID);
+  assert.strictEqual(claiming.DEMO_PRO_ID, "22222222-2222-4222-8222-222222222222");
 
   await claiming.havenAuthSignOut();
   assert.strictEqual(claiming.getHavenAccessToken(), null);
@@ -171,7 +174,7 @@ function checkSources() {
   assertIncludes(adapter, 'const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode"', "flag key");
   assertIncludes(adapter, 'data: { role: "pro" }', "signup role");
   assertIncludes(adapter, "https://bluspots.github.io/haven-pro/", "redirect");
-  assertIncludes(adapter, "pro_id: DEMO_PRO_ID", "claim pro id");
+  assertIncludes(adapter, "proId: DEMO_PRO_ID", "demo pro id remains");
   assertIncludes(adapter, "Authorization: `Bearer ${cfg.anon}`", "anon bearer");
   assertIncludes(jsx, "havenAuthSignUp", "jsx signup");
   assertIncludes(jsx, "Sign in with email", "email sign-in affordance");
@@ -183,7 +186,7 @@ function checkSources() {
     const html = read(built);
     assertIncludes(html, "haven_prototype_anon_mode", built + " flag");
     assertIncludes(html, 'data: { role: "pro" }', built + " role");
-    assertIncludes(html, "pro_id: DEMO_PRO_ID", built + " demo pro");
+    assertIncludes(html, "proId: DEMO_PRO_ID", built + " demo pro");
     assertIncludes(html, "@supabase/supabase-js@2.117.2/dist/umd/supabase.js", built + " cdn");
     assert.strictEqual(html.includes("access-token"), false);
   }

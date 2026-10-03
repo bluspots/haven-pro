@@ -6,7 +6,7 @@
   "scripts": {
     "build": "bash ./build-pro.sh",
     "boot-check": "node tools/boot_check.js",
-    "verify": "npm run build && npm run boot-check && node tools/auth_slice1_check.js"
+    "verify": "npm run build && npm run boot-check && node tools/auth_slice1_check.js && node tools/auth_slice2_check.js"
   },
   "devDependencies": {
     "@babel/core": "^7.26.0",
