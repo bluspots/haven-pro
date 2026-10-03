@@ -268,7 +268,7 @@ const DARK = {
 // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
 // Slice 1 stores the Supabase Auth session. Slice 2 binds claim and later Pro job writes to that
 // session (auth uid + user access token). Slice 4: no session stops those writes and does not
-// send a demo pro id. Signed-out board reads posted_jobs_public; signed-in board still uses jobs. See docs/AUTH_SLICE2.md.
+// send a demo pro id. Signed-out does not read jobs (account required). Signed-in board uses jobs with the user token. See docs/AUTH_SLICE2.md.
 const SUPABASE_URL_KEY = "haven_supabase_url";
 const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 // Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
@@ -304,7 +304,8 @@ function mapSupabaseRowToJob(row) {
     customerName: "Haven customer", // no PII yet
     category: row.category,
     title: row.title,
-    payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : 0,
+    // Absent on signed-out public view — do not invent a payout number.
+    payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : undefined,
     inspectionFee: inspectionFeeCents > 0 ? Math.round(inspectionFeeCents / 100) : undefined,
     requiresDiagnosis: !!row.requires_diagnosis,
     // Distance and duration are not provided by backend yet — UI tolerates missing values (see tradeBoardCard/eligibleJobs).
@@ -321,35 +322,21 @@ function mapSupabaseRowToJob(row) {
 
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
-  if (!cfg) return null; // not configured — leave SIM_JOBS in place
-  // Posted + unclaimed only. Never query as DEMO_PRO. apikey stays the anon key.
-  // Signed in: public.jobs with the user access token (full row still allowed).
-  // Signed out: public.posted_jobs_public with the anon bearer (limited columns).
-  // Requires Customer migration 0020 pasted before this signed-out path works.
+  if (!cfg) return null; // not configured — leave SIM_JOBS in place for signed-in local preview only
+  // Account required. Signed-out never browses jobs — no anon SELECT, no public view.
+  // Signed in: posted + unclaimed on public.jobs with the user access token.
+  // Never query as DEMO_PRO. apikey stays the anon key.
   const actor = await resolveHavenJobWriteAuth(cfg);
-  const signedIn = !!(actor.ok && actor.mode === "session");
-  if (!signedIn && actor.reason === "session_identity_missing") {
+  if (!(actor.ok && actor.mode === "session")) {
     return [];
   }
-  let headers;
-  let url;
-  if (signedIn) {
-    headers = {
-      "apikey": actor.headers.apikey,
-      "Authorization": actor.headers.Authorization,
-      "Accept": "application/json",
-      "Prefer": "count=exact",
-    };
-    url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id,inspection_fee_cents`;
-  } else {
-    headers = {
-      "apikey": cfg.anon,
-      "Authorization": `Bearer ${cfg.anon}`,
-      "Accept": "application/json",
-      "Prefer": "count=exact",
-    };
-    url = `${cfg.url}/rest/v1/posted_jobs_public?order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,emergency,posted_at,status,inspection_fee_cents`;
-  }
+  const headers = {
+    "apikey": actor.headers.apikey,
+    "Authorization": actor.headers.Authorization,
+    "Accept": "application/json",
+    "Prefer": "count=exact",
+  };
+  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id,inspection_fee_cents`;
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -361,15 +348,10 @@ async function fetchPostedJobsFromSupabase() {
     }
     const rows = await res.json();
     if (!Array.isArray(rows)) return [];
-    // Defensive filter: posted only. Signed-in also drops rows that already have a pro.
     const clean = rows.filter((row) => {
       const isPosted = row && row.status === "posted";
-      if (!isPosted) return false;
-      if (signedIn) {
-        const hasPro = row.pro_id != null;
-        return !hasPro;
-      }
-      return true; // view already enforces pro_id is null
+      const hasPro = !(row == null) && row.pro_id != null;
+      return isPosted && !hasPro;
     });
     return clean.map(mapSupabaseRowToJob);
   } catch (e) {
@@ -1243,6 +1225,7 @@ function HavenProApp() {
         setAvailableJobs(filtered);
       }
     }
+    // Account required — fetchPostedJobsFromSupabase no-ops when signed out.
     if (tab === "home" && getSupabaseConfig()) {
       // Clear SIM seeds immediately so they don't linger/flash while backend loads.
       setAvailableJobs([]);
@@ -2658,7 +2641,9 @@ function HavenProApp() {
                 : null;
             })()}
           </div>
-          <div style={{ fontSize: 21, fontWeight: 900, color: T.pg, fontFamily: FONT, letterSpacing: -0.4, flexShrink: 0, marginLeft: 10 }}>${job.payout}</div>
+          {job.payout != null && (
+            <div style={{ fontSize: 21, fontWeight: 900, color: T.pg, fontFamily: FONT, letterSpacing: -0.4, flexShrink: 0, marginLeft: 10 }}>${job.payout}</div>
+          )}
         </div>
         {diagnosis && job.inspectionFee != null && (
           <div style={{ fontSize: 11, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 6 }}>
@@ -4688,24 +4673,20 @@ function HavenProApp() {
                 Create Account
               </button>
               <button onClick={() => {
-                if (getSupabaseConfig() && !isPrototypeAnonMode()) openEmailSignIn();
-                else loadDemoPro();
+                if (getSupabaseConfig()) openEmailSignIn();
+                else showToast("Add Supabase URL and anon key to sign in. Account required — no signed-out marketplace.");
               }} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 Sign In
               </button>
-              {getSupabaseConfig() && isPrototypeAnonMode() && (
+              {getSupabaseConfig() && (
                 <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                   Sign in with email
                 </button>
               )}
             </>
           )}
-          <div style={{ marginTop: 18, padding: 10, borderRadius: 10, border: `1px dashed ${T.tm}`, textAlign: "center" }}>
-            <div style={{ fontSize: 9, fontWeight: 800, color: T.tm, textTransform: "uppercase", letterSpacing: 0.5, fontFamily: "monospace", marginBottom: 6 }}>⚙ Dev Testing</div>
-            <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
-              <button onClick={loadDemoPro} style={{ fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 7, border: `1px solid ${T.tm}`, background: "transparent", color: T.ts, cursor: "pointer", fontFamily: "monospace" }}>Load Demo Pro</button>
-              <button onClick={devJumpToMarketplaceReady} style={{ fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 7, border: `1px solid ${T.tm}`, background: "transparent", color: T.ts, cursor: "pointer", fontFamily: "monospace" }}>Jump to Marketplace Ready</button>
-            </div>
+          <div style={{ marginTop: 14, fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", lineHeight: 1.45 }}>
+            Help &amp; Support · Terms · Privacy
           </div>
         </div>
       </div>

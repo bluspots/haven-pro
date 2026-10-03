@@ -175,7 +175,8 @@ function checkSources() {
   assertIncludes(adapter, "https://bluspots.github.io/haven-pro/", "redirect");
   assert.ok(!adapter.includes("proId: DEMO_PRO_ID"), "demo pro id is not a write fallback");
   assertIncludes(adapter, 'reason: "no_session"', "signed-out write stops");
-  assertIncludes(adapter, '"Authorization": `Bearer ${cfg.anon}`', "anon bearer");
+  assert.ok(!adapter.includes("posted_jobs_public"), "no anonymous public jobs view");
+  assertIncludes(adapter, 'actor.ok && actor.mode === "session"', "posted board requires session");
   assertIncludes(jsx, "havenAuthSignUp", "jsx signup");
   assertIncludes(jsx, "Sign in with email", "email sign-in affordance");
   assertIncludes(shell, "@supabase/supabase-js@2.117.2/dist/umd/supabase.js", "cdn");
@@ -250,11 +251,13 @@ async function checkWelcome() {
     const text = rootText(plain.window);
     assert.ok(text.includes("Create Account"), "default welcome create");
     assert.ok(text.includes("Sign In"), "default welcome sign in");
-    assert.ok(text.includes("Load Demo Pro"), "demo fallback");
+    assert.ok(!text.includes("Load Demo Pro"), "signed-out welcome has no demo marketplace");
+    assert.ok(!text.includes("Jump to Marketplace Ready"), "signed-out welcome has no marketplace jump");
     assert.ok(!text.includes("Sign in with email"), "email sign-in stays hidden without Supabase keys");
+    assert.ok(text.includes("Help") || text.includes("Terms") || text.includes("Privacy"), "legal/support affordance");
     clickButton(plain.window, "Create Account");
     await new Promise(resolve => setTimeout(resolve, 30));
-    assert.ok(rootText(plain.window).includes("First Name"), "local create-account form still opens");
+    assert.ok(rootText(plain.window).includes("First Name"), "create-account form still opens");
   } finally {
     try { plain.window.close(); } catch (e) { /* ignore */ }
   }
@@ -266,18 +269,19 @@ async function checkWelcome() {
   try {
     const text = rootText(configured.window);
     assert.ok(text.includes("Sign in with email"), "configured welcome offers email sign-in");
-    assert.ok(text.includes("Sign In"), "demo sign-in remains while anon mode defaults on");
-    assert.ok(text.includes("Load Demo Pro"), "demo pro still available");
+    assert.ok(text.includes("Sign In"), "sign-in remains");
+    assert.ok(!text.includes("Load Demo Pro"), "configured welcome has no demo marketplace");
     clickButton(configured.window, "Sign in with email");
     await new Promise(resolve => setTimeout(resolve, 30));
     assert.ok(rootText(configured.window).includes("Haven Pro account"), "email sign-in screen");
     clickButton(configured.window, "‹");
     await new Promise(resolve => setTimeout(resolve, 30));
+    // Sign In opens email sign-in when Supabase is configured — never a demo job board.
     clickButton(configured.window, "Sign In");
     await new Promise(resolve => setTimeout(resolve, 30));
-    const afterDemo = rootText(configured.window);
-    assert.ok(afterDemo.includes("Job Board"), "default Sign In still loads the demo shell");
-    assert.ok(!afterDemo.includes("Create Account"), "demo sign-in leaves the welcome gate");
+    const afterSignIn = rootText(configured.window);
+    assert.ok(afterSignIn.includes("Haven Pro account") || afterSignIn.includes("Password"), "Sign In opens auth, not marketplace");
+    assert.ok(!afterSignIn.includes("Job Board"), "signed-out Sign In must not open the job board");
   } finally {
     try { configured.window.close(); } catch (e) { /* ignore */ }
   }

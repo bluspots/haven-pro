@@ -19,7 +19,7 @@ When `getSession()` returns a user id and access token (or that pair is already 
 
 `apikey` stays the anon key. Supabase still requires it. `Authorization` is `Bearer <access token>`, not the anon key.
 
-The same actor is used for the assigned-job reads that follow those writes (active-job rehydrate, status re-read, materials poll). The signed-in posted-board read still uses `public.jobs` (`status=posted` and `pro_id` is null) with the user access token. The signed-out posted-board read uses `public.posted_jobs_public` with the anon key (Customer migration 0020).
+The same actor is used for the assigned-job reads that follow those writes (active-job rehydrate, status re-read, materials poll). The signed-in posted-board read uses `public.jobs` (`status=posted` and `pro_id` is null) with the user access token. Signed-out does not read jobs (account required; Customer migration 0020 revokes anon SELECT).
 
 A session never falls through to `DEMO_PRO_ID`. If a session is present but the uid or access token is missing, the write returns `session_identity_missing` and does not call the demo path.
 

@@ -1,16 +1,24 @@
-# Signed-out posted board → posted_jobs_public
+# Account required — no signed-out posted board
 
 Release blocker companion to Customer `0020_anon_job_read_lockdown.sql`.
+
+## Policy
+
+Haven Pro requires an account. There is no signed-out marketplace and no anonymous job read.
 
 ## Change
 
 `fetchPostedJobsFromSupabase`:
 
-- **Signed in** — still `GET /rest/v1/jobs?status=eq.posted&pro_id=is.null` with the user access token.
-- **Signed out** — `GET /rest/v1/posted_jobs_public` with the anon bearer. Limited columns only. No base-table SELECT.
+- **Signed out / no session** — returns `[]` and does **not** call the jobs API.
+- **Signed in** — `GET /rest/v1/jobs?status=eq.posted&pro_id=is.null` with the user access token.
 
-## Founder paste first
+No `posted_jobs_public` view. No anon SELECT path.
 
-Paste Customer migration **0020** before merging this Pro client. Until then, the signed-out board view does not exist and the read 404s.
+Signed-out UI is account creation / sign-in / legal-support links only (Load Demo Pro removed from the welcome gate).
 
-Eligible rows stay posted + unclaimed. Lifecycle, pricing, 20/80, and authenticated job reads are unchanged.
+## Founder paste
+
+Paste Customer migration **0020** (`revoke select on public.jobs from anon`) before relying on the database lockdown. The Pro client already fails closed for signed-out reads.
+
+Lifecycle, pricing, 20/80, and signed-in Auth Slice 6 reads are unchanged.
