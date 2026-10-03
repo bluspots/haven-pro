@@ -151,7 +151,8 @@ async function fetchActiveJobsFromSupabase() {
   }
 }
 
-// Best-effort terminal status sync back to Supabase after a decline (only if this job was backend-claimed)
+// Terminal status sync after a decline (only if this job was backend-claimed).
+// Slice 5: empty / 0-row representation is not a landed write.
 async function bestEffortPatchTerminalStatus(job, finalStatus) {
   try {
     const cfg = getSupabaseConfig();
@@ -177,7 +178,8 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
         apikey: actor.headers.apikey,
         Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
-        "Prefer": "return=minimal",
+        Accept: "application/json",
+        Prefer: "return=representation",
       },
       body: JSON.stringify(body),
     });
@@ -185,7 +187,13 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
       console.warn("Supabase terminal status sync failed", res.status, await res.text());
       return { ok: false, reason: "update_failed" };
     }
-    return { ok: true };
+    let rows = [];
+    try { rows = await res.json(); } catch { rows = []; }
+    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === finalStatus)) {
+      return { ok: true };
+    }
+    console.warn("Supabase terminal status sync returned no matching row");
+    return { ok: false, reason: "not_updated" };
   } catch (e) {
     console.warn("Supabase terminal status sync error", e);
     return { ok: false, reason: "network_error" };
@@ -554,7 +562,7 @@ async function patchJobCompleteOnSupabase(job) {
 }
 
 // Write a backend-claimed job's materials request to Supabase (status + estimate/items).
-// Soft-fails: logs and returns if Supabase isn't configured, id isn't a UUID, or backend not claimed.
+// Slice 5: empty / 0-row representation is not a landed write.
 async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
   try {
     const cfg = getSupabaseConfig();
@@ -567,18 +575,15 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
       return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
-    // Normalize items and include an aggregate estimate (in cents) when possible.
     const normalizedItems = cleanItems.map(it => ({
       name: String(it.name),
-      // store cents to avoid float issues; some backends may coerce to numeric
       cost_cents: Math.round(Number(it.cost) * 100),
     }));
     const body = {
       status: "materials_requested",
-      // Best-effort shared fields; if columns are absent, the PATCH may be a no-op and is logged below.
-      materials_items: normalizedItems,                 // JSON[] (if present)
-      materials_estimate_cents: Math.round(totalCost * 100), // integer (if present)
-      materials_requested_at: new Date().toISOString(), // timestamp (if present)
+      materials_items: normalizedItems,
+      materials_estimate_cents: Math.round(totalCost * 100),
+      materials_requested_at: new Date().toISOString(),
     };
     const res = await fetch(url, {
       method: "PATCH",
@@ -586,7 +591,8 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
         apikey: actor.headers.apikey,
         Authorization: actor.headers.Authorization,
         "Content-Type": "application/json",
-        "Prefer": "return=minimal",
+        Accept: "application/json",
+        Prefer: "return=representation",
       },
       body: JSON.stringify(body),
     });
@@ -594,7 +600,13 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
       console.warn("Supabase materials request PATCH failed", res.status, await res.text());
       return { ok: false, reason: "update_failed" };
     }
-    return { ok: true };
+    let rows = [];
+    try { rows = await res.json(); } catch { rows = []; }
+    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === "materials_requested")) {
+      return { ok: true };
+    }
+    console.warn("Supabase materials request PATCH returned no materials_requested row");
+    return { ok: false, reason: "not_updated" };
   } catch (e) {
     console.warn("Supabase materials request PATCH error", e);
     return { ok: false, reason: "network_error" };
