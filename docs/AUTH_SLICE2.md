@@ -1,8 +1,8 @@
-Slice 4 stops the signed-out demo write. The rest of this page is what Slice 2 shipped.
+Slice 4 is the current rule for a missing session: claim and later Pro job writes stop, the screen does not advance, and they do not send `DEMO_PRO_ID`. The signed-in section below is what Slice 2 shipped.
 
 # Haven Pro — Auth slice 2 (session-bound job writes)
 
-Slice 1 stores a Supabase Auth session and still writes jobs as `DEMO_PRO_ID` with the anon key as Bearer. Slice 2 changes the signed-in path only.
+Slice 1 stored a Supabase Auth session and, at that time, wrote jobs as `DEMO_PRO_ID` with the anon key as Bearer. Slice 2 changed the signed-in path only. Slice 4 stops the signed-out path.
 
 ## Signed in
 
@@ -25,9 +25,9 @@ A session never falls through to `DEMO_PRO_ID`. If a session is present but the 
 
 `haven_prototype_anon_mode` does not override a real session.
 
-## Signed out (explicit demo)
+## Signed out
 
-If there is no session, claim and the later writes keep `DEMO_PRO_ID` and `Authorization: Bearer <anon key>`. Turning anonymous mode off does not remove that fallback and does not lock anonymous writes. `DEMO_PRO_ID` stays in the source.
+Slice 2 left claim and later writes on `DEMO_PRO_ID` and `Authorization: Bearer <anon key>`. That fallback is retired. If there is no session, claim, arrive, diagnosing, `in_progress`, materials request, complete, and the decline terminals (`inspection_completed`, `materials_declined`) do not send. The screen stays where it was. They do not send `DEMO_PRO_ID` and do not send the anon key as the user identity. The anonymous-mode flag does not choose this. Anonymous grants are not revoked.
 
 Local demo account creation still uses the Verify Your Contact Info step. A Supabase session skips that demo tap-to-confirm wall and continues at Create Your Profile. Email sign-in already did this.
 
@@ -39,4 +39,4 @@ Signed-in claim and later writes send the user JWT, so PostgREST runs them as `a
 
 ## Unchanged
 
-Job lifecycle statuses, economics, materials, tips, inspection fees, and the 20/80 labor split are unchanged. Demo identity constants are not retired. A session is not required to claim.
+Job lifecycle statuses, economics, materials, tips, inspection fees, and the 20/80 labor split are unchanged. A signed-out session does not claim.

@@ -155,13 +155,13 @@ async function fetchActiveJobsFromSupabase() {
 async function bestEffortPatchTerminalStatus(job, finalStatus) {
   try {
     const cfg = getSupabaseConfig();
-    if (!cfg) return;
-    if (!looksLikeUuid(job.id)) return;
-    if (!job.backendClaimed) return;
+    if (!cfg) return { ok: false, reason: "not_configured" };
+    if (!looksLikeUuid(job.id)) return { ok: false, reason: "not_backend" };
+    if (!job.backendClaimed) return { ok: false, reason: "not_backend" };
     const actor = await resolveHavenJobWriteAuth(cfg);
     if (!actor.ok) {
       console.warn("Supabase terminal status sync skipped", actor.reason);
-      return;
+      return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     const body = { status: finalStatus };
@@ -183,9 +183,12 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
     });
     if (!res.ok) {
       console.warn("Supabase terminal status sync failed", res.status, await res.text());
+      return { ok: false, reason: "update_failed" };
     }
+    return { ok: true };
   } catch (e) {
     console.warn("Supabase terminal status sync error", e);
+    return { ok: false, reason: "network_error" };
   }
 }
 
@@ -555,13 +558,13 @@ async function patchJobCompleteOnSupabase(job) {
 async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
   try {
     const cfg = getSupabaseConfig();
-    if (!cfg) return;
-    if (!looksLikeUuid(job.id)) return;
-    if (!job.backendClaimed) return;
+    if (!cfg) return { ok: false, reason: "not_configured" };
+    if (!looksLikeUuid(job.id)) return { ok: false, reason: "not_backend" };
+    if (!job.backendClaimed) return { ok: false, reason: "not_backend" };
     const actor = await resolveHavenJobWriteAuth(cfg);
     if (!actor.ok) {
       console.warn("Supabase materials request PATCH skipped", actor.reason);
-      return;
+      return { ok: false, reason: actor.reason };
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     // Normalize items and include an aggregate estimate (in cents) when possible.
@@ -589,15 +592,18 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
     });
     if (!res.ok) {
       console.warn("Supabase materials request PATCH failed", res.status, await res.text());
+      return { ok: false, reason: "update_failed" };
     }
+    return { ok: true };
   } catch (e) {
     console.warn("Supabase materials request PATCH error", e);
+    return { ok: false, reason: "network_error" };
   }
 }
 
 // ── Slice 1: Pro Auth session. Slice 2 sends it on pro job writes. ───────
-// Missing / unrecognized values stay ON so the current demo keeps working.
-// The flag does not override a real session and does not block signed-out demo writes.
+// Missing / unrecognized values stay ON. The flag does not choose the job writer.
+// A missing session stops claim and later writes. It does not fall back to a demo pro.
 function isPrototypeAnonMode() {
   try {
     const raw = window.localStorage.getItem(HAVEN_PROTOTYPE_ANON_MODE_KEY);
