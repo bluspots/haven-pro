@@ -1,6 +1,6 @@
 # HAVEN PRO — ACCOUNT & ELIGIBILITY CONTRACT
 
-**Status:** Living document · **Version:** 0.5 · **Scope:** Pro App only (not yet shared with Customer App)
+**Status:** Living document · **Version:** 0.7 · **Scope:** Pro App only (not yet shared with Customer App)
 
 Companion to the canonical Customer job contract (product/job rules):  
 `HAVEN_JOB_CONTRACT.md` — https://github.com/bluspots/bluspots.github.io/blob/master/HAVEN_JOB_CONTRACT.md  
@@ -11,6 +11,8 @@ Covers Pro account readiness — verification, credentials, payouts, tax — and
 ---
 
 ## 0. Changelog
+
+**v0.7** — Auth slice 2. A Supabase session binds claim and later Pro job writes to the auth uid and user access token. No session keeps `DEMO_PRO_ID` and the anon bearer. Job lifecycle statuses and economics are unchanged. A real session skips the demo Verify Your Contact Info step. Details: `docs/AUTH_SLICE2.md`.
 
 **v0.6** — Auth slice 1. Local `accountStatus` is unchanged. When Supabase URL + anon key are present, Create Account / email sign-in / sign-out also call Supabase Auth and signup sets metadata `role: "pro"`. Missing keys keep the local demo path. Job lifecycle is not gated on the session. Details: `docs/AUTH_SLICE1.md`.
 
@@ -127,7 +129,7 @@ The app's true starting state (`accountStatus: "signed_out"`) has no seeded prof
 For readability in prose: Welcome → Create Account → Verify Contact → Create Profile → Choose Categories → Service Area → Identity → Background → Payout → Tax → Credentials (optional) → Ready.  
 `needsOnboarding = accountStatus === "signed_out" || onboardingStatus !== "completed"` gates whether the app renders the wizard or the normal 5-tab shell.
 
-When Supabase is configured, a restored or fresh Auth session sets `accountStatus` to `signed_in` (unless a local demo profile is already loaded). Sign-out clears that auth-linked flag and returns to Welcome. It does not change claim or `DEMO_PRO_ID`.
+When Supabase is configured, a restored or fresh Auth session sets `accountStatus` to `signed_in` (unless a local demo profile is already loaded). Sign-out clears that auth-linked flag and returns to Welcome. While that session exists, claim and later job writes use the auth uid and the user access token. With no session they still use `DEMO_PRO_ID` and the anon bearer. A Supabase session does not go through the demo Verify Your Contact Info step; the local demo create-account path still does.
 
 The four provider steps (Identity/Background/Payout/Tax) reuse the exact same state, actions, and Dev Testing panels as their standalone Profile screens — onboarding is not a simplified preview of verification. Their "Continue" is enabled once the pro has taken the primary action (status `!== "not_started"`), not only once fully verified — a real background check can take days, and onboarding shouldn't block on that. Only Accept Job enforces the full `marketplaceReady` gate.
 

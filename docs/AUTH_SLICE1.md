@@ -2,6 +2,8 @@
 
 Slice 1 adds a Supabase Auth session for Pros. It does not change job lifecycle calls.
 
+Slice 2 (`docs/AUTH_SLICE2.md`) is what binds a signed-in session to claim and later Pro job writes. The write-identity notes below describe slice 1 as it shipped.
+
 ## What this slice does
 
 - Loads `@supabase/supabase-js` from the CDN (same no-bundler style as React).
@@ -19,7 +21,7 @@ Key: `haven_prototype_anon_mode` (same name as the Customer app).
 | missing, empty, `true`, `1`, `on`, `yes` | **On** (default) |
 | `false`, `0`, `off`, `no` | Off |
 
-Default **on**. Claim, arrive, materials, and complete keep `Authorization: Bearer <anon key>` and `DEMO_PRO_ID`. Turning the flag off does **not** switch those calls in this slice, and a signed-in session is not required for them.
+Default **on**. In slice 1, claim, arrive, materials, and complete kept `Authorization: Bearer <anon key>` and `DEMO_PRO_ID`. Turning the flag off did **not** switch those calls, and a signed-in session was not required for them. Slice 2 uses the session when one exists; the flag still does not block the signed-out demo path.
 
 ```js
 localStorage.setItem("haven_prototype_anon_mode", "true"); // default even if unset

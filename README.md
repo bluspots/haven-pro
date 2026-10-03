@@ -38,4 +38,8 @@ Open `prototype-pro.html` in a browser (no install). After editing `home_service
 
 ## Auth slice 1
 
-Optional Supabase email sign-up / sign-in / sign-out for role `pro`. Default demo behavior is unchanged (`haven_prototype_anon_mode` defaults on; claim still uses the anon key and `DEMO_PRO_ID`). Redirect URL to allow in Supabase: `https://bluspots.github.io/haven-pro/`. Requires Customer migration 0016 and Email Auth. See `docs/AUTH_SLICE1.md`.
+Optional Supabase email sign-up / sign-in / sign-out for role `pro`. `haven_prototype_anon_mode` defaults on. Redirect URL to allow in Supabase: `https://bluspots.github.io/haven-pro/`. Requires Customer migration 0016 and Email Auth. See `docs/AUTH_SLICE1.md`.
+
+## Auth slice 2
+
+When a Pro is signed in, claim and later job writes use that user's auth uid and access token. With no session, those calls still use `DEMO_PRO_ID` and the anon key as Bearer. Signed-in writes can fail until Customer lets the `authenticated` role do the job writes `anon` can do today. This repo does not ship that SQL. See `docs/AUTH_SLICE2.md`.

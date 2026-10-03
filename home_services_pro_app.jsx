@@ -164,12 +164,14 @@ export default function HavenProApp() {
     let cancelled = false;
     const pollOne = async (job) => {
       try {
-        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(DEMO_PRO_ID)}&select=id,status,inspection_fee_cents,convenience_fee_cents,materials_reimbursed_cents`;
+        const actor = await resolveHavenJobWriteAuth(cfg);
+        if (!actor.ok) return;
+        const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,status,inspection_fee_cents,convenience_fee_cents,materials_reimbursed_cents`;
         const res = await fetch(url, {
           method: "GET",
           headers: {
-            "apikey": cfg.anon,
-            "Authorization": `Bearer ${cfg.anon}`,
+            apikey: actor.headers.apikey,
+            Authorization: actor.headers.Authorization,
             "Accept": "application/json",
             "Prefer": "count=exact",
           },
@@ -3230,7 +3232,6 @@ export default function HavenProApp() {
 
   function authAccountCard() {
     const configured = !!getSupabaseConfig();
-    const anonOn = isPrototypeAnonMode();
     let title = "Signed out";
     let detail = configured ? "No Supabase session yet." : "Local demo only — Supabase is not configured.";
     if (authSession) {
@@ -3247,9 +3248,9 @@ export default function HavenProApp() {
         <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
         <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 8, lineHeight: 1.45 }}>
-          {anonOn
-            ? "Demo mode is on. Claim and job updates still use the anonymous demo pro."
-            : "Demo mode is off. This slice still leaves claim and job updates on the anonymous demo pro."}
+          {authSession
+            ? "Claim and job updates use this signed-in pro."
+            : "No Supabase session. Claim and job updates use the anonymous demo pro."}
         </div>
       </div>
     );
@@ -3351,7 +3352,11 @@ export default function HavenProApp() {
   const ONBOARDING_STEPS = ["welcome", "createAccount", "verifyContact", "createProfile", "chooseCategories", "serviceArea", "identity", "background", "payout", "tax", "credentials", "ready"];
   function onboardingBack() {
     const idx = ONBOARDING_STEPS.indexOf(onboardingStep);
-    if (idx > 0) setOnboardingStep(ONBOARDING_STEPS[idx - 1]);
+    if (idx <= 0) return;
+    let prev = ONBOARDING_STEPS[idx - 1];
+    // Real Auth sessions skip the demo tap-to-confirm contact wall.
+    if (prev === "verifyContact" && accountSourceRef.current === "auth") prev = "createAccount";
+    setOnboardingStep(prev);
   }
   function onboardingNext() {
     const idx = ONBOARDING_STEPS.indexOf(onboardingStep);
@@ -3486,7 +3491,9 @@ export default function HavenProApp() {
           accountSourceRef.current = "auth";
           setAuthSession(sessionToAuthState(result.session));
           setAccountStatus("signed_in");
-          onboardingNext();
+          setEmailVerifyStatus("verified");
+          setOnboardingStatus("in_progress");
+          setOnboardingStep("createProfile");
           return;
         }
         setSignInDraft({ email: email, password: "" });
@@ -3555,7 +3562,7 @@ export default function HavenProApp() {
         <div style={{ padding: "28px 24px 0" }}>
           <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
           <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 8 }}>Sign in</div>
-          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Job actions stay on the demo pro until a later slice.</div>
+          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Claiming a job and later job updates use this login.</div>
         </div>
         <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 24px 12px" }}>
           {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}

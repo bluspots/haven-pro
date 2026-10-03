@@ -1,5 +1,7 @@
 # Haven Pro — CHUNK 3 (Founder-approved scope)
 
+Auth slice 2: when a Supabase session exists, claim and later writes use the auth uid and the user access token instead of the demo id and anon bearer below. Signed out, this page still applies. See `docs/AUTH_SLICE2.md`.
+
 This slice wires Pro Accept against the shared Supabase backend and adds a standard materials-decline ending distinct from the diagnosis path.
 
 Source of truth for product/job rules:  
