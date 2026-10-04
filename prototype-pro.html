@@ -2983,7 +2983,7 @@ function HavenProApp() {
     if (workCategories.size === 0) {
       return { icon: "🗂️", title: "No categories selected", subtitle: "Choose the types of work you want to see.", ctaLabel: "Choose Categories", cta: () => { setTab("profile"); openManageCategories(); } };
     }
-    if (geoCategoryPassed.length === 0) {
+    if (categoryPassed.length === 0) {
       return { icon: "📭", title: "No jobs available", subtitle: "No jobs are available in your area right now." };
     }
     if (eligibleJobs.length === 0) {
