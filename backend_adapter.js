@@ -2,7 +2,7 @@
 // Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
 // Slice 1 stores the Supabase Auth session. Slice 2 binds claim and later Pro job writes to that
 // session (auth uid + user access token). Slice 4: no session stops those writes and does not
-// send a demo pro id. The posted-job board read still uses the anon key. See docs/AUTH_SLICE2.md.
+// send a demo pro id. Signed-out does not read jobs (account required). Signed-in board uses jobs with the user token. See docs/AUTH_SLICE2.md.
 const SUPABASE_URL_KEY = "haven_supabase_url";
 const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 // Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
@@ -38,7 +38,8 @@ function mapSupabaseRowToJob(row) {
     customerName: "Haven customer", // no PII yet
     category: row.category,
     title: row.title,
-    payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : 0,
+    // Absent on signed-out public view — do not invent a payout number.
+    payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : undefined,
     inspectionFee: inspectionFeeCents > 0 ? Math.round(inspectionFeeCents / 100) : undefined,
     requiresDiagnosis: !!row.requires_diagnosis,
     // Distance and duration are not provided by backend yet — UI tolerates missing values (see tradeBoardCard/eligibleJobs).
@@ -55,26 +56,20 @@ function mapSupabaseRowToJob(row) {
 
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
-  if (!cfg) return null; // not configured — leave SIM_JOBS in place
-  // Posted + unclaimed only. Signed in: user access token. Signed out: anon bearer.
+  if (!cfg) return null; // not configured — leave SIM_JOBS in place for signed-in local preview only
+  // Account required. Signed-out never browses jobs — no anon SELECT, no public view.
+  // Signed in: posted + unclaimed on public.jobs with the user access token.
   // Never query as DEMO_PRO. apikey stays the anon key.
   const actor = await resolveHavenJobWriteAuth(cfg);
-  let headers = {
-    "apikey": cfg.anon,
-    "Authorization": `Bearer ${cfg.anon}`,
+  if (!(actor.ok && actor.mode === "session")) {
+    return [];
+  }
+  const headers = {
+    "apikey": actor.headers.apikey,
+    "Authorization": actor.headers.Authorization,
     "Accept": "application/json",
     "Prefer": "count=exact",
   };
-  if (actor.ok && actor.mode === "session") {
-    headers = {
-      "apikey": actor.headers.apikey,
-      "Authorization": actor.headers.Authorization,
-      "Accept": "application/json",
-      "Prefer": "count=exact",
-    };
-  } else if (!actor.ok && actor.reason === "session_identity_missing") {
-    return [];
-  }
   const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id,inspection_fee_cents`;
   try {
     const res = await fetch(url, {
@@ -87,7 +82,6 @@ async function fetchPostedJobsFromSupabase() {
     }
     const rows = await res.json();
     if (!Array.isArray(rows)) return [];
-    // Defensive filter: drop any row that is not posted or already has a pro_id set.
     const clean = rows.filter((row) => {
       const isPosted = row && row.status === "posted";
       const hasPro = !(row == null) && row.pro_id != null;

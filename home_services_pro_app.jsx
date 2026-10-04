@@ -125,6 +125,7 @@ export default function HavenProApp() {
         setAvailableJobs(filtered);
       }
     }
+    // Account required — fetchPostedJobsFromSupabase no-ops when signed out.
     if (tab === "home" && getSupabaseConfig()) {
       // Clear SIM seeds immediately so they don't linger/flash while backend loads.
       setAvailableJobs([]);
@@ -1540,7 +1541,9 @@ export default function HavenProApp() {
                 : null;
             })()}
           </div>
-          <div style={{ fontSize: 21, fontWeight: 900, color: T.pg, fontFamily: FONT, letterSpacing: -0.4, flexShrink: 0, marginLeft: 10 }}>${job.payout}</div>
+          {job.payout != null && (
+            <div style={{ fontSize: 21, fontWeight: 900, color: T.pg, fontFamily: FONT, letterSpacing: -0.4, flexShrink: 0, marginLeft: 10 }}>${job.payout}</div>
+          )}
         </div>
         {diagnosis && job.inspectionFee != null && (
           <div style={{ fontSize: 11, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 6 }}>
@@ -3570,24 +3573,20 @@ export default function HavenProApp() {
                 Create Account
               </button>
               <button onClick={() => {
-                if (getSupabaseConfig() && !isPrototypeAnonMode()) openEmailSignIn();
-                else loadDemoPro();
+                if (getSupabaseConfig()) openEmailSignIn();
+                else showToast("Add Supabase URL and anon key to sign in. Account required — no signed-out marketplace.");
               }} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 Sign In
               </button>
-              {getSupabaseConfig() && isPrototypeAnonMode() && (
+              {getSupabaseConfig() && (
                 <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                   Sign in with email
                 </button>
               )}
             </>
           )}
-          <div style={{ marginTop: 18, padding: 10, borderRadius: 10, border: `1px dashed ${T.tm}`, textAlign: "center" }}>
-            <div style={{ fontSize: 9, fontWeight: 800, color: T.tm, textTransform: "uppercase", letterSpacing: 0.5, fontFamily: "monospace", marginBottom: 6 }}>⚙ Dev Testing</div>
-            <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
-              <button onClick={loadDemoPro} style={{ fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 7, border: `1px solid ${T.tm}`, background: "transparent", color: T.ts, cursor: "pointer", fontFamily: "monospace" }}>Load Demo Pro</button>
-              <button onClick={devJumpToMarketplaceReady} style={{ fontSize: 10.5, fontWeight: 700, padding: "5px 9px", borderRadius: 7, border: `1px solid ${T.tm}`, background: "transparent", color: T.ts, cursor: "pointer", fontFamily: "monospace" }}>Jump to Marketplace Ready</button>
-            </div>
+          <div style={{ marginTop: 14, fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", lineHeight: 1.45 }}>
+            Help &amp; Support · Terms · Privacy
           </div>
         </div>
       </div>

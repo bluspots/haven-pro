@@ -277,6 +277,7 @@ async function checkSignedInWrites() {
   assert.strictEqual(board.length, 1);
   assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + TOKEN, "signed-in board read uses the user bearer");
   assert.strictEqual(board[0].opts.headers.apikey, ANON, "signed-in board apikey stays the anon key");
+  assert.ok(board[0].url.includes("/rest/v1/jobs?"), "signed-in board still reads public.jobs");
   assert.ok(board[0].url.includes("status=eq.posted"));
   assert.ok(board[0].url.includes("pro_id=is.null"));
   assert.ok(!board[0].url.includes(DEMO_PRO_ID));
@@ -324,14 +325,9 @@ async function checkSignedOutDemo() {
   assert.strictEqual(hits.length, 0, "signed-out writes must not send DEMO_PRO_ID or the anon bearer");
 
   const posted = await api.fetchPostedJobsFromSupabase();
-  assert.ok(Array.isArray(posted));
+  assert.ok(Array.isArray(posted) && posted.length === 0, "signed-out board returns no rows");
   const board = hits.splice(0, hits.length);
-  assert.strictEqual(board.length, 1, "signed-out posted board still reads claimable rows");
-  assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + ANON, "signed-out board stays on the anon bearer");
-  assert.strictEqual(board[0].opts.headers.apikey, ANON);
-  assert.ok(board[0].url.includes("status=eq.posted"));
-  assert.ok(board[0].url.includes("pro_id=is.null"));
-  assert.ok(!board[0].url.includes(DEMO_PRO_ID), "signed-out board must not query as DEMO_PRO");
+  assert.strictEqual(board.length, 0, "signed-out must not call the jobs API (account required)");
 
   const active = await api.fetchActiveJobsFromSupabase();
   assert.ok(Array.isArray(active) && active.length===0, "signed-out active rehydrate returns no rows");
@@ -396,7 +392,8 @@ function checkSources() {
   assert.ok(!adapter.includes("22222222-2222-4222-8222-222222222222"));
   assert.ok(!adapter.includes("proId: DEMO_PRO_ID"));
   assert.ok(adapter.includes('reason: "no_session"'));
-  assert.ok(adapter.includes('"Authorization": `Bearer ${cfg.anon}`'));
+  assert.ok(!adapter.includes("posted_jobs_public"), "no anonymous public jobs view");
+  assert.ok(adapter.includes('actor.ok && actor.mode === "session"'), "posted board requires a session");
   assert.ok(adapter.includes("session_identity_missing"));
   assert.ok(jsx.includes("Verify Your Contact Info"));
   assert.ok(jsx.includes('setOnboardingStep("createProfile")'));
