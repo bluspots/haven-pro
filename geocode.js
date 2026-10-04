@@ -2,30 +2,18 @@
 // Mapbox is the only production implementation. Swap the body of
 // havenGeocodeAddress to replace the provider later.
 // Do not call this from marketplace load, job list, or claim.
-//
-// The public token is not committed. Set localStorage
-// haven_mapbox_public_token on the device (same place as the Supabase
-// anon key). It must start with "pk.". A missing token fails closed.
+// The public pk token is in this file so GitHub Pages can geocode
+// without a browser setting. No secret sk token.
 
-function havenMapboxPublicToken() {
-  try {
-    if (typeof localStorage === "undefined" || !localStorage) return "";
-    const token = String(localStorage.getItem("haven_mapbox_public_token") || "").trim();
-    if (token.indexOf("pk.") !== 0) return "";
-    return token;
-  } catch (e) {
-    return "";
-  }
-}
+const HAVEN_MAPBOX_PUBLIC_TOKEN = "pk.eyJ1IjoiYWxleGJhcnR1YWwiLCJhIjoiY211dTMyM2h0MDM0aDJ5bzNscTJucHNjcyJ9.EZkYdZlHTW8vcZljriN3Pw";
 
 async function havenMapboxGeocodeAddress(query) {
   const q = String(query || "").trim();
-  const token = havenMapboxPublicToken();
-  if (!q || !token) return null;
+  if (!q || !HAVEN_MAPBOX_PUBLIC_TOKEN) return null;
   const url = "https://api.mapbox.com/search/geocode/v6/forward?q="
     + encodeURIComponent(q)
     + "&limit=1&autocomplete=false&access_token="
-    + encodeURIComponent(token);
+    + encodeURIComponent(HAVEN_MAPBOX_PUBLIC_TOKEN);
   let res;
   try {
     res = await fetch(url);

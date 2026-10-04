@@ -18,4 +18,4 @@ Paste that whole file in the Supabase SQL editor after 0021 and 0022. It was not
 
 Until it is pasted, the board call fails closed (no rows) instead of reading every posted job.
 
-The Mapbox public token is not in git. GitHub push protection rejects the pk value. On each device set localStorage `haven_mapbox_public_token` to that pk token, next to the Supabase anon key. If it is missing, or does not start with `pk.`, the operating point is not geocoded and marketplace visibility fails closed.
+The Mapbox public pk token ships in `geocode.js`, so GitHub Pages geocodes without a browser setting. No secret sk token is used. A failed lookup still fails closed.
