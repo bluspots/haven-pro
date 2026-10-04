@@ -15,6 +15,10 @@ const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
 const HAVEN_PRO_WORKSPACE_KEY = "haven_pro_workspace_v1";
 // full: 0021 columns exist. legacy: only display_name/email can be written.
 let havenProProfileSchema = "unknown";
+// Last operating point geocoded in this page. Not a second radius model.
+let havenOperatingFix = { city: "", lat: null, lng: null, failed: "" };
+let havenOperatingInflight = null;
+let havenOperatingInflightCity = "";
 function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
@@ -44,8 +48,9 @@ function mapSupabaseRowToJob(row) {
     payout: row.fixed_pro_labor_payout_cents != null ? Math.round(row.fixed_pro_labor_payout_cents / 100) : undefined,
     inspectionFee: inspectionFeeCents > 0 ? Math.round(inspectionFeeCents / 100) : undefined,
     requiresDiagnosis: !!row.requires_diagnosis,
-    // Distance and duration are not provided by backend yet — UI tolerates missing values (see tradeBoardCard/eligibleJobs).
-    distanceMi: undefined,
+    // Server radius query supplies distance_mi. Missing distance is not inside the radius.
+    distanceMi: row.distance_mi != null && row.distance_mi !== "" ? Number(row.distance_mi) : null,
+    radiusCheckedOnServer: true,
     durationMin: undefined,
     city: row.city_label || "",
     lat: row.lat ?? null,
@@ -60,7 +65,8 @@ async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return null; // not configured — leave SIM_JOBS in place for signed-in local preview only
   // Account required. Signed-out never browses jobs — no anon SELECT, no public view.
-  // Signed in: posted + unclaimed on public.jobs with the user access token.
+  // Signed in: posted jobs inside this Pro's saved radius, from the database.
+  // Do not GET every posted row and filter here. Do not geocode on this read.
   // Never query as DEMO_PRO. apikey stays the anon key.
   const actor = await resolveHavenJobWriteAuth(cfg);
   if (!(actor.ok && actor.mode === "session")) {
@@ -70,13 +76,14 @@ async function fetchPostedJobsFromSupabase() {
     "apikey": actor.headers.apikey,
     "Authorization": actor.headers.Authorization,
     "Accept": "application/json",
-    "Prefer": "count=exact",
+    "Content-Type": "application/json",
   };
-  const url = `${cfg.url}/rest/v1/jobs?status=eq.posted&pro_id=is.null&order=posted_at.desc&select=id,category,title,fixed_pro_labor_payout_cents,requires_diagnosis,city_label,lat,lng,emergency,posted_at,status,pro_id,inspection_fee_cents`;
+  const url = `${cfg.url}/rest/v1/rpc/jobs_posted_within_radius`;
   try {
     const res = await fetch(url, {
-      method: "GET",
+      method: "POST",
       headers,
+      body: "{}",
     });
     if (!res.ok) {
       console.warn("Supabase jobs fetch failed", res.status, await res.text());
@@ -87,7 +94,8 @@ async function fetchPostedJobsFromSupabase() {
     const clean = rows.filter((row) => {
       const isPosted = row && row.status === "posted";
       const hasPro = !(row == null) && row.pro_id != null;
-      return isPosted && !hasPro;
+      const hasPoint = row.lat != null && row.lng != null && row.distance_mi != null && Number.isFinite(Number(row.distance_mi));
+      return isPosted && !hasPro && hasPoint;
     });
     return clean.map(mapSupabaseRowToJob);
   } catch (e) {
@@ -852,7 +860,65 @@ function havenSnapshotFromProfileRow(row) {
   if (row.home_city != null) ws.homeCity = String(row.home_city);
   if (Array.isArray(row.work_categories)) ws.workCategories = row.work_categories.slice();
   if (!ws.workCategories) ws.workCategories = [];
+  // Columns are the authority. A null column must not be overwritten by a cached point.
+  if (Object.prototype.hasOwnProperty.call(row, "operating_lat")) {
+    ws.operatingLat = row.operating_lat == null || row.operating_lat === "" ? null : Number(row.operating_lat);
+    ws.operatingLng = row.operating_lng == null || row.operating_lng === "" ? null : Number(row.operating_lng);
+  }
   return ws;
+}
+
+function havenOperatingNumbers(snapshot) {
+  const lat = snapshot && snapshot.operatingLat != null ? Number(snapshot.operatingLat) : NaN;
+  const lng = snapshot && snapshot.operatingLng != null ? Number(snapshot.operatingLng) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { lat: null, lng: null };
+  return { lat: lat, lng: lng };
+}
+
+// Geocode the operating city only when it is new or its coordinates are missing.
+// A repeat save of the same city reuses the stored point and does not call Mapbox.
+async function havenAttachOperatingCoordinates(snapshot) {
+  const city = snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() : "";
+  const nums = havenOperatingNumbers(snapshot);
+  const have = nums.lat != null && nums.lng != null;
+  if (!city) {
+    havenOperatingFix = { city: "", lat: null, lng: null, failed: "" };
+    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+  }
+  if (have && (!havenOperatingFix.city || havenOperatingFix.city === city)) {
+    havenOperatingFix = { city: city, lat: nums.lat, lng: nums.lng, failed: "" };
+    return Object.assign({}, snapshot, { operatingLat: nums.lat, operatingLng: nums.lng });
+  }
+  if (!have && havenOperatingFix.city === city && havenOperatingFix.lat != null && havenOperatingFix.failed !== city) {
+    return Object.assign({}, snapshot, { operatingLat: havenOperatingFix.lat, operatingLng: havenOperatingFix.lng });
+  }
+  if (havenOperatingFix.failed === city) {
+    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+  }
+  let point = null;
+  if (typeof havenGeocodeAddress === "function") {
+    try {
+      if (havenOperatingInflight && havenOperatingInflightCity === city) {
+        point = await havenOperatingInflight;
+      } else {
+        havenOperatingInflightCity = city;
+        havenOperatingInflight = havenGeocodeAddress(city);
+        point = await havenOperatingInflight;
+      }
+    } catch (e) {
+      point = null;
+    } finally {
+      if (havenOperatingInflightCity === city) havenOperatingInflight = null;
+    }
+  }
+  const lat = point && point.lat != null ? Number(point.lat) : NaN;
+  const lng = point && point.lng != null ? Number(point.lng) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    havenOperatingFix = { city: "", lat: null, lng: null, failed: city };
+    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+  }
+  havenOperatingFix = { city: city, lat: lat, lng: lng, failed: "" };
+  return Object.assign({}, snapshot, { operatingLat: lat, operatingLng: lng });
 }
 
 function havenProProfileWriteBody(snapshot, mode) {
@@ -863,22 +929,33 @@ function havenProProfileWriteBody(snapshot, mode) {
   const legacy = { display_name: display };
   if (email) legacy.email = email;
   if (mode === "legacy") return legacy;
-  return Object.assign({}, legacy, {
+  const nums = havenOperatingNumbers(snapshot);
+  const body = Object.assign({}, legacy, {
     first_name: first || null,
     last_name: last || null,
     home_city: snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() || null : null,
     work_categories: Array.isArray(snapshot.workCategories) ? snapshot.workCategories : [],
     pro_workspace: snapshot || {},
   });
+  if (mode === "located") {
+    body.operating_lat = nums.lat;
+    body.operating_lng = nums.lng;
+  }
+  return body;
 }
 
 // Read the signed-in Pro's own profiles row. Does not create a row.
 // Missing 0021 columns fall back to display_name/email (0016).
 async function fetchHavenProProfile(userId) {
   if (!userId) return { ok: false, reason: "no_user" };
+  const locatedSelect = "id,role,display_name,email,first_name,last_name,home_city,work_categories,pro_workspace,operating_lat,operating_lng";
   const fullSelect = "id,role,display_name,email,first_name,last_name,home_city,work_categories,pro_workspace";
   const legacySelect = "id,role,display_name,email";
-  const select = havenProProfileSchema === "legacy" ? legacySelect : fullSelect;
+  const select = havenProProfileSchema === "legacy"
+    ? legacySelect
+    : havenProProfileSchema === "full"
+      ? fullSelect
+      : locatedSelect;
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: false, reason: "not_configured" };
   const actor = await resolveHavenJobWriteAuth(cfg);
@@ -903,6 +980,10 @@ async function fetchHavenProProfile(userId) {
   } catch (e) {
     return { ok: false, reason: "network_error" };
   }
+  if (!got.ok && havenProProfileSchema !== "legacy" && havenProProfileSchema !== "full" && (got.status === 400 || got.status === 406)) {
+    havenProProfileSchema = "full";
+    try { got = await getSelect(fullSelect); } catch (e) { return { ok: false, reason: "network_error" }; }
+  }
   if (!got.ok && havenProProfileSchema !== "legacy" && (got.status === 400 || got.status === 406)) {
     havenProProfileSchema = "legacy";
     try { got = await getSelect(legacySelect); } catch (e) { return { ok: false, reason: "network_error" }; }
@@ -911,7 +992,9 @@ async function fetchHavenProProfile(userId) {
   const rows = Array.isArray(got.body) ? got.body : [];
   if (!rows.length) return { ok: true, mode: havenProProfileSchema === "legacy" ? "legacy" : "full", rowExists: false, saved: false, snapshot: null, nameOnly: null, writable: false };
   const row = rows[0];
-  if (havenProProfileSchema !== "legacy" && Object.prototype.hasOwnProperty.call(row, "pro_workspace")) {
+  if (Object.prototype.hasOwnProperty.call(row, "operating_lat")) {
+    havenProProfileSchema = "located";
+  } else if (havenProProfileSchema !== "legacy" && Object.prototype.hasOwnProperty.call(row, "pro_workspace")) {
     havenProProfileSchema = "full";
   }
   const mode = havenProProfileSchema === "legacy" ? "legacy" : "full";
@@ -941,12 +1024,12 @@ async function saveHavenProProfile(userId, snapshot) {
     "Content-Type": "application/json",
     Prefer: "return=representation",
   };
-  async function patch(mode) {
+  async function patch(mode, bodySnapshot) {
     const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`;
     const res = await fetch(url, {
       method: "PATCH",
       headers: headers,
-      body: JSON.stringify(havenProProfileWriteBody(snapshot, mode)),
+      body: JSON.stringify(havenProProfileWriteBody(bodySnapshot || snapshot, mode)),
     });
     const text = await res.text();
     let body = null;
@@ -954,18 +1037,29 @@ async function saveHavenProProfile(userId, snapshot) {
     return { ok: res.ok, status: res.status, body: body };
   }
   try {
-    let used = havenProProfileSchema === "legacy" ? "legacy" : "full";
-    let got = await patch(used);
+    let toSave = snapshot;
+    let used = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "full" ? "full" : "located";
+    if (used !== "legacy") {
+      toSave = await havenAttachOperatingCoordinates(snapshot);
+    }
+    let got = await patch(used, toSave);
+    if (!got.ok && used === "located" && (got.status === 400 || got.status === 406)) {
+      havenProProfileSchema = "full";
+      used = "full";
+      got = await patch("full", toSave);
+    }
     if (!got.ok && used === "full" && (got.status === 400 || got.status === 406)) {
       havenProProfileSchema = "legacy";
       used = "legacy";
-      got = await patch("legacy");
+      got = await patch("legacy", toSave);
     }
     if (!got.ok) return { ok: false, reason: "write_failed", status: got.status };
-    if (used === "full") havenProProfileSchema = "full";
+    if (used === "located") havenProProfileSchema = "located";
+    else if (used === "full") havenProProfileSchema = "full";
     const rows = Array.isArray(got.body) ? got.body : [];
     if (!rows.length) return { ok: false, reason: "row_missing" };
-    return { ok: true, mode: havenProProfileSchema === "legacy" ? "legacy" : "full" };
+    const modeOut = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "located" ? "located" : "full";
+    return { ok: true, mode: modeOut };
   } catch (e) {
     return { ok: false, reason: "network_error" };
   }

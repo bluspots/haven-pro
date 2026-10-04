@@ -11,7 +11,7 @@ Haven Pro requires an account. There is no signed-out marketplace and no anonymo
 `fetchPostedJobsFromSupabase`:
 
 - **Signed out / no session** — returns `[]` and does **not** call the jobs API.
-- **Signed in** — `GET /rest/v1/jobs?status=eq.posted&pro_id=is.null` with the user access token.
+- **Signed in** — `POST /rest/v1/rpc/jobs_posted_within_radius` with the user access token. The database returns only posted jobs inside the saved operating radius. The client does not download every posted job.
 
 No `posted_jobs_public` view. No anon SELECT path.
 
