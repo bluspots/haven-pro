@@ -72,6 +72,8 @@ export default function HavenProApp() {
   const [workCategories, setWorkCategories] = useState(new Set());
   const [travelRadius, setTravelRadius] = useState(15);
   const [homeCity, setHomeCity] = useState("");
+  const [operatingLat, setOperatingLat] = useState(null);
+  const [operatingLng, setOperatingLng] = useState(null);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [about, setAbout] = useState("");
@@ -136,7 +138,7 @@ export default function HavenProApp() {
       cancelled = true;
       if (timerId) window.clearInterval(timerId);
     };
-  }, [tab, activeJobs]);
+  }, [tab, activeJobs, travelRadius]);
 
   // Poll backend for status changes on active, backend-claimed jobs (e.g., materials approve/decline)
   useEffect(() => {
@@ -338,6 +340,7 @@ export default function HavenProApp() {
   const profileHydrateResultRef = useRef(false);
   const profileHydratePromiseRef = useRef(null);
   const profileHydrateUserRef = useRef(null);
+  const operatingCityRef = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
 
@@ -485,6 +488,8 @@ export default function HavenProApp() {
       firstName: firstName,
       lastName: lastName,
       homeCity: homeCity,
+      operatingLat: operatingLat,
+      operatingLng: operatingLng,
       about: about,
       avatarEmoji: avatarEmoji,
       travelRadius: travelRadius,
@@ -508,7 +513,17 @@ export default function HavenProApp() {
     if (!snapshot || typeof snapshot !== "object") return false;
     if (typeof snapshot.firstName === "string") setFirstName(snapshot.firstName);
     if (typeof snapshot.lastName === "string") setLastName(snapshot.lastName);
-    if (typeof snapshot.homeCity === "string") setHomeCity(snapshot.homeCity);
+    if (typeof snapshot.homeCity === "string") {
+      operatingCityRef.current = String(snapshot.homeCity).trim();
+      setHomeCity(snapshot.homeCity);
+    }
+    if (snapshot.operatingLat != null && snapshot.operatingLng != null && Number.isFinite(Number(snapshot.operatingLat)) && Number.isFinite(Number(snapshot.operatingLng))) {
+      setOperatingLat(Number(snapshot.operatingLat));
+      setOperatingLng(Number(snapshot.operatingLng));
+    } else if (Object.prototype.hasOwnProperty.call(snapshot, "operatingLat")) {
+      setOperatingLat(null);
+      setOperatingLng(null);
+    }
     if (typeof snapshot.about === "string") setAbout(snapshot.about);
     if (typeof snapshot.avatarEmoji === "string") setAvatarEmoji(snapshot.avatarEmoji);
     if (typeof snapshot.travelRadius === "number" && snapshot.travelRadius > 0) setTravelRadius(snapshot.travelRadius);
@@ -716,6 +731,19 @@ export default function HavenProApp() {
     }
     showToast("Signed in");
   }
+
+  useEffect(() => {
+    const city = String(homeCity || "").trim();
+    if (operatingCityRef.current === null) {
+      operatingCityRef.current = city;
+      return;
+    }
+    if (operatingCityRef.current === city) return;
+    operatingCityRef.current = city;
+    setOperatingLat(null);
+    setOperatingLng(null);
+  }, [homeCity]);
+
   useEffect(() => {
     let cancelled = false;
     let unsubscribe = function () {};
@@ -754,6 +782,8 @@ export default function HavenProApp() {
     firstName,
     lastName,
     homeCity,
+    operatingLat,
+    operatingLng,
     about,
     avatarEmoji,
     travelRadius,
@@ -843,10 +873,9 @@ export default function HavenProApp() {
   }, [activeJobs]);
 
   // Live location — only watched while a job is actually en_route, and only
-  // to gate "I've Arrived" and power real turn-by-turn directions. Fails
-  // silently (permission denied, no geolocation support, etc.) — the
-  // fallbacks below treat "no location" the same as "can't verify," not as
-  // a hard block, so the app still works for a pro who declines the prompt.
+  // to gate "I've Arrived" and power real turn-by-turn directions. If the
+  // browser or the job has no coordinates, arrival stays closed. Missing
+  // coordinates are not inside the radius.
   useEffect(() => {
     if (!activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -858,17 +887,25 @@ export default function HavenProApp() {
   }, [activeJobs]);
 
   function isNearJob(job) {
-    if (!proLiveLocation || job.lat == null || job.lng == null) return true; // can't verify — don't block
+    if (!proLiveLocation || job.lat == null || job.lng == null) return false;
     return haversineMiles(proLiveLocation.lat, proLiveLocation.lng, job.lat, job.lng) <= ARRIVAL_THRESHOLD_MI;
   }
 
   /* ── Eligibility pipeline: geography (unconditional) -> work categories
      -> travel radius -> Emergency-only toggle. Grouping by category is
      the board's own structure, not a separate filter step. ── */
-  const proState = stateOf(homeCity);
-  const geoCategoryPassed = availableJobs.filter(j => stateOf(j.city) === proState && workCategories.has(j.category));
-  // Treat missing distanceMi as eligible so backend jobs without simulated distances still surface.
-  const eligibleJobs = geoCategoryPassed.filter(j => j.distanceMi == null || j.distanceMi <= travelRadius);
+  const proState = stateOf(homeCity || "");
+  const categoryPassed = availableJobs.filter(j => workCategories.has(j.category));
+  // Stored radius is the authority for backend jobs. City/state is not.
+  // A missing distance is outside the radius. Simulated cards still use the
+  // state label so a short fake distance in another state stays hidden.
+  const eligibleJobs = categoryPassed.filter(j => {
+    if (j.distanceMi == null || !Number.isFinite(Number(j.distanceMi)) || !(Number(j.distanceMi) <= travelRadius)) return false;
+    if (j.radiusCheckedOnServer) return true;
+    const city = j.city || "";
+    if (!city || !homeCity) return false;
+    return stateOf(city) === proState;
+  });
   const boardJobs = eligibleJobs.filter(j => !emergencyOnly || j.emergency);
 
   // Sections ordered by sectionOrder — defaults to the pro's own

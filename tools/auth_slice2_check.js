@@ -277,9 +277,9 @@ async function checkSignedInWrites() {
   assert.strictEqual(board.length, 1);
   assert.strictEqual(board[0].opts.headers.Authorization, "Bearer " + TOKEN, "signed-in board read uses the user bearer");
   assert.strictEqual(board[0].opts.headers.apikey, ANON, "signed-in board apikey stays the anon key");
-  assert.ok(board[0].url.includes("/rest/v1/jobs?"), "signed-in board still reads public.jobs");
-  assert.ok(board[0].url.includes("status=eq.posted"));
-  assert.ok(board[0].url.includes("pro_id=is.null"));
+  assert.ok(board[0].url.includes("/rest/v1/rpc/jobs_posted_within_radius"), "signed-in board reads the radius RPC");
+  assert.strictEqual(board[0].opts.method, "POST");
+  assert.ok(!board[0].url.includes("status=eq.posted"), "board must not download every posted job");
   assert.ok(!board[0].url.includes(DEMO_PRO_ID));
 
   const active = await api.fetchActiveJobsFromSupabase();

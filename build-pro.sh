@@ -24,7 +24,7 @@ OUT_INDEX="index.html"
 
 # Ordered list of source files to concatenate (behavior-identical; includes Step 7 backend_adapter).
 # See Customer docs: PHASE3_MODULARIZATION_ORDER.md — Step 7 (Pro).
-SOURCE_FILES=("locked_constants.js" "pure_helpers.js" "sim_seeds.js" "theme_tokens.js" "backend_adapter.js" "$SRC")
+SOURCE_FILES=("locked_constants.js" "pure_helpers.js" "sim_seeds.js" "theme_tokens.js" "geocode.js" "backend_adapter.js" "$SRC")
 
 # Concatenate in order, then apply the existing strip/rename transforms.
 BODY=$(cat "${SOURCE_FILES[@]}" | grep -v '^import React' | sed 's/^export default function HavenProApp/function HavenProApp/')
