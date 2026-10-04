@@ -10,6 +10,9 @@ const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode";
 // Supabase Auth → URL configuration for the published Pro app. Email links must be allowed to land here.
 const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
+// Local-only Pro workspace snapshot (city, categories, radius, onboarding).
+// Restores Create Your Profile / empty city after refresh without writing profiles.
+const HAVEN_PRO_WORKSPACE_KEY = "haven_pro_workspace_v1";
 function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
@@ -652,6 +655,48 @@ function isPrototypeAnonMode() {
     return true;
   } catch (e) {
     return true;
+  }
+}
+
+function loadHavenProWorkspace(userId) {
+  if (!userId) return null;
+  try {
+    const raw = window.localStorage.getItem(HAVEN_PRO_WORKSPACE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const byUser = parsed && typeof parsed === "object" ? (parsed.byUserId || parsed.data || null) : null;
+    if (!byUser || typeof byUser !== "object") return null;
+    const row = byUser[userId];
+    if (!row || typeof row !== "object") return null;
+    return row;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveHavenProWorkspace(userId, snapshot) {
+  if (!userId || !snapshot || typeof snapshot !== "object") return false;
+  try {
+    let root = { __v: 1, byUserId: {} };
+    const raw = window.localStorage.getItem(HAVEN_PRO_WORKSPACE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          root = {
+            __v: 1,
+            byUserId: (parsed.byUserId && typeof parsed.byUserId === "object")
+              ? Object.assign({}, parsed.byUserId)
+              : {},
+          };
+        }
+      } catch (e) { /* reset */ }
+    }
+    root.byUserId[userId] = snapshot;
+    window.localStorage.setItem(HAVEN_PRO_WORKSPACE_KEY, JSON.stringify(root));
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
