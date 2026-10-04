@@ -1,5 +1,8 @@
 # Pro profile + active-job rehydration
 
+The local snapshot below is now a cache only. A saved `public.profiles` row wins. See `docs/0021_pro_profile_source_of_truth.sql` (founder pastes it; the app does not apply it). Until that SQL is pasted, the app still writes `display_name` and keeps the local cache.
+
+
 Release blocker. Draft only until Quagon reviews.
 
 ## Cause

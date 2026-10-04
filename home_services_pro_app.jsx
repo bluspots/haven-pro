@@ -334,6 +334,10 @@ export default function HavenProApp() {
   const accountSourceRef = useRef(null);
   // Tracks which auth uid already had local workspace applied this boot.
   const workspaceAppliedForRef = useRef(null);
+  const profileHydratedForRef = useRef(null);
+  const profileHydrateResultRef = useRef(false);
+  const profileHydratePromiseRef = useRef(null);
+  const profileHydrateUserRef = useRef(null);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
 
@@ -529,13 +533,63 @@ export default function HavenProApp() {
       return true;
     }
     if (snapshot.onboardingStatus === "in_progress") {
-      setOnboardingStatus("in_progress");
-      if (typeof snapshot.onboardingStep === "string" && snapshot.onboardingStep) {
-        setOnboardingStep(snapshot.onboardingStep);
-      }
+      // An assigned active job may already have marked onboarding completed.
+      // Do not walk that back to Create Your Profile.
+      setOnboardingStatus(prev => (prev === "completed" ? prev : "in_progress"));
+      setOnboardingStep(prev => (prev === "done" ? prev : (typeof snapshot.onboardingStep === "string" && snapshot.onboardingStep ? snapshot.onboardingStep : prev)));
       return true;
     }
     return false;
+  }
+  function splitHavenDisplayName(name) {
+    const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+    return { first: parts[0] || "", last: parts.slice(1).join(" ") };
+  }
+  // Profiles row wins when it has a saved profile. Local snapshot is only the cache.
+  function hydrateSignedInProProfile(userId) {
+    if (!userId) return Promise.resolve(false);
+    if (profileHydratedForRef.current === userId) return Promise.resolve(!!profileHydrateResultRef.current);
+    if (profileHydratePromiseRef.current && profileHydrateUserRef.current === userId) {
+      return profileHydratePromiseRef.current;
+    }
+    profileHydrateUserRef.current = userId;
+    const promise = (async function () {
+      let remote = null;
+      if (typeof fetchHavenProProfile === "function") {
+        try { remote = await fetchHavenProProfile(userId); } catch (e) { remote = null; }
+      }
+      if (profileHydrateUserRef.current !== userId) return false;
+      if (accountSourceRef.current === "local") return false;
+      let applied = false;
+      if (remote && remote.saved && remote.snapshot) {
+        applied = applyHavenProWorkspace(remote.snapshot);
+        if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, remote.snapshot);
+      } else {
+        const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
+        if (remote && remote.nameOnly) {
+          const parsed = splitHavenDisplayName(remote.nameOnly);
+          if (snap) {
+            if (parsed.first) snap.firstName = parsed.first;
+            if (parsed.last) snap.lastName = parsed.last;
+          } else if (parsed.first) {
+            setFirstName(parsed.first);
+            if (parsed.last) setLastName(parsed.last);
+            applied = true;
+          }
+        }
+        if (snap) applied = applyHavenProWorkspace(snap) || applied;
+        if (remote && remote.writable && snap && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snap) && typeof saveHavenProProfile === "function") {
+          try { await saveHavenProProfile(userId, snap); } catch (e) { /* cache remains until the row accepts the write */ }
+        }
+      }
+      if (profileHydrateUserRef.current === userId) {
+        profileHydratedForRef.current = userId;
+        profileHydrateResultRef.current = !!applied;
+      }
+      return applied;
+    })();
+    profileHydratePromiseRef.current = promise;
+    return promise;
   }
   // Mirror a real session into the local account flag. Never overwrites a loaded demo profile.
   // Restores the local workspace for this uid so a refresh does not drop into Create Your Profile.
@@ -551,14 +605,17 @@ export default function HavenProApp() {
     setAccountStatus("signed_in");
     setAccountCreatedAt(function (prev) { return prev || Date.now(); });
     if (next.id && workspaceAppliedForRef.current !== next.id) {
-      const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(next.id) : null;
       workspaceAppliedForRef.current = next.id;
-      if (snap) applyHavenProWorkspace(snap);
+      hydrateSignedInProProfile(next.id);
     }
   }
   function clearAuthLinkedAccount() {
     setAuthSession(null);
     workspaceAppliedForRef.current = null;
+    profileHydratedForRef.current = null;
+    profileHydrateResultRef.current = false;
+    profileHydratePromiseRef.current = null;
+    profileHydrateUserRef.current = null;
     if (accountSourceRef.current !== "auth") return;
     accountSourceRef.current = null;
     setAccountStatus("signed_out");
@@ -586,31 +643,26 @@ export default function HavenProApp() {
     clearAuthLinkedAccount();
     showToast("Signed out");
   }
-  function continueSignedInSetup() {
+  async function continueSignedInSetup() {
     if (!authSession) return;
     accountSourceRef.current = "auth";
     setAccountStatus("signed_in");
     if (authSession.email) setAccountEmail(authSession.email);
     setAccountCreatedAt(function (prev) { return prev || Date.now(); });
     setWelcomeAuthView("home");
-    if (authSession.id && workspaceAppliedForRef.current !== authSession.id) {
-      const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(authSession.id) : null;
+    let restored = false;
+    if (authSession.id) {
       workspaceAppliedForRef.current = authSession.id;
-      if (snap && applyHavenProWorkspace(snap)) return;
+      restored = await hydrateSignedInProProfile(authSession.id);
     }
-    if (onboardingStatus === "completed") {
-      setOnboardingStep("done");
-      return;
-    }
+    if (restored) return;
     if (homeCity.trim() && workCategories.size > 0) {
-      setOnboardingStatus("completed");
-      setOnboardingStep("done");
+      setOnboardingStatus(prev => (prev === "completed" ? prev : "completed"));
+      setOnboardingStep(prev => (prev === "done" ? prev : "done"));
       return;
     }
-    setOnboardingStatus("in_progress");
-    if (onboardingStatus === "not_started" || onboardingStep === "welcome") {
-      setOnboardingStep("createProfile");
-    }
+    setOnboardingStatus(prev => (prev === "completed" ? prev : (prev === "not_started" ? "in_progress" : prev)));
+    setOnboardingStep(prev => (prev === "done" ? prev : (prev === "welcome" ? "createProfile" : prev)));
   }
   function openEmailSignIn() {
     setAuthNotice("");
@@ -654,13 +706,12 @@ export default function HavenProApp() {
       setEmailVerifyStatus("verified");
       let restored = false;
       if (next && next.id) {
-        const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(next.id) : null;
         workspaceAppliedForRef.current = next.id;
-        if (snap) restored = applyHavenProWorkspace(snap);
+        restored = await hydrateSignedInProProfile(next.id);
       }
-      if (!restored && (onboardingStatus === "not_started" || onboardingStep === "welcome")) {
-        setOnboardingStatus("in_progress");
-        setOnboardingStep("createProfile");
+      if (!restored) {
+        setOnboardingStatus(prev => (prev === "completed" ? prev : (prev === "not_started" ? "in_progress" : prev)));
+        setOnboardingStep(prev => (prev === "done" ? prev : ((prev === "welcome") ? "createProfile" : prev)));
       }
     }
     showToast("Signed in");
@@ -685,13 +736,17 @@ export default function HavenProApp() {
     };
   }, []);
 
-  // Persist the local Pro workspace for the signed-in auth uid only.
-  // Never inserts or updates public.profiles — refresh restore is localStorage only.
+  // Cache locally and write the signed-in Pro's own profiles row.
+  // Wait until hydrate finishes so a blank first paint cannot overwrite a saved profile.
   useEffect(() => {
     if (!authSession || !authSession.id) return;
     if (accountSourceRef.current === "local") return;
-    if (typeof saveHavenProWorkspace !== "function") return;
-    saveHavenProWorkspace(authSession.id, buildHavenProWorkspaceSnapshot());
+    if (profileHydratedForRef.current !== authSession.id) return;
+    const snapshot = buildHavenProWorkspaceSnapshot();
+    if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(authSession.id, snapshot);
+    if (typeof saveHavenProProfile === "function" && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snapshot)) {
+      saveHavenProProfile(authSession.id, snapshot);
+    }
   }, [
     authSession,
     onboardingStatus,

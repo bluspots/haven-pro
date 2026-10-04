@@ -10,9 +10,11 @@ const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
 const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode";
 // Supabase Auth → URL configuration for the published Pro app. Email links must be allowed to land here.
 const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
-// Local-only Pro workspace snapshot (city, categories, radius, onboarding).
-// Restores Create Your Profile / empty city after refresh without writing profiles.
+// Local cache of the signed-in Pro workspace. The profiles row is the source
+// of truth once those columns exist. The cache must not win over a saved row.
 const HAVEN_PRO_WORKSPACE_KEY = "haven_pro_workspace_v1";
+// full: 0021 columns exist. legacy: only display_name/email can be written.
+let havenProProfileSchema = "unknown";
 function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
@@ -816,6 +818,157 @@ async function havenAuthRestoreSession() {
   const session = data && data.session ? data.session : null;
   rememberHavenSession(session);
   return { ok: true, session: session };
+}
+
+
+function havenSnapshotHasSavedProfile(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+  if (snapshot.firstName && String(snapshot.firstName).trim()) return true;
+  if (snapshot.lastName && String(snapshot.lastName).trim()) return true;
+  if (snapshot.homeCity && String(snapshot.homeCity).trim()) return true;
+  if (Array.isArray(snapshot.workCategories) && snapshot.workCategories.length > 0) return true;
+  const idv = snapshot.identityVerification;
+  if (idv && typeof idv === "object" && idv.status && idv.status !== "not_started") return true;
+  const bg = snapshot.backgroundCheck;
+  if (bg && typeof bg === "object" && bg.status && bg.status !== "not_started") return true;
+  return false;
+}
+
+function havenProfileRowSaved(row) {
+  if (!row || typeof row !== "object") return false;
+  if (row.first_name && String(row.first_name).trim()) return true;
+  if (row.last_name && String(row.last_name).trim()) return true;
+  if (row.home_city && String(row.home_city).trim()) return true;
+  if (Array.isArray(row.work_categories) && row.work_categories.length > 0) return true;
+  const ws = row.pro_workspace;
+  if (ws && typeof ws === "object" && havenSnapshotHasSavedProfile(ws)) return true;
+  return false;
+}
+
+function havenSnapshotFromProfileRow(row) {
+  const ws = row && row.pro_workspace && typeof row.pro_workspace === "object" ? Object.assign({}, row.pro_workspace) : {};
+  if (row.first_name != null) ws.firstName = String(row.first_name);
+  if (row.last_name != null) ws.lastName = String(row.last_name);
+  if (row.home_city != null) ws.homeCity = String(row.home_city);
+  if (Array.isArray(row.work_categories)) ws.workCategories = row.work_categories.slice();
+  if (!ws.workCategories) ws.workCategories = [];
+  return ws;
+}
+
+function havenProProfileWriteBody(snapshot, mode) {
+  const first = snapshot && snapshot.firstName ? String(snapshot.firstName).trim() : "";
+  const last = snapshot && snapshot.lastName ? String(snapshot.lastName).trim() : "";
+  const display = [first, last].filter(Boolean).join(" ") || null;
+  const email = snapshot && snapshot.accountEmail ? String(snapshot.accountEmail).trim() : "";
+  const legacy = { display_name: display };
+  if (email) legacy.email = email;
+  if (mode === "legacy") return legacy;
+  return Object.assign({}, legacy, {
+    first_name: first || null,
+    last_name: last || null,
+    home_city: snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() || null : null,
+    work_categories: Array.isArray(snapshot.workCategories) ? snapshot.workCategories : [],
+    pro_workspace: snapshot || {},
+  });
+}
+
+// Read the signed-in Pro's own profiles row. Does not create a row.
+// Missing 0021 columns fall back to display_name/email (0016).
+async function fetchHavenProProfile(userId) {
+  if (!userId) return { ok: false, reason: "no_user" };
+  const fullSelect = "id,role,display_name,email,first_name,last_name,home_city,work_categories,pro_workspace";
+  const legacySelect = "id,role,display_name,email";
+  const select = havenProProfileSchema === "legacy" ? legacySelect : fullSelect;
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, reason: "not_configured" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { ok: false, reason: actor.reason };
+  if (actor.proId !== userId) return { ok: false, reason: "session_identity_missing" };
+  const headers = {
+    apikey: actor.headers.apikey,
+    Authorization: actor.headers.Authorization,
+    Accept: "application/json",
+  };
+  async function getSelect(sel) {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=${sel}`;
+    const res = await fetch(url, { method: "GET", headers: headers });
+    const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+    return { ok: res.ok, status: res.status, body: body, text: text };
+  }
+  let got;
+  try {
+    got = await getSelect(select);
+  } catch (e) {
+    return { ok: false, reason: "network_error" };
+  }
+  if (!got.ok && havenProProfileSchema !== "legacy" && (got.status === 400 || got.status === 406)) {
+    havenProProfileSchema = "legacy";
+    try { got = await getSelect(legacySelect); } catch (e) { return { ok: false, reason: "network_error" }; }
+  }
+  if (!got.ok) return { ok: false, reason: "read_failed", status: got.status };
+  const rows = Array.isArray(got.body) ? got.body : [];
+  if (!rows.length) return { ok: true, mode: havenProProfileSchema === "legacy" ? "legacy" : "full", rowExists: false, saved: false, snapshot: null, nameOnly: null, writable: false };
+  const row = rows[0];
+  if (havenProProfileSchema !== "legacy" && Object.prototype.hasOwnProperty.call(row, "pro_workspace")) {
+    havenProProfileSchema = "full";
+  }
+  const mode = havenProProfileSchema === "legacy" ? "legacy" : "full";
+  const saved = mode === "full" && havenProfileRowSaved(row);
+  return {
+    ok: true,
+    mode: mode,
+    rowExists: true,
+    saved: saved,
+    snapshot: saved ? havenSnapshotFromProfileRow(row) : null,
+    nameOnly: row.display_name ? String(row.display_name) : null,
+    writable: true,
+  };
+}
+
+// Update the signed-in Pro's own profiles row. No insert. No other users.
+async function saveHavenProProfile(userId, snapshot) {
+  if (!userId || !snapshot) return { ok: false, reason: "no_user" };
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, reason: "not_configured" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok || actor.proId !== userId) return { ok: false, reason: "no_session" };
+  const headers = {
+    apikey: actor.headers.apikey,
+    Authorization: actor.headers.Authorization,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+  async function patch(mode) {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`;
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: headers,
+      body: JSON.stringify(havenProProfileWriteBody(snapshot, mode)),
+    });
+    const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+    return { ok: res.ok, status: res.status, body: body };
+  }
+  try {
+    let used = havenProProfileSchema === "legacy" ? "legacy" : "full";
+    let got = await patch(used);
+    if (!got.ok && used === "full" && (got.status === 400 || got.status === 406)) {
+      havenProProfileSchema = "legacy";
+      used = "legacy";
+      got = await patch("legacy");
+    }
+    if (!got.ok) return { ok: false, reason: "write_failed", status: got.status };
+    if (used === "full") havenProProfileSchema = "full";
+    const rows = Array.isArray(got.body) ? got.body : [];
+    if (!rows.length) return { ok: false, reason: "row_missing" };
+    return { ok: true, mode: havenProProfileSchema === "legacy" ? "legacy" : "full" };
+  } catch (e) {
+    return { ok: false, reason: "network_error" };
+  }
 }
 
 function subscribeHavenAuth(onChange) {
