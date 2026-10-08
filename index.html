@@ -3012,7 +3012,7 @@ function HavenProApp() {
             <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{job.title}</div>
             {(() => {
               const parts = [];
-              if (job.distanceMi != null) parts.push(`📍 ${job.distanceMi} mi`);
+              if (job.distanceMi != null) parts.push(`📍 ${Number(job.distanceMi).toFixed(1)} mi`);
               if (job.durationMin != null) parts.push(`⏱ ~${job.durationMin} min`);
               return parts.length > 0
                 ? <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 1 }}>{parts.join(" · ")}</div>
@@ -3347,7 +3347,7 @@ function HavenProApp() {
             <div style={{ display: "flex", gap: 18 }}>
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" }}>Distance</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 }}>{job.distanceMi != null ? `📍 ${job.distanceMi} mi` : "—"}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 }}>{job.distanceMi != null ? `📍 ${Number(job.distanceMi).toFixed(1)} mi` : "—"}</div>
               </div>
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" }}>Requested</div>
