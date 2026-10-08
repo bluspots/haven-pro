@@ -116,7 +116,7 @@ function authLib(sessionRef) {
         auth: {
           async getSession() { return { data: { session: sessionRef.session || null }, error: null }; },
           async getUser() { return { data: { user: sessionRef.session ? sessionRef.session.user : null }, error: null }; },
-          onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+          onAuthStateChange(cb) { (sessionRef.listeners = sessionRef.listeners || []).push(cb); return { data: { subscription: { unsubscribe() {} } } }; },
           async signOut() { sessionRef.session = null; return { error: null }; },
           async signInWithPassword() { return { data: { session: null }, error: { message: "nope", status: 400 } }; },
           async signUp() { return { data: { session: null, user: null }, error: null }; },
@@ -372,11 +372,243 @@ function checkSql() {
   }
 }
 
+
+// ── (5) Stale-cache recovery (guard rejection -> refetch -> retry once) ──
+const OTHER_ID = "cccccccc-dddd-4eee-8fff-000000000b2b";
+const SELF_SETTABLE = {
+  identityVerification: ["not_started", "session_created", "pending"],
+  backgroundCheck: ["not_started", "consent_required", "invited", "pending"],
+  payoutAccount: ["not_started", "pending"],
+  taxProfile: ["not_started", "pending"],
+};
+function wsStatus(ws, key) {
+  const v = ws && typeof ws === "object" ? ws[key] : null;
+  const s = v && typeof v === "object" && typeof v.status === "string" ? v.status.trim().toLowerCase() : "";
+  return s || "not_started";
+}
+// Mirrors 0024 profiles_guard_qa_fields for a non-tester row.
+function guardViolation(oldWs, newWs) {
+  for (const key of Object.keys(SELF_SETTABLE)) {
+    const a = wsStatus(oldWs, key);
+    const b = wsStatus(newWs, key);
+    if (a !== b && !SELF_SETTABLE[key].includes(b)) return key + " status " + b;
+  }
+  const oldOn = !!(oldWs && oldWs.payoutAccount && oldWs.payoutAccount.payoutsEnabled === true);
+  const newOn = !!(newWs && newWs.payoutAccount && newWs.payoutAccount.payoutsEnabled === true);
+  if (newOn && !oldOn) return "payoutAccount.payoutsEnabled";
+  return null;
+}
+function emptyRow(id) {
+  return { id, role: "pro", display_name: null, email: "pro@example.com", first_name: null, last_name: null, home_city: null, work_categories: [], operating_lat: null, operating_lng: null, pro_workspace: {} };
+}
+function json(status, body) {
+  const text = JSON.stringify(body);
+  return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => text };
+}
+// mode: "guard" (emulate 0024), "alwaysGuard" (every PATCH is a guard 403),
+// "nonGuard403" (plain 42501 permission error, not the guard)
+function multiBackend(opts) {
+  const state = { rows: opts.rows, testers: opts.testers || {}, mode: opts.mode || "guard", events: [] };
+  state.fetch = async (url, init) => {
+    const method = (init && init.method) || "GET";
+    const m = url.match(/id=eq\.([^&]+)/);
+    const uid = m ? decodeURIComponent(m[1]) : "";
+    if (url.includes("/rest/v1/rpc/is_qa_tester")) {
+      const auth = (init.headers && init.headers.Authorization) || "";
+      const who = auth.endsWith(OTHER_ID) ? OTHER_ID : PRO_ID;
+      return json(200, state.testers[who] === true);
+    }
+    if (url.includes("/rest/v1/profiles") && method === "PATCH") {
+      let body = {};
+      try { body = JSON.parse(init.body || "{}"); } catch (e) { body = {}; }
+      const row = state.rows[uid];
+      const ev = { type: "PATCH", uid, body };
+      state.events.push(ev);
+      if (state.mode === "nonGuard403") { ev.status = 403; return json(403, { code: "42501", message: "permission denied for table profiles" }); }
+      const violation = state.mode === "alwaysGuard"
+        ? "identityVerification status verified"
+        : (!state.testers[uid] && body.pro_workspace ? guardViolation(row.pro_workspace, body.pro_workspace) : null);
+      if (violation) { ev.status = 403; return json(403, { code: "42501", message: "QA tester only: " + violation + " is a provider result" }); }
+      ev.status = 200;
+      state.rows[uid] = Object.assign({}, row, body);
+      return json(200, [state.rows[uid]]);
+    }
+    if (url.includes("/rest/v1/profiles")) {
+      const recovery = /select=id,pro_workspace(&|$)/.test(url);
+      state.events.push({ type: recovery ? "GET_WS" : "GET_PROFILE", uid });
+      return json(200, state.rows[uid] ? [state.rows[uid]] : []);
+    }
+    return json(200, []);
+  };
+  state.count = (pred) => state.events.filter(pred).length;
+  return state;
+}
+function sessionFor(uid, email) {
+  return { access_token: "pro-access-token-" + uid, user: { id: uid, email, user_metadata: { role: "pro" } } };
+}
+function cachedWorkspace(uid, extra) {
+  return JSON.stringify({ __v: 1, byUserId: { [uid]: Object.assign({
+    onboardingStatus: "completed", onboardingStep: "done", firstName: "Grace", lastName: "Hopper",
+    homeCity: "Tampa, FL", travelRadius: 25, workCategories: ["Plumbing"],
+    identityVerification: { provider: "persona", status: "verified", verifiedAt: 1 },
+  }, extra || {}) } });
+}
+async function settle(be, ms) {
+  let last = -1;
+  for (let i = 0; i < 40; i++) {
+    await sleep(ms || 60);
+    if (be.events.length === last) return;
+    last = be.events.length;
+  }
+}
+
+async function checkStaleCacheRecovery() {
+  // No server profile + cached verified -> rejected, refetched, reset, retried once.
+  const be = multiBackend({ rows: { [PRO_ID]: emptyRow(PRO_ID) }, mode: "guard" });
+  await withApp({
+    backend: be,
+    sessionRef: { session: sessionFor(PRO_ID, "pro@example.com") },
+    storage: { haven_pro_workspace_v1: cachedWorkspace(PRO_ID) },
+  }, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "signed-in app from the device cache");
+    await settle(be);
+    const ev = be.events;
+    const firstPatch = ev.findIndex(e => e.type === "PATCH");
+    assert.ok(firstPatch >= 0, "cached profile is pushed to the empty server row");
+    assert.strictEqual(ev[firstPatch].status, 403, "cached verified status is rejected by the guard");
+    assert.strictEqual(ev[firstPatch].body.pro_workspace.identityVerification.status, "verified");
+    assert.strictEqual(ev[firstPatch + 1] && ev[firstPatch + 1].type, "GET_WS", "guard rejection refetches the server profile");
+    const retry = ev[firstPatch + 2];
+    assert.ok(retry && retry.type === "PATCH", "then retries the save");
+    assert.strictEqual(retry.status, 200, "retry is accepted");
+    assert.strictEqual(retry.body.pro_workspace.identityVerification.status, "not_started", "retry sends the server value (missing -> not_started)");
+    assert.strictEqual(retry.body.pro_workspace.payoutAccount.payoutsEnabled, false, "missing payoutsEnabled -> off");
+    assert.strictEqual(retry.body.first_name, "Grace", "retry keeps the user's name");
+    assert.strictEqual(retry.body.home_city, "Tampa, FL", "retry keeps the user's city");
+    assert.strictEqual(be.count(e => e.type === "GET_WS"), 1, "one refetch");
+    assert.strictEqual(be.count(e => e.type === "PATCH" && e.status === 403), 1, "only the stale save was rejected");
+    assert.strictEqual(be.rows[PRO_ID].first_name, "Grace", "name reached the server");
+    assert.strictEqual(be.rows[PRO_ID].home_city, "Tampa, FL", "city reached the server");
+    assert.strictEqual(wsStatus(be.rows[PRO_ID].pro_workspace, "identityVerification"), "not_started", "server never got the stale verified");
+    await openProfileMain(window);
+    assert.ok(/Not Started/.test(identityRowStatus(window)), "local identity replaced with the server value: " + identityRowStatus(window));
+    const cache = JSON.parse(window.localStorage.getItem("haven_pro_workspace_v1"));
+    assert.strictEqual(cache.byUserId[PRO_ID].identityVerification.status, "not_started", "device cache replaced with the server value");
+    assert.strictEqual(cache.byUserId[PRO_ID].firstName, "Grace", "device cache keeps the name");
+  });
+}
+
+async function checkSameTabSwitch() {
+  const testerRow = profileRow({
+    identityVerification: { provider: "persona", status: "verified" },
+    backgroundCheck: { provider: "checkr", status: "clear" },
+    payoutAccount: { provider: "stripe", status: "enabled", payoutsEnabled: true, last4: "4242" },
+    taxProfile: { status: "verified" },
+  });
+  const otherRow = {
+    id: OTHER_ID, role: "pro", display_name: "Bo Smith", email: "bo@example.com",
+    first_name: "Bo", last_name: "Smith", home_city: "Miami, FL", work_categories: ["Plumbing"],
+    operating_lat: 25.7, operating_lng: -80.2,
+    // Saved profile without any guarded section (the risky shape).
+    pro_workspace: { onboardingStatus: "completed", onboardingStep: "done", travelRadius: 25, workCategories: ["Plumbing"] },
+  };
+  const be = multiBackend({ rows: { [PRO_ID]: testerRow, [OTHER_ID]: otherRow }, testers: { [PRO_ID]: true }, mode: "guard" });
+  const sessionRef = { session: sessionFor(PRO_ID, "pro@example.com") };
+  await withApp({ backend: be, sessionRef }, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "tester signed in");
+    await settle(be);
+    await openProfileMain(window);
+    assert.ok(/Verified/.test(identityRowStatus(window)), "tester's identity is Verified");
+    clickText(window, "Settings");
+    await waitFor(window, () => !!findButton(window, "Sign Out"), "Settings Sign Out");
+    findButton(window, "Sign Out").click();
+    await waitFor(window, t => t.includes("Signed out"), "signed out");
+    // A non-tester signs in on the same tab.
+    const before = be.events.length;
+    sessionRef.session = sessionFor(OTHER_ID, "bo@example.com");
+    (sessionRef.listeners || []).forEach(cb => cb("SIGNED_IN", sessionRef.session));
+    await waitFor(window, t => t.includes("My Jobs"), "non-tester signed in");
+    await settle(be);
+    const otherPatches = be.events.slice(before).filter(e => e.type === "PATCH" && e.uid === OTHER_ID);
+    assert.ok(otherPatches.length >= 1, "non-tester profile saves after sign-in");
+    assert.strictEqual(otherPatches[0].status, 200, "first save for the next user passes (no carried-over statuses)");
+    assert.ok(otherPatches.every(e => e.status === 200), "no guard rejection for the next user");
+    const ws = otherPatches[0].body.pro_workspace;
+    assert.strictEqual(wsStatus(ws, "identityVerification"), "not_started");
+    assert.strictEqual(wsStatus(ws, "backgroundCheck"), "not_started");
+    assert.strictEqual(wsStatus(ws, "payoutAccount"), "not_started");
+    assert.strictEqual(ws.payoutAccount.payoutsEnabled, false, "payoutsEnabled reset to off");
+    assert.strictEqual(wsStatus(ws, "taxProfile"), "not_started");
+    assert.strictEqual(be.count(e => e.type === "GET_WS"), 0, "no recovery was needed");
+    await openProfileMain(window);
+    assert.ok(/Not Started/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
+  });
+}
+
+async function checkRetryAtMostOnce() {
+  const be = multiBackend({ rows: { [PRO_ID]: emptyRow(PRO_ID) }, mode: "alwaysGuard" });
+  await withApp({
+    backend: be,
+    sessionRef: { session: sessionFor(PRO_ID, "pro@example.com") },
+    storage: { haven_pro_workspace_v1: cachedWorkspace(PRO_ID) },
+  }, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "signed-in app");
+    await settle(be, 80);
+    const patches = be.count(e => e.type === "PATCH");
+    const refetchThenRetry = be.events.filter((e, i) => e.type === "GET_WS" && be.events[i + 1] && be.events[i + 1].type === "PATCH").length;
+    assert.strictEqual(refetchThenRetry, 1, "exactly one retry after a refetch");
+    assert.ok(patches <= 3, "no save loop (" + patches + " PATCHes)");
+    assert.ok(be.count(e => e.type === "GET_WS") <= 2, "no refetch loop");
+    await sleep(800);
+    assert.strictEqual(be.count(e => e.type === "PATCH"), patches, "no further saves after the single retry");
+  });
+}
+
+async function checkNonGuardRejection() {
+  const be = multiBackend({ rows: { [PRO_ID]: emptyRow(PRO_ID) }, mode: "nonGuard403" });
+  await withApp({
+    backend: be,
+    sessionRef: { session: sessionFor(PRO_ID, "pro@example.com") },
+    storage: { haven_pro_workspace_v1: cachedWorkspace(PRO_ID) },
+  }, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "signed-in app");
+    await settle(be, 80);
+    assert.ok(be.count(e => e.type === "PATCH") >= 1, "save attempted");
+    assert.strictEqual(be.count(e => e.type === "GET_WS"), 0, "a non-guard 42501 does not refetch");
+    // Hydrate save (no email) is sent once; the later PATCH is the normal autosave, not a retry.
+    assert.strictEqual(be.count(e => e.type === "PATCH" && !("email" in e.body)), 1, "a non-guard rejection is not retried");
+    const n = be.count(e => e.type === "PATCH");
+    assert.ok(n <= 2, "no save loop (" + n + " PATCHes)");
+    await sleep(800);
+    assert.strictEqual(be.count(e => e.type === "PATCH"), n, "no further saves");
+    const cache = JSON.parse(window.localStorage.getItem("haven_pro_workspace_v1"));
+    assert.strictEqual(cache.byUserId[PRO_ID].identityVerification.status, "verified", "existing handling: the cache is left as is");
+  });
+}
+
+function checkRecoverySources() {
+  const jsx = read("home_services_pro_app.jsx");
+  const adapter = read("backend_adapter.js");
+  assert.ok(/status !== 403/.test(adapter) && /"42501"/.test(adapter) && /\^QA tester only/.test(adapter), "guard rejection = 403 + 42501 + QA tester only message");
+  const fn = jsx.slice(jsx.indexOf("async function saveProProfileWithGuardRecovery(") + 60, jsx.indexOf("function hydrateSignedInProProfile("));
+  assert.strictEqual((fn.match(/saveHavenProProfile\(/g) || []).length, 2, "one save plus at most one retry");
+  assert.ok(!fn.includes("saveProProfileWithGuardRecovery(userId"), "the retry never recurses");
+  const clear = jsx.slice(jsx.indexOf("function clearAuthLinkedAccount("), jsx.indexOf("async function signOutHavenAccount("));
+  ["setIdentityVerification(havenDefaultIdentityVerification())", "setBackgroundCheck(havenDefaultBackgroundCheck())", "setPayoutAccount(havenDefaultPayoutAccount())", "setTaxProfile(havenDefaultTaxProfile())"].forEach(s => {
+    assert.ok(clear.includes(s), "sign-out resets: " + s);
+  });
+}
+
 async function main() {
   checkSql();
   await checkNonTester();
   await checkTester();
   await checkFailClosed();
+  checkRecoverySources();
+  await checkStaleCacheRecovery();
+  await checkSameTabSwitch();
+  await checkRetryAtMostOnce();
+  await checkNonGuardRejection();
   console.log("OK: Phase 1B A2 QA tester gate checks passed.");
 }
 

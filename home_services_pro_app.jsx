@@ -53,6 +53,44 @@ class ErrorBoundary extends React.Component {
    APP
    ══════════════════════════════════════════════════════════════════════ */
 
+// Phase 1B A2: provider-result defaults. Used for initial state, sign-out,
+// and filling guarded sections a server row does not have.
+function havenDefaultIdentityVerification() {
+  return { provider: "persona", providerVerificationId: null, status: "not_started", verifiedAt: null, failureReasonCode: null, recheckAt: null };
+}
+function havenDefaultBackgroundCheck() {
+  return { provider: "checkr", providerReportId: null, status: "not_started", clearedAt: null };
+}
+function havenDefaultPayoutAccount() {
+  return { provider: "stripe", providerAccountId: null, payoutsEnabled: false, requirementsDue: [], status: "not_started", last4: null };
+}
+function havenDefaultTaxProfile() {
+  return { provider: "stripe_connect", status: "not_started", providerReference: null, taxFormAvailability: "Future 1099/tax-document flow, subject to legal and tax review" };
+}
+// The four guarded sections exactly as the server holds them; anything the
+// row lacks is the default (not_started / payouts off).
+function havenGuardedSectionsFromServer(ws) {
+  const src = ws && typeof ws === "object" ? ws : {};
+  function section(key, makeDefault) {
+    const v = src[key];
+    const out = Object.assign(makeDefault(), v && typeof v === "object" && !Array.isArray(v) ? v : {});
+    if (typeof out.status !== "string" || !out.status.trim()) out.status = "not_started";
+    return out;
+  }
+  const payout = section("payoutAccount", havenDefaultPayoutAccount);
+  payout.payoutsEnabled = payout.payoutsEnabled === true;
+  return {
+    identityVerification: section("identityVerification", havenDefaultIdentityVerification),
+    backgroundCheck: section("backgroundCheck", havenDefaultBackgroundCheck),
+    payoutAccount: payout,
+    taxProfile: section("taxProfile", havenDefaultTaxProfile),
+  };
+}
+function havenGuardedSignature(snapshot) {
+  const g = havenGuardedSectionsFromServer(snapshot);
+  return JSON.stringify([g.identityVerification.status, g.backgroundCheck.status, g.payoutAccount.status, g.payoutAccount.payoutsEnabled, g.taxProfile.status]);
+}
+
 export default function HavenProApp() {
   const [tab, setTab] = useState("home");
   const [theme, setTheme] = useState("light");
@@ -245,26 +283,18 @@ export default function HavenProApp() {
      auto-resolves from a timer or from the pro's own submission alone.
      Matches HAVEN_PRO_ACCOUNT_CONTRACT.md. Insurance removed per product
      decision (see contract) — not carried forward in any form. ── */
-  const [identityVerification, setIdentityVerification] = useState({
-    provider: "persona", providerVerificationId: null, status: "not_started", verifiedAt: null, failureReasonCode: null, recheckAt: null,
-  }); // status: not_started|session_created|pending|verified|needs_review|failed|expired
+  const [identityVerification, setIdentityVerification] = useState(havenDefaultIdentityVerification); // status: not_started|session_created|pending|verified|needs_review|failed|expired
   const [identityProgress, setIdentityProgress] = useState({ idCaptured: false, selfieCaptured: false });
 
-  const [backgroundCheck, setBackgroundCheck] = useState({
-    provider: "checkr", providerReportId: null, status: "not_started", clearedAt: null,
-  }); // status: not_started|consent_required|invited|pending|clear|consider|disputed|suspended|expired
+  const [backgroundCheck, setBackgroundCheck] = useState(havenDefaultBackgroundCheck); // status: not_started|consent_required|invited|pending|clear|consider|disputed|suspended|expired
   const [backgroundConsent, setBackgroundConsent] = useState(false);
 
   const [credentials, setCredentials] = useState([]);
   const [credentialDraft, setCredentialDraft] = useState(null);
 
-  const [payoutAccount, setPayoutAccount] = useState({
-    provider: "stripe", providerAccountId: null, payoutsEnabled: false, requirementsDue: [], status: "not_started", last4: null,
-  }); // status: not_started|pending|enabled|restricted
+  const [payoutAccount, setPayoutAccount] = useState(havenDefaultPayoutAccount); // status: not_started|pending|enabled|restricted
 
-  const [taxProfile, setTaxProfile] = useState({
-    provider: "stripe_connect", status: "not_started", providerReference: null, taxFormAvailability: "Future 1099/tax-document flow, subject to legal and tax review",
-  }); // status: not_started|pending|verified|needs_review
+  const [taxProfile, setTaxProfile] = useState(havenDefaultTaxProfile); // status: not_started|pending|verified|needs_review
   const [taxLegalName, setTaxLegalName] = useState("");
   const [taxClassification, setTaxClassification] = useState("Individual");
   const [taxDraft, setTaxDraft] = useState(null); // {legalName, classification} while editing, pre-submission only
@@ -520,6 +550,42 @@ export default function HavenProApp() {
     return { first: parts[0] || "", last: parts.slice(1).join(" ") };
   }
   // Profiles row wins when it has a saved profile. Local snapshot is only the cache.
+  /* Phase 1B A2: stale-cache recovery. If the 0024 guard rejects a profile
+     save (this device holds a provider result the server does not have),
+     refetch the server's pro_workspace, replace the four guarded sections in
+     local state and the device cache with the server values (missing ->
+     not_started / payouts off), and retry the save once with the user's
+     other edits (name, city, ...) intact. At most one retry per rejection;
+     no retry when the server already matches what was sent (not stale), so
+     this can never loop. Any other failure keeps the existing handling. */
+  const guardRecoveryRef = useRef(false);
+  async function saveProProfileWithGuardRecovery(userId, snapshot) {
+    let first;
+    try { first = await saveHavenProProfile(userId, snapshot); } catch (e) { first = { ok: false, reason: "exception" }; }
+    if (!first || first.ok || !first.guard) return first;
+    if (guardRecoveryRef.current || typeof fetchHavenProServerWorkspace !== "function") return first;
+    guardRecoveryRef.current = true;
+    try {
+      let server = null;
+      try { server = await fetchHavenProServerWorkspace(userId); } catch (e) { server = null; }
+      if (!server || !server.ok) return first;
+      const guarded = havenGuardedSectionsFromServer(server.workspace);
+      if (havenGuardedSignature(guarded) === havenGuardedSignature(snapshot)) return first;
+      // Signed out or switched user while refetching: do nothing.
+      if (profileHydrateUserRef.current !== userId) return first;
+      setIdentityVerification(guarded.identityVerification);
+      setBackgroundCheck(guarded.backgroundCheck);
+      setPayoutAccount(guarded.payoutAccount);
+      setTaxProfile(guarded.taxProfile);
+      const retrySnapshot = Object.assign({}, snapshot, guarded);
+      if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, retrySnapshot);
+      let retry;
+      try { retry = await saveHavenProProfile(userId, retrySnapshot); } catch (e) { retry = { ok: false, reason: "exception" }; }
+      return retry;
+    } finally {
+      guardRecoveryRef.current = false;
+    }
+  }
   function hydrateSignedInProProfile(userId) {
     if (!userId) return Promise.resolve(false);
     if (profileHydratedForRef.current === userId) return Promise.resolve(!!profileHydrateResultRef.current);
@@ -553,7 +619,7 @@ export default function HavenProApp() {
         }
         if (snap) applied = applyHavenProWorkspace(snap) || applied;
         if (remote && remote.writable && snap && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snap) && typeof saveHavenProProfile === "function") {
-          try { await saveHavenProProfile(userId, snap); } catch (e) { /* cache remains until the row accepts the write */ }
+          try { await saveProProfileWithGuardRecovery(userId, snap); } catch (e) { /* cache remains until the row accepts the write */ }
         }
       }
       if (profileHydrateUserRef.current === userId) {
@@ -585,6 +651,12 @@ export default function HavenProApp() {
   }
   function clearAuthLinkedAccount() {
     setAuthSession(null);
+    // Phase 1B A2: a previous user's provider results must not carry over to
+    // the next sign-in in this tab.
+    setIdentityVerification(havenDefaultIdentityVerification());
+    setBackgroundCheck(havenDefaultBackgroundCheck());
+    setPayoutAccount(havenDefaultPayoutAccount());
+    setTaxProfile(havenDefaultTaxProfile());
     workspaceAppliedForRef.current = null;
     profileHydratedForRef.current = null;
     profileHydrateResultRef.current = false;
@@ -748,7 +820,7 @@ export default function HavenProApp() {
     const snapshot = buildHavenProWorkspaceSnapshot();
     if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(authSession.id, snapshot);
     if (typeof saveHavenProProfile === "function" && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snapshot)) {
-      saveHavenProProfile(authSession.id, snapshot);
+      saveProProfileWithGuardRecovery(authSession.id, snapshot);
     }
   }, [
     authSession,
