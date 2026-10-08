@@ -2034,7 +2034,8 @@ function HavenProApp() {
     }
     setAuthBusy(false);
     if (!result.ok) {
-      const msg = result.reason || "Sign out failed";
+      console.warn("Haven Pro sign-out failed:", result.reason);
+      const msg = "Couldn't sign out. Please try again.";
       setAuthNotice(msg);
       showToast(msg);
       return;
@@ -2088,11 +2089,12 @@ function HavenProApp() {
     }
     setAuthBusy(false);
     if (!result.ok) {
+      console.warn("Haven Pro sign-in failed:", result.reason);
       const msg = result.reason === "not_configured"
-        ? "Supabase is configured but the auth client did not load"
-        : (result.reason || "Could not sign in");
+        ? "Sign-in isn't available right now. Please try again."
+        : "Couldn't sign in. Check your email and password, or try again in a moment.";
       setAuthNotice(msg);
-      showToast(msg);
+      showToast(result.reason === "not_configured" ? msg : "Couldn't sign in. Please try again.");
       return;
     }
     accountSourceRef.current = accountSourceRef.current === "local" ? "local" : "auth";
@@ -3577,7 +3579,7 @@ function HavenProApp() {
               </div>
               {job.materialsReimbursed > 0 && (
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: T.tx, fontFamily: FONT }}>Materials Reimbursed</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.tx, fontFamily: FONT }}>Materials Reimbursement</span>
                   <span style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>+${job.materialsReimbursed}</span>
                 </div>
               )}
@@ -4023,7 +4025,7 @@ function HavenProApp() {
         <div style={{ marginTop: 18 }}>
           {row(isInspectionOnly ? "Inspection Visit" : isMaterialsDeclined ? "Convenience Fee" : "Labor Payout", `$${a.gross}`)}
           {a.tip > 0 && row("Tip (100% to you)", `+$${a.tip}`)}
-          {a.materials > 0 && row(`Materials Reimbursed (pass-through)${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
+          {a.materials > 0 && row(`Materials Reimbursement${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
         </div>
         {job.materialsReceiptPhoto && (
           <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
@@ -4854,27 +4856,20 @@ function HavenProApp() {
   }
 
   function authAccountCard() {
-    const configured = !!getSupabaseConfig();
     let title = "Signed out";
-    let detail = configured ? "No Supabase session yet." : "Local demo only — Supabase is not configured.";
+    let detail = "Sign in to accept and manage jobs.";
     if (authSession) {
       title = authSession.email || "Signed in";
-      const roleLabel = authSession.role || "pro";
-      detail = `Signed in · role ${roleLabel}`;
+      detail = "Signed in";
     } else if (accountStatus === "signed_in") {
-      title = accountEmail || "Local demo account";
-      detail = "Local demo · not a Supabase session";
+      title = "Not connected";
+      detail = "This device isn't connected to Haven yet. Jobs and updates won't be saved or reach customers.";
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
         <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>
         <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
-        <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 8, lineHeight: 1.45 }}>
-          {authSession
-            ? "Claim and job updates use this signed-in pro."
-            : "No Supabase session. Claim and job updates use the anonymous demo pro."}
-        </div>
       </div>
     );
   }
@@ -4921,7 +4916,7 @@ function HavenProApp() {
             <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
               {authBusy ? "Signing out…" : "Sign Out"}
             </button>
-          ) : (
+          ) : accountStatus === "signed_in" ? null : (
             <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
           )}
 
@@ -5052,7 +5047,7 @@ function HavenProApp() {
               </button>
               <button onClick={() => {
                 if (getSupabaseConfig()) openEmailSignIn();
-                else showToast("Add Supabase URL and anon key to sign in. Account required — no signed-out marketplace.");
+                else showToast("Sign-in isn't available right now. Please try again.");
               }} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 Sign In
               </button>
@@ -5092,9 +5087,10 @@ function HavenProApp() {
         }
         setAuthBusy(false);
         if (!result.ok) {
+          console.warn("Haven Pro sign-up failed:", result.reason);
           const msg = result.reason === "not_configured"
-            ? "Supabase is configured but the auth client did not load"
-            : (result.reason || "Could not create account");
+            ? "Account creation isn't available right now. Please try again."
+            : "Couldn't create your account. Please try again.";
           setAuthNotice(msg);
           showToast(msg);
           return;
@@ -5118,7 +5114,7 @@ function HavenProApp() {
         setSignInDraft({ email: email, password: "" });
         setWelcomeAuthView("confirmEmail");
         setOnboardingStep("welcome");
-        setAuthNotice("Account created. Confirm your email, then sign in. Signup sends role pro so your profile can be created.");
+        setAuthNotice("Account created. Confirm your email, then sign in.");
         showToast("Confirm your email to finish signing in");
         return;
       }
@@ -5133,7 +5129,7 @@ function HavenProApp() {
       setPhoneVerifyStatus("pending");
       onboardingNext();
     }
-    return onboardingChrome("Create Account", getSupabaseConfig() ? "Creates a Haven Pro login. Your profile role is pro." : null, (
+    return onboardingChrome("Create Account", getSupabaseConfig() ? "Creates a Haven Pro login." : null, (
       <>
         {formField("First Name", d.firstName, v => set("firstName", v), "Jordan")}
         {formField("Last Name", d.lastName, v => set("lastName", v), "Ellis")}
