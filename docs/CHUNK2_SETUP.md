@@ -6,17 +6,14 @@ Source of truth for product/job rules:
 `HAVEN_JOB_CONTRACT.md` (Customer repo) — https://github.com/bluspots/bluspots.github.io/blob/master/HAVEN_JOB_CONTRACT.md  
 Technical schema/enforcement: `HAVEN_SHARED_BACKEND_CONTRACT.md` (Customer/shared; link there when available).
 
-## Configure (same keys as Customer)
+## Configure
 
-In your browser's DevTools console (or via any localStorage editor), set these keys:
-
-```js
-localStorage.setItem('haven_supabase_url', '<YOUR_SUPABASE_URL>');       // e.g. https://xyzcompany.supabase.co
-localStorage.setItem('haven_supabase_anon_key', '<YOUR_SUPABASE_ANON>'); // anon public key
-```
+No setup. Since Phase 1B A1 the Pro build ships the public Supabase client config
+(`HAVEN_SUPABASE_PUBLIC_CONFIG` in `backend_adapter.js`: project URL + anon key only).
+The `haven_supabase_url` / `haven_supabase_anon_key` localStorage keys described in
+earlier versions of this doc are no longer read. See `docs/PHASE1B_A1_BACKEND_CONNECT.md`.
 
 Notes:
-- These are the exact same keys used by the Customer app so a single browser profile can demo both sides.
 - Pro only reads; Customer repo owns migrations and writes.
 
 ## What Pro reads

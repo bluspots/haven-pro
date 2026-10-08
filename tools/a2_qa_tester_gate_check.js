@@ -218,7 +218,7 @@ async function checkNonTester() {
     const call = be.rpcCalls[be.rpcCalls.length - 1];
     assert.strictEqual(call.init.method, "POST", "RPC is POST");
     assert.strictEqual(call.init.headers.Authorization, "Bearer pro-access-token", "RPC uses the signed-in Pro bearer");
-    assert.strictEqual(call.url, TEST_URL + "/rest/v1/rpc/is_qa_tester", "RPC URL");
+    assert.ok(/^https:\/\/[a-z0-9]{20}\.supabase\.co\/rest\/v1\/rpc\/is_qa_tester$/.test(call.url) && !call.url.startsWith(TEST_URL), "RPC URL uses the built-in project config (stored test URL is ignored)");
     assertNoQaControls(window, "non-tester Settings");
     await openIdentity(window);
     assertNoQaControls(window, "non-tester Identity");
