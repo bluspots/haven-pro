@@ -703,7 +703,7 @@ export default function HavenProApp() {
     setAuthBusy(false);
     if (!result.ok) {
       const msg = result.reason === "not_configured"
-        ? "Supabase is configured but the auth client did not load"
+        ? "Sign-in isn't available right now. Please try again."
         : (result.reason || "Could not sign in");
       setAuthNotice(msg);
       showToast(msg);
@@ -2191,7 +2191,7 @@ export default function HavenProApp() {
               </div>
               {job.materialsReimbursed > 0 && (
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: T.tx, fontFamily: FONT }}>Materials Reimbursed</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.tx, fontFamily: FONT }}>Materials Reimbursement</span>
                   <span style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>+${job.materialsReimbursed}</span>
                 </div>
               )}
@@ -2637,7 +2637,7 @@ export default function HavenProApp() {
         <div style={{ marginTop: 18 }}>
           {row(isInspectionOnly ? "Inspection Visit" : isMaterialsDeclined ? "Convenience Fee" : "Labor Payout", `$${a.gross}`)}
           {a.tip > 0 && row("Tip (100% to you)", `+$${a.tip}`)}
-          {a.materials > 0 && row(`Materials Reimbursed (pass-through)${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
+          {a.materials > 0 && row(`Materials Reimbursement${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
         </div>
         {job.materialsReceiptPhoto && (
           <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
@@ -3468,27 +3468,20 @@ export default function HavenProApp() {
   }
 
   function authAccountCard() {
-    const configured = !!getSupabaseConfig();
     let title = "Signed out";
-    let detail = configured ? "No Supabase session yet." : "Local demo only — Supabase is not configured.";
+    let detail = "Sign in to accept and manage jobs.";
     if (authSession) {
       title = authSession.email || "Signed in";
-      const roleLabel = authSession.role || "pro";
-      detail = `Signed in · role ${roleLabel}`;
+      detail = "Signed in";
     } else if (accountStatus === "signed_in") {
-      title = accountEmail || "Local demo account";
-      detail = "Local demo · not a Supabase session";
+      title = accountEmail || "Haven Pro account";
+      detail = "Signed in";
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
         <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>
         <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
-        <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: 8, lineHeight: 1.45 }}>
-          {authSession
-            ? "Claim and job updates use this signed-in pro."
-            : "No Supabase session. Claim and job updates use the anonymous demo pro."}
-        </div>
       </div>
     );
   }
@@ -3666,7 +3659,7 @@ export default function HavenProApp() {
               </button>
               <button onClick={() => {
                 if (getSupabaseConfig()) openEmailSignIn();
-                else showToast("Add Supabase URL and anon key to sign in. Account required — no signed-out marketplace.");
+                else showToast("Sign-in isn't available right now. Please try again.");
               }} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 Sign In
               </button>
@@ -3707,7 +3700,7 @@ export default function HavenProApp() {
         setAuthBusy(false);
         if (!result.ok) {
           const msg = result.reason === "not_configured"
-            ? "Supabase is configured but the auth client did not load"
+            ? "Account creation isn't available right now. Please try again."
             : (result.reason || "Could not create account");
           setAuthNotice(msg);
           showToast(msg);
@@ -3732,7 +3725,7 @@ export default function HavenProApp() {
         setSignInDraft({ email: email, password: "" });
         setWelcomeAuthView("confirmEmail");
         setOnboardingStep("welcome");
-        setAuthNotice("Account created. Confirm your email, then sign in. Signup sends role pro so your profile can be created.");
+        setAuthNotice("Account created. Confirm your email, then sign in.");
         showToast("Confirm your email to finish signing in");
         return;
       }
@@ -3747,7 +3740,7 @@ export default function HavenProApp() {
       setPhoneVerifyStatus("pending");
       onboardingNext();
     }
-    return onboardingChrome("Create Account", getSupabaseConfig() ? "Creates a Haven Pro login. Your profile role is pro." : null, (
+    return onboardingChrome("Create Account", getSupabaseConfig() ? "Creates a Haven Pro login." : null, (
       <>
         {formField("First Name", d.firstName, v => set("firstName", v), "Jordan")}
         {formField("Last Name", d.lastName, v => set("lastName", v), "Ellis")}
