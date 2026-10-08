@@ -7,10 +7,10 @@ Slice 2 (`docs/AUTH_SLICE2.md`) is what binds a signed-in session to claim and l
 ## What this slice does
 
 - Loads `@supabase/supabase-js` from the CDN (same no-bundler style as React).
-- When `haven_supabase_url` and `haven_supabase_anon_key` are set, Welcome and Settings can sign up, sign in, and sign out.
+- Welcome and Settings sign up, sign in, and sign out through Supabase Auth. Since Phase 1B A1 the Pro build ships the public Supabase client config (`HAVEN_SUPABASE_PUBLIC_CONFIG` in `backend_adapter.js`); the old `haven_supabase_url` / `haven_supabase_anon_key` localStorage keys are no longer read. See `docs/PHASE1B_A1_BACKEND_CONNECT.md`.
 - Sign-up sends user metadata `role: "pro"` so the shared profile trigger can insert a `profiles` row with role `pro`.
 - The session is persisted by the Auth client (refresh + restore on reload). The access token is kept in memory for a later slice.
-- Local demo account creation still works when those keys are absent. **Sign In** on Welcome still loads the demo pro while anonymous mode is on.
+- ~~Local demo account creation still works when those keys are absent.~~ Retired in Phase 1B A1: there is no local/demo account. If Haven can't be reached the app shows an error with Retry.
 
 ## Anonymous-mode flag
 
@@ -37,7 +37,7 @@ Pro does not ship SQL. Apply this on the shared Supabase project before expectin
 
 `https://bluspots.github.io/haven-pro/`
 
-Email confirmation links use that URL (`emailRedirectTo`). Password sign-in on a machine that already has the Supabase keys does not need a redirect. Add any extra local origin to the allow list only if you want confirmation links to return there.
+Email confirmation links use that URL (`emailRedirectTo`). Password sign-in does not need a redirect. Add any extra local origin to the allow list only if you want confirmation links to return there.
 
 ## Out of scope
 

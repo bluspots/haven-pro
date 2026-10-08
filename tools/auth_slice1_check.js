@@ -7,7 +7,7 @@
  * - signup metadata is role pro and redirect is the Pro Pages URL
  * - signed-in claim identity is covered by auth_slice2_check.js
  * - signed-in claim uses the auth uid; the demo pro id is not the runtime actor
- * - built HTML still boots the welcome demo, and shows email sign-in once configured
+ * - built HTML boots the signed-out Welcome with email sign-in (built-in public Supabase config)
  */
 
 const fs = require("fs");
@@ -57,7 +57,7 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  const code = read("backend_adapter.js") + "\n;globalThis.__haven = { isPrototypeAnonMode, havenAuthSignUp, havenAuthSignIn, havenAuthSignOut, havenAuthRestoreSession, getHavenAccessToken, getHavenAuthUser, claimJobOnSupabase, HAVEN_PRO_AUTH_REDIRECT_URL };";
+  const code = read("backend_adapter.js") + "\n;globalThis.__haven = { isPrototypeAnonMode, havenAuthSignUp, havenAuthSignIn, havenAuthSignOut, havenAuthRestoreSession, getHavenAccessToken, getHavenAuthUser, claimJobOnSupabase, HAVEN_PRO_AUTH_REDIRECT_URL, HAVEN_SUPABASE_PUBLIC_CONFIG };";
   vm.runInContext(code, sandbox, { filename: "backend_adapter.js" });
   return sandbox.__haven;
 }
@@ -82,12 +82,13 @@ async function checkAuthBehavior() {
   assert.strictEqual(api.isPrototypeAnonMode(), true, "unknown values stay on");
   storage.removeItem("haven_prototype_anon_mode");
 
+  // Auth client failed to load: sign-up fails closed (no local account).
   const unsigned = await api.havenAuthSignUp({ email: "a@b.c", password: "secret12" });
   assert.strictEqual(unsigned.ok, false);
   assert.strictEqual(unsigned.reason, "not_configured");
 
-  storage.setItem("haven_supabase_url", "https://example.supabase.co");
-  storage.setItem("haven_supabase_anon_key", "anon-key-demo");
+  // Phase 1B A1: the built-in public config is used; no localStorage keys are needed.
+  const PUBLIC = api.HAVEN_SUPABASE_PUBLIC_CONFIG;
   storage.setItem("haven_prototype_anon_mode", "false");
 
   const calls = [];
@@ -98,6 +99,8 @@ async function checkAuthBehavior() {
   const lib = {
     createClient(url, key) {
       calls.push(["createClient", url, key]);
+      assert.strictEqual(url, PUBLIC.url, "client uses the built-in project URL");
+      assert.strictEqual(key, PUBLIC.anon, "client uses the built-in anon key");
       return {
         auth: {
           async signUp(args) {
@@ -135,7 +138,7 @@ async function checkAuthBehavior() {
   assert.strictEqual(authed.getHavenAuthUser().role, "pro");
 
   const fetches = [];
-  const anon = "anon-key-demo";
+  const anon = PUBLIC.anon;
   const jobId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   async function fakeFetch(url, opts) {
     fetches.push({ url: String(url), opts });
@@ -177,6 +180,7 @@ function checkSources() {
   assertIncludes(adapter, 'reason: "no_session"', "signed-out write stops");
   assert.ok(!adapter.includes("posted_jobs_public"), "no anonymous public jobs view");
   assertIncludes(adapter, 'actor.ok && actor.mode === "session"', "posted board requires session");
+  assert.ok(!adapter.includes("haven_supabase_url") && !adapter.includes("haven_supabase_anon_key"), "no localStorage Supabase config override");
   assertIncludes(jsx, "havenAuthSignUp", "jsx signup");
   assertIncludes(jsx, "Sign in with email", "email sign-in affordance");
   assertIncludes(shell, "@supabase/supabase-js@2.117.2/dist/umd/supabase.js", "cdn");
@@ -194,7 +198,22 @@ function checkSources() {
   }
 }
 
-async function renderWelcome(localStorageSeed) {
+function mockAuthLib(session) {
+  return {
+    createClient() {
+      return {
+        auth: {
+          async getSession() { return { data: { session: session || null }, error: null }; },
+          onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+          async signInWithPassword() { return { data: { session: null, user: null }, error: { message: "Invalid login credentials", status: 400 } }; },
+        },
+      };
+    },
+  };
+}
+
+async function renderWelcome(localStorageSeed, opts) {
+  opts = opts || {};
   const { JSDOM } = require("jsdom");
   const babel = require("@babel/core");
   const React = require("react");
@@ -210,7 +229,8 @@ async function renderWelcome(localStorageSeed) {
   window.localStorage.clear();
   const seed = localStorageSeed || {};
   Object.keys(seed).forEach(k => window.localStorage.setItem(k, seed[k]));
-  window.fetch = async () => ({ ok: true, status: 200, json: async () => [], text: async () => "" });
+  window.fetch = opts.fetch || (async () => ({ ok: true, status: 200, json: async () => [], text: async () => "" }));
+  if (opts.supabase) window.supabase = opts.supabase;
   const ReactDOM = Object.assign({}, ReactDOMLegacy, ReactDOMClient);
   window.React = React;
   window.ReactDOM = ReactDOM;
@@ -230,7 +250,12 @@ async function renderWelcome(localStorageSeed) {
     configFile: false,
   });
   window.eval(transpiled.code);
-  await new Promise(resolve => setTimeout(resolve, 30));
+  // Phase 1B A1: boot connects first; wait for the connect attempt to settle.
+  for (let i = 0; i < 100; i++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const text = window.document.getElementById("root").textContent || "";
+    if (text.includes("HAVEN PRO") && !text.includes("Connecting to Haven")) break;
+  }
   return { window, dom };
 }
 
@@ -246,42 +271,45 @@ function clickButton(window, label) {
 }
 
 async function checkWelcome() {
+  // Auth client failed to load: connection error with Retry, never the demo Welcome.
   const plain = await renderWelcome(null);
   try {
     const text = rootText(plain.window);
-    assert.ok(text.includes("Create Account"), "default welcome create");
-    assert.ok(text.includes("Sign In"), "default welcome sign in");
-    assert.ok(!text.includes("Load Demo Pro"), "signed-out welcome has no demo marketplace");
-    assert.ok(!text.includes("Jump to Marketplace Ready"), "signed-out welcome has no marketplace jump");
-    assert.ok(!text.includes("Sign in with email"), "email sign-in stays hidden without Supabase keys");
-    assert.ok(text.includes("Help") || text.includes("Terms") || text.includes("Privacy"), "legal/support affordance");
-    clickButton(plain.window, "Create Account");
-    await new Promise(resolve => setTimeout(resolve, 30));
-    assert.ok(rootText(plain.window).includes("First Name"), "create-account form still opens");
+    assert.ok(text.includes("Can't connect to Haven"), "missing auth client shows the connection error");
+    assert.ok(text.includes("Retry"), "connection error offers Retry");
+    assert.ok(!text.includes("Create Account"), "no local Create Account without Haven");
+    assert.ok(!text.includes("Load Demo Pro"), "no demo marketplace");
+    assert.ok(!text.includes("Job Board"), "no job board");
   } finally {
     try { plain.window.close(); } catch (e) { /* ignore */ }
   }
 
-  const configured = await renderWelcome({
-    haven_supabase_url: "https://example.supabase.co",
-    haven_supabase_anon_key: "anon-key-demo",
-  });
+  // Fresh browser (empty localStorage) with the Auth client: signed-out Welcome.
+  const configured = await renderWelcome(null, { supabase: mockAuthLib(null) });
   try {
     const text = rootText(configured.window);
-    assert.ok(text.includes("Sign in with email"), "configured welcome offers email sign-in");
+    assert.ok(text.includes("Create Account"), "welcome create");
+    assert.ok(text.includes("Sign in with email"), "welcome offers email sign-in");
     assert.ok(text.includes("Sign In"), "sign-in remains");
-    assert.ok(!text.includes("Load Demo Pro"), "configured welcome has no demo marketplace");
+    assert.ok(!text.includes("Load Demo Pro"), "signed-out welcome has no demo marketplace");
+    assert.ok(!text.includes("Jump to Marketplace Ready"), "signed-out welcome has no marketplace jump");
+    assert.ok(text.includes("Help") || text.includes("Terms") || text.includes("Privacy"), "legal/support affordance");
     clickButton(configured.window, "Sign in with email");
     await new Promise(resolve => setTimeout(resolve, 30));
     assert.ok(rootText(configured.window).includes("Haven Pro account"), "email sign-in screen");
     clickButton(configured.window, "‹");
     await new Promise(resolve => setTimeout(resolve, 30));
-    // Sign In opens email sign-in when Supabase is configured — never a demo job board.
+    // Sign In opens email sign-in — never a demo job board.
     clickButton(configured.window, "Sign In");
     await new Promise(resolve => setTimeout(resolve, 30));
     const afterSignIn = rootText(configured.window);
     assert.ok(afterSignIn.includes("Haven Pro account") || afterSignIn.includes("Password"), "Sign In opens auth, not marketplace");
     assert.ok(!afterSignIn.includes("Job Board"), "signed-out Sign In must not open the job board");
+    clickButton(configured.window, "‹");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    clickButton(configured.window, "Create Account");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.ok(rootText(configured.window).includes("First Name"), "create-account form opens");
   } finally {
     try { configured.window.close(); } catch (e) { /* ignore */ }
   }

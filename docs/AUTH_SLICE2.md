@@ -29,7 +29,7 @@ A session never falls through to `DEMO_PRO_ID`. If a session is present but the 
 
 Slice 2 left claim and later writes on `DEMO_PRO_ID` and `Authorization: Bearer <anon key>`. That fallback is retired. If there is no session, claim, arrive, diagnosing, `in_progress`, materials request, complete, and the decline terminals (`inspection_completed`, `materials_declined`) do not send. The screen stays where it was. They do not send `DEMO_PRO_ID` and do not send the anon key as the user identity. The anonymous-mode flag does not choose this. Anonymous grants are not revoked.
 
-Local demo account creation still uses the Verify Your Contact Info step. A Supabase session skips that demo tap-to-confirm wall and continues at Create Your Profile. Email sign-in already did this.
+A Supabase session skips the demo Verify Your Contact Info wall and continues at Create Your Profile. Email sign-in already did this. Phase 1B A1 removed the local demo account creation path, so Create Account no longer reaches that wall.
 
 ## Customer migration required
 

@@ -11,7 +11,7 @@ Technical schema/enforcement: `HAVEN_SHARED_BACKEND_CONTRACT.md` (Customer/share
 ## Supabase-backed Accept
 
 - Demo `pro_id` used when claiming: `22222222-2222-4222-8222-222222222222`.
-- The Pro App reads `haven_supabase_url` and `haven_supabase_anon_key` from `localStorage` (set by the Customer demo).
+- The Pro App uses the built-in public Supabase config (`HAVEN_SUPABASE_PUBLIC_CONFIG`, Phase 1B A1). It no longer reads `haven_supabase_url` / `haven_supabase_anon_key` from `localStorage`.
 - When both keys are present AND a job id is a UUID (backend job), `Accept` PATCHes:
   - `PATCH {url}/rest/v1/jobs?id=eq.{JOB_ID}&status=eq.posted&pro_id=is.null`
   - Body: `{ status: "en_route", pro_id: DEMO_PRO_ID, accepted_at: <ISO timestamp> }`
