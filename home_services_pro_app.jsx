@@ -708,7 +708,7 @@ export default function HavenProApp() {
         ? "Sign-in isn't available right now. Please try again."
         : "Couldn't sign in. Check your email and password, or try again in a moment.";
       setAuthNotice(msg);
-      showToast(msg);
+      showToast(result.reason === "not_configured" ? msg : "Couldn't sign in. Please try again.");
       return;
     }
     accountSourceRef.current = accountSourceRef.current === "local" ? "local" : "auth";
@@ -3477,7 +3477,7 @@ export default function HavenProApp() {
       detail = "Signed in";
     } else if (accountStatus === "signed_in") {
       title = "Not connected";
-      detail = "This device isn't connected to Haven yet. Jobs and updates stay on this device and won't reach customers.";
+      detail = "This device isn't connected to Haven yet. Jobs and updates won't be saved or reach customers.";
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
