@@ -36,7 +36,7 @@ not the app, not the cached profile, not Dev Testing, and no job reads.
 - getUser OK (same user id) → the app opens with the server's user.
 - 401 / 403 / invalid or mismatched user → `signOut({ scope: "local" })`, the cached profile
   (`haven_pro_workspace_v1` entry) is cleared, and the sign-in gate shows
-  "Your session has ended. Please sign in again."
+  "You've been signed out. Please sign in again."
 - Network failure (or no getUser) → "Can't connect to Haven" + Retry.
 
 | State | Screen |

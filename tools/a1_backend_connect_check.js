@@ -622,7 +622,7 @@ async function checkForgedSession(status) {
     assertNoApp(app.window, "getUser pending (" + status + ")");
     assert.ok(!app.hits.some(h => h.url.includes("/rest/v1/")), "no profile/job reads before getUser confirms: " + app.hits.map(h => h.init.method + " " + h.url.replace(/^https:\/\/[^/]+/, "")).join(", "));
     release();
-    await waitFor(app.window, t => t.includes("Your session has ended"), "sign-in gate after " + status);
+    await waitFor(app.window, t => t.includes("You've been signed out. Please sign in again."), "sign-in gate after " + status);
     const text = rootText(app.window);
     assert.ok(text.includes("Sign in") && text.includes("Password"), "sign-in gate shown (" + status + ")");
     assertNoApp(app.window, "forged session " + status);
@@ -672,7 +672,7 @@ async function checkGetUserMismatch() {
   state.getUser = async () => ({ data: { user: { id: "99999999-9999-4999-8999-999999999999", email: "other@example.com" } }, error: null });
   const app = await renderApp({ supabase: authLib(state), fetch: okFetch(), storage: { haven_pro_workspace_v1: cachedWorkspace() } });
   try {
-    await waitFor(app.window, t => t.includes("Your session has ended"), "mismatched user → sign-in gate");
+    await waitFor(app.window, t => t.includes("You've been signed out. Please sign in again."), "mismatched user → sign-in gate");
     assertNoApp(app.window, "mismatched user");
     assert.strictEqual(app.window.localStorage.getItem("haven_pro_workspace_v1"), null);
   } finally {

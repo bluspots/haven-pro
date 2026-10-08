@@ -826,7 +826,7 @@ export default function HavenProApp() {
       // Stored session was rejected by the server: signed out locally, cached profile cleared.
       clearAuthLinkedAccount();
       setSignInDraft({ email: "", password: "" });
-      setAuthNotice("Your session has ended. Please sign in again.");
+      setAuthNotice("You've been signed out. Please sign in again.");
       setWelcomeAuthView("signIn");
     }
     if (!authUnsubscribeRef.current) {
