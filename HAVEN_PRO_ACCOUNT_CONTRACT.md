@@ -14,7 +14,7 @@ Covers Pro account readiness — verification, credentials, payouts, tax — and
 
 **v0.7** — Auth slice 2. A Supabase session binds claim and later Pro job writes to the auth uid and user access token. No session stops claim and later job writes and does not send `DEMO_PRO_ID`. Job lifecycle statuses and economics are unchanged. A real session skips the demo Verify Your Contact Info step. Details: `docs/AUTH_SLICE2.md`.
 
-**v0.6** — Auth slice 1. Local `accountStatus` is unchanged. When Supabase URL + anon key are present, Create Account / email sign-in / sign-out also call Supabase Auth and signup sets metadata `role: "pro"`. Missing keys keep the local demo path. Job lifecycle is not gated on the session. Details: `docs/AUTH_SLICE1.md`.
+**v0.6** — Auth slice 1. Local `accountStatus` is unchanged. When Supabase URL + anon key are present, Create Account / email sign-in / sign-out also call Supabase Auth and signup sets metadata `role: "pro"`. Missing keys keep the local demo path. Job lifecycle is not gated on the session. Details: `docs/AUTH_SLICE1.md`. (Superseded by Phase 1B A1: config is built in, the local demo path is removed, and a signed-in state requires a real session — `docs/PHASE1B_A1_BACKEND_CONNECT.md`.)
 
 **v0.5 (this update)** — Aligns the documented onboarding sequence and readiness gate order with the live code in `home_services_pro_app.jsx`. Editorial-only; no code changes:
 
@@ -129,7 +129,7 @@ The app's true starting state (`accountStatus: "signed_out"`) has no seeded prof
 For readability in prose: Welcome → Create Account → Verify Contact → Create Profile → Choose Categories → Service Area → Identity → Background → Payout → Tax → Credentials (optional) → Ready.  
 `needsOnboarding = accountStatus === "signed_out" || onboardingStatus !== "completed"` gates whether the app renders the wizard or the normal 5-tab shell.
 
-When Supabase is configured, a restored or fresh Auth session sets `accountStatus` to `signed_in` (unless a local demo profile is already loaded). Sign-out clears that auth-linked flag and returns to Welcome. While that session exists, claim and later job writes use the auth uid and the user access token. With no session those writes stop and do not send `DEMO_PRO_ID`. A Supabase session does not go through the demo Verify Your Contact Info step; the local demo create-account path still does.
+When Supabase is configured, a restored or fresh Auth session sets `accountStatus` to `signed_in` (unless a local demo profile is already loaded). Sign-out clears that auth-linked flag and returns to Welcome. While that session exists, claim and later job writes use the auth uid and the user access token. With no session those writes stop and do not send `DEMO_PRO_ID`. A Supabase session does not go through the demo Verify Your Contact Info step. Phase 1B A1: there is no local create-account path; `signed_in` without a real session is shown as the connection error with Retry (Retry with no session returns to the signed-out Welcome).
 
 The four provider steps (Identity/Background/Payout/Tax) reuse the exact same state, actions, and Dev Testing panels as their standalone Profile screens — onboarding is not a simplified preview of verification. Their "Continue" is enabled once the pro has taken the primary action (status `!== "not_started"`), not only once fully verified — a real background check can take days, and onboarding shouldn't block on that. Only Accept Job enforces the full `marketplaceReady` gate.
 

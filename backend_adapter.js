@@ -1,13 +1,19 @@
 // ── CHUNK 2: Supabase-backed available jobs (read-only)
-// Customer app writes Supabase URL and anon key to localStorage so the Pro app can read the same jobs.
+// Phase 1B A1: the Pro build ships the public Supabase client config below, so a fresh
+// browser connects to the Haven project with no setup. There is no localStorage override
+// and no user-facing connection control.
 // Slice 1 stores the Supabase Auth session. Slice 2 binds claim and later Pro job writes to that
 // session (auth uid + user access token). Slice 4: no session stops those writes and does not
 // send a demo pro id. Signed-out does not read jobs (account required). Signed-in board uses jobs with the user token. See docs/AUTH_SLICE2.md.
-const SUPABASE_URL_KEY = "haven_supabase_url";
-const SUPABASE_ANON_KEY = "haven_supabase_anon_key";
-// Default ON (missing key, "true", "1", "on"). Explicit off: "false" | "0" | "off" | "no".
-// Coordinated with the Customer app. This slice reads the flag and does not switch job Authorization.
-const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode";
+//
+// HAVEN_SUPABASE_PUBLIC_CONFIG — public client config for the Haven Supabase project.
+// `anon` is the project's anon (public) API key: a JWT whose role claim is "anon". It is
+// designed to ship in browser code; Row Level Security is what protects data.
+// NEVER put a service_role key or any other secret key here.
+const HAVEN_SUPABASE_PUBLIC_CONFIG = Object.freeze({
+  url: "https://tfykhsowsjffrrziefco.supabase.co",
+  anon: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRmeWtoc293c2pmZnJyemllZmNvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4NjQyODIsImV4cCI6MjEwNTQ0MDI4Mn0.xQYM82gkz4zLychAQydwibPWKg4QZrL-o5XXOwr4YsI",
+});
 // Supabase Auth → URL configuration for the published Pro app. Email links must be allowed to land here.
 const HAVEN_PRO_AUTH_REDIRECT_URL = "https://bluspots.github.io/haven-pro/";
 // Local cache of the signed-in Pro workspace. The profiles row is the source
@@ -23,15 +29,53 @@ function looksLikeUuid(id) {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
 
+// Project ref from a https://<ref>.supabase.co URL ("" if the host is not a Supabase project host).
+function havenSupabaseProjectRef(url) {
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/i.exec(String(url || "").trim());
+  return m ? m[1].toLowerCase() : "";
+}
+
+// Runtime key guard (mirrors Customer #43, plus a project-ref check).
+// Accepts only an sb_publishable_ key, or a JWT whose role claim is "anon" and,
+// when expectedRef is given, whose ref claim is that project. service_role,
+// sb_secret_, malformed keys, and other projects' keys are refused.
+function havenSupabaseKeyIsPublic(key, expectedRef) {
+  const k = String(key || "").trim();
+  if (!k) return false;
+  if (k.startsWith("sb_publishable_")) return true;
+  if (k.startsWith("sb_secret_")) return false;
+  try {
+    const parts = k.split(".");
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return false;
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const raw = typeof atob === "function"
+      ? atob(b64)
+      : (typeof Buffer !== "undefined" ? Buffer.from(b64, "base64").toString("utf8") : "");
+    const claims = JSON.parse(raw || "null");
+    if (!claims || typeof claims !== "object") return false;
+    if (claims.role !== "anon") return false;
+    if (expectedRef && String(claims.ref || "").toLowerCase() !== String(expectedRef).toLowerCase()) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Returns the built-in public config, or null when it fails the guard
+// (treated as not connectable: the app shows the error screen, never demo mode).
 function getSupabaseConfig() {
   try {
-    const urlRaw = window.localStorage.getItem(SUPABASE_URL_KEY);
-    const anon = window.localStorage.getItem(SUPABASE_ANON_KEY);
-    if (!urlRaw || !anon) return null;
-    let url = urlRaw;
+    const cfg = HAVEN_SUPABASE_PUBLIC_CONFIG;
+    let url = cfg && typeof cfg.url === "string" ? cfg.url.trim() : "";
+    const anon = cfg && typeof cfg.anon === "string" ? cfg.anon.trim() : "";
     while (url.endsWith("/")) url = url.slice(0, -1); // strip trailing slash
+    if (!url || !anon) return null;
+    const ref = havenSupabaseProjectRef(url);
+    if (!ref) return null;
+    if (!havenSupabaseKeyIsPublic(anon, ref)) return null;
     return { url, anon };
-  } catch {
+  } catch (e) {
     return null;
   }
 }
@@ -63,7 +107,7 @@ function mapSupabaseRowToJob(row) {
 
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
-  if (!cfg) return null; // not configured — leave SIM_JOBS in place for signed-in local preview only
+  if (!cfg) return []; // no backend config — fail closed (no SIM fallback)
   // Account required. Signed-out never browses jobs — no anon SELECT, no public view.
   // Signed in: posted jobs inside this Pro's saved radius, from the database.
   // Do not GET every posted row and filter here. Do not geocode on this read.
@@ -106,10 +150,10 @@ async function fetchPostedJobsFromSupabase() {
 
 // Fetch currently active jobs for the acting pro from Supabase (server is source of truth).
 // Signed in: auth uid + user bearer. No session: skip. Do not query as a demo pro.
-// Returns null when Supabase is not configured (SIM mode). On error, soft-fails to [].
+// No backend config fails closed to [] (no SIM fallback). On error, soft-fails to [].
 async function fetchActiveJobsFromSupabase() {
   const cfg = getSupabaseConfig();
-  if (!cfg) return null; // not configured — leave session-only behavior in place
+  if (!cfg) return []; // no backend config — fail closed
   const actor = await resolveHavenJobWriteAuth(cfg);
   if (!actor.ok) {
     console.warn("Supabase active jobs fetch skipped", actor.reason);
@@ -278,7 +322,7 @@ async function resolveHavenJobWriteAuth(cfg) {
 // Signed out: the claim stops and does not send a demo pro id.
 async function claimJobOnSupabase(job) {
   const cfg = getSupabaseConfig();
-  if (!cfg) return { ok: true, mode: "sim" }; // no backend configured — SIM/local only
+  if (!cfg) return { ok: false, reason: "not_configured" }; // never a silent local claim
   const actor = await resolveHavenJobWriteAuth(cfg);
   if (!actor.ok) return { ok: false, reason: actor.reason };
   // Try RPC first if available (preferred: lets the backend attach the authenticated pro id and enforce RLS/uniques)
@@ -423,7 +467,7 @@ async function backendAllowsWorkAfterArrival(job) {
 // 0013 allows en_route → arrived. A blocked write returns ok: false — do not treat it as arrived.
 async function patchJobArrivedOnSupabase(job) {
   const cfg = getSupabaseConfig();
-  if (!cfg) return { ok: true, mode: "sim" };
+  if (!cfg) return { ok: false, reason: "not_configured" };
   if (!looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
   const actor = await resolveHavenJobWriteAuth(cfg);
   if (!actor.ok) return { ok: false, reason: actor.reason };
@@ -488,7 +532,7 @@ const WORK_STATUS_FROM = {
 // (materials_reimbursed_cents). Diagnosing / Start Job do not pass it.
 async function patchJobWorkStatusOnSupabase(job, toStatus, extraFields) {
   const cfg = getSupabaseConfig();
-  if (!cfg) return { ok: true, mode: "sim" };
+  if (!cfg) return { ok: false, reason: "not_configured" };
   if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
   const allowedFrom = WORK_STATUS_FROM[toStatus];
   const fromStatus = job.status;
@@ -550,7 +594,7 @@ async function patchJobWorkStatusOnSupabase(job, toStatus, extraFields) {
 // so this write stamps it. Decline paths do not.
 async function patchJobCompleteOnSupabase(job) {
   const cfg = getSupabaseConfig();
-  if (!cfg) return { ok: true, mode: "sim" };
+  if (!cfg) return { ok: false, reason: "not_configured" };
   if (!job || !looksLikeUuid(job.id) || !job.backendClaimed) return { ok: true, mode: "sim" };
   if (job.status !== "in_progress") return { ok: false, reason: "bad_from_status" };
   const actor = await resolveHavenJobWriteAuth(cfg);
@@ -647,20 +691,8 @@ async function bestEffortPatchMaterialsRequested(job, cleanItems, totalCost) {
 }
 
 // ── Slice 1: Pro Auth session. Slice 2 sends it on pro job writes. ───────
-// Missing / unrecognized values stay ON. The flag does not choose the job writer.
 // A missing session stops claim and later writes. It does not fall back to a demo pro.
-function isPrototypeAnonMode() {
-  try {
-    const raw = window.localStorage.getItem(HAVEN_PROTOTYPE_ANON_MODE_KEY);
-    if (raw == null) return true;
-    const v = String(raw).trim().toLowerCase();
-    if (v === "" || v === "1" || v === "true" || v === "on" || v === "yes") return true;
-    if (v === "0" || v === "false" || v === "off" || v === "no") return false;
-    return true;
-  } catch (e) {
-    return true;
-  }
-}
+// (The old prototype anon-mode localStorage flag decided nothing; removed in A1.)
 
 function loadHavenProWorkspace(userId) {
   if (!userId) return null;
@@ -761,6 +793,94 @@ function getHavenSupabaseClient() {
   return havenSupabaseClient;
 }
 
+// True when an Auth error means the service could not be reached (network / gateway),
+// not a bad password or similar. supabase-js reports these as AuthRetryableFetchError.
+function havenAuthErrorIsNetwork(e) {
+  if (!e) return false;
+  const name = String(e.name || "");
+  if (name === "AuthRetryableFetchError" || name === "TypeError" || name === "AbortError") return true;
+  if (e.status === 0) return true;
+  return /failed to fetch|networkerror|network request failed|load failed/i.test(String(e.message || ""));
+}
+
+// True when Auth says the stored session is not valid (forged, revoked, expired user):
+// 401/403 or a missing/invalid-JWT error. Network failures are never "invalid".
+function havenAuthErrorIsInvalidSession(e) {
+  if (!e || havenAuthErrorIsNetwork(e)) return false;
+  const name = String(e.name || "");
+  if (name === "AuthSessionMissingError" || name === "AuthInvalidJwtError") return true;
+  return e.status === 401 || e.status === 403;
+}
+
+// Remove the cached Pro workspace (profile cache) for one user, or all of it when
+// the user id is unknown. Used when a stored session fails the server check.
+function clearHavenProWorkspace(userId) {
+  try {
+    if (!userId) {
+      window.localStorage.removeItem(HAVEN_PRO_WORKSPACE_KEY);
+      return true;
+    }
+    const raw = window.localStorage.getItem(HAVEN_PRO_WORKSPACE_KEY);
+    if (!raw) return true;
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+    const byUser = parsed && typeof parsed === "object" ? (parsed.byUserId || parsed.data || null) : null;
+    if (!byUser || typeof byUser !== "object") {
+      window.localStorage.removeItem(HAVEN_PRO_WORKSPACE_KEY);
+      return true;
+    }
+    const next = {};
+    Object.keys(byUser).forEach(function (k) { if (k !== userId) next[k] = byUser[k]; });
+    if (Object.keys(next).length === 0) window.localStorage.removeItem(HAVEN_PRO_WORKSPACE_KEY);
+    else window.localStorage.setItem(HAVEN_PRO_WORKSPACE_KEY, JSON.stringify({ __v: 1, byUserId: next }));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Phase 1B A1: user-facing connection copy (plain language; no technical detail).
+const HAVEN_CONNECTING_COPY = "Connecting to Haven…";
+const HAVEN_CONNECT_ERROR_TITLE = "Can't connect to Haven";
+const HAVEN_CONNECT_ERROR_DETAIL = "We couldn't reach Haven. Check your internet connection, then tap Retry.";
+
+// Phase 1B A1: connect to the Haven backend on boot (and on Retry).
+// ok only when the config exists, the Auth client loaded, and Supabase Auth answers.
+// Never falls back to a local/demo mode — callers show an error with Retry instead.
+const HAVEN_CONNECT_TIMEOUT_MS = 10000;
+async function havenConnectBackend() {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, reason: "not_configured" };
+  if (!havenAuthLib()) return { ok: false, reason: "auth_client_unavailable" };
+  let client = null;
+  try {
+    client = getHavenSupabaseClient();
+  } catch (e) {
+    client = null;
+  }
+  if (!client || !client.auth) return { ok: false, reason: "auth_client_unavailable" };
+  let timer = null;
+  try {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    if (controller && typeof setTimeout === "function") {
+      timer = setTimeout(function () { controller.abort(); }, HAVEN_CONNECT_TIMEOUT_MS);
+    }
+    const res = await fetch(`${cfg.url}/auth/v1/health`, {
+      method: "GET",
+      headers: { apikey: cfg.anon, Accept: "application/json" },
+      signal: controller ? controller.signal : undefined,
+    });
+    if (!res || !res.ok) {
+      return { ok: false, reason: "backend_unavailable", status: res ? res.status : 0 };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "network_error" };
+  } finally {
+    if (timer && typeof clearTimeout === "function") clearTimeout(timer);
+  }
+}
+
 function havenProAuthRedirectUrl() {
   return HAVEN_PRO_AUTH_REDIRECT_URL;
 }
@@ -779,7 +899,7 @@ async function havenAuthSignUp(creds) {
       emailRedirectTo: havenProAuthRedirectUrl(),
     },
   });
-  if (error) return { ok: false, reason: error.message || "signup_failed" };
+  if (error) return { ok: false, reason: error.message || "signup_failed", retryable: havenAuthErrorIsNetwork(error) };
   const session = data && data.session ? data.session : null;
   if (session) rememberHavenSession(session);
   return {
@@ -799,7 +919,7 @@ async function havenAuthSignIn(creds) {
     email: email,
     password: password,
   });
-  if (error) return { ok: false, reason: error.message || "signin_failed" };
+  if (error) return { ok: false, reason: error.message || "signin_failed", retryable: havenAuthErrorIsNetwork(error) };
   const session = data && data.session ? data.session : null;
   if (!session) return { ok: false, reason: "signin_failed" };
   rememberHavenSession(session);
@@ -809,8 +929,9 @@ async function havenAuthSignIn(creds) {
 async function havenAuthSignOut() {
   const client = getHavenSupabaseClient();
   if (!client) {
+    // Auth client unavailable: drop the in-memory session; there is no local account to keep.
     rememberHavenSession(null);
-    return { ok: true, mode: "local" };
+    return { ok: true, mode: "no_client" };
   }
   const { error } = await client.auth.signOut();
   if (error) return { ok: false, reason: error.message || "signout_failed" };
@@ -818,14 +939,65 @@ async function havenAuthSignOut() {
   return { ok: true };
 }
 
+// Restore the stored session and CONFIRM it with the server (auth.getUser) before
+// anything trusts it. Mirrors Customer #43 auth_session.js havenConnectBackend.
+// - No stored session: { ok: true, session: null }.
+// - getUser ok: { ok: true, session } with the server's user.
+// - getUser 401/403 / invalid: local sign-out (session + cached profile cleared),
+//   { ok: true, session: null, invalidated: true } → signed-out gate.
+// - Network failure / getUser unavailable: { ok: false, retryable: true } → error + Retry.
 async function havenAuthRestoreSession() {
   const client = getHavenSupabaseClient();
   if (!client) return { ok: false, reason: "not_configured" };
-  const { data, error } = await client.auth.getSession();
-  if (error) return { ok: false, reason: error.message || "session_failed" };
+  let got;
+  try {
+    got = await client.auth.getSession();
+  } catch (e) {
+    rememberHavenSession(null);
+    return { ok: false, reason: (e && e.message) || "session_failed", retryable: true };
+  }
+  const data = got && got.data;
+  const error = got && got.error;
+  if (error) {
+    rememberHavenSession(null);
+    return { ok: false, reason: error.message || "session_failed", retryable: havenAuthErrorIsNetwork(error) };
+  }
   const session = data && data.session ? data.session : null;
-  rememberHavenSession(session);
-  return { ok: true, session: session };
+  if (!session) {
+    rememberHavenSession(null);
+    return { ok: true, session: null };
+  }
+  // Nothing trusts the stored session until the server confirms it.
+  rememberHavenSession(null);
+  if (typeof client.auth.getUser !== "function") {
+    return { ok: false, reason: "user_check_unavailable", retryable: true };
+  }
+  let checked;
+  try {
+    checked = await client.auth.getUser();
+  } catch (e) {
+    if (!havenAuthErrorIsInvalidSession(e)) {
+      return { ok: false, reason: "user_check_failed", retryable: true };
+    }
+    checked = { data: { user: null }, error: e };
+  }
+  const userErr = checked && checked.error;
+  const user = checked && checked.data && checked.data.user ? checked.data.user : null;
+  const storedId = session.user && typeof session.user.id === "string" ? session.user.id : "";
+  const userOk = !!(user && typeof user.id === "string" && user.id && (!storedId || user.id === storedId));
+  if (userErr || !userOk) {
+    if (userErr && !havenAuthErrorIsInvalidSession(userErr)) {
+      return { ok: false, reason: "user_check_failed", retryable: true };
+    }
+    // Forged / revoked / mismatched session: sign out locally and clear the cached profile.
+    try { await client.auth.signOut({ scope: "local" }); } catch (e) { /* ignore */ }
+    clearHavenProWorkspace(storedId || (user && user.id) || "");
+    rememberHavenSession(null);
+    return { ok: true, session: null, invalidated: true };
+  }
+  const confirmed = Object.assign({}, session, { user: user });
+  rememberHavenSession(confirmed);
+  return { ok: true, session: confirmed };
 }
 
 

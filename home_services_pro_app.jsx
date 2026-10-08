@@ -113,32 +113,6 @@ export default function HavenProApp() {
   // Active-job rehydrate effect is declared after authSession so a refresh
   // can re-run once the restored session is known (see below).
 
-  // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
-  useEffect(() => {
-    let cancelled = false;
-    let timerId = null;
-    async function load() {
-      const jobs = await fetchPostedJobsFromSupabase();
-      if (jobs && !cancelled) {
-        // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        // Exclude any jobs that are currently active so they don't reappear on the board.
-        const activeIds = new Set(activeJobsRef.current.map(j => j.id));
-        const filtered = jobs.filter(j => !activeIds.has(j.id));
-        setAvailableJobs(filtered);
-      }
-    }
-    // Account required — fetchPostedJobsFromSupabase no-ops when signed out.
-    if (tab === "home" && getSupabaseConfig()) {
-      // Clear SIM seeds immediately so they don't linger/flash while backend loads.
-      setAvailableJobs([]);
-      load();
-      timerId = window.setInterval(load, 30000); // ~30s refresh cadence
-    }
-    return () => {
-      cancelled = true;
-      if (timerId) window.clearInterval(timerId);
-    };
-  }, [tab, activeJobs, travelRadius]);
 
   // Poll backend for status changes on active, backend-claimed jobs (e.g., materials approve/decline)
   useEffect(() => {
@@ -288,13 +262,47 @@ export default function HavenProApp() {
   const [phoneVerifyStatus, setPhoneVerifyStatus] = useState("not_sent"); // not_sent | pending | verified
   const [signUpDraft, setSignUpDraft] = useState({ firstName: "", lastName: "", email: "", phone: "", password: "", confirm: "" });
   const [accountCreatedAt, setAccountCreatedAt] = useState(null);
-  // Real Supabase session, when URL + anon key are configured. Independent of the local demo account.
+  // Real Supabase session. The app is not usable without one (no local/demo account).
   const [authSession, setAuthSession] = useState(null); // { id, email, role } | null
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
   const [welcomeAuthView, setWelcomeAuthView] = useState("home"); // home | signIn | confirmEmail
   const [signInDraft, setSignInDraft] = useState({ email: "", password: "" });
   const [settingsAuthOpen, setSettingsAuthOpen] = useState(false);
+  // Phase 1B A1: connection to the Haven backend (built-in public Supabase config).
+  // connecting (first boot) | retrying | error | ready. Nothing but the
+  // connection screen renders until this is ready — there is no demo fallback.
+  const [backendState, setBackendState] = useState("connecting");
+
+  // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
+  useEffect(() => {
+    let cancelled = false;
+    let timerId = null;
+    async function load() {
+      const jobs = await fetchPostedJobsFromSupabase();
+      if (jobs && !cancelled) {
+        // Replace SIM_JOBS entirely when backend is configured (even if empty)
+        // Exclude any jobs that are currently active so they don't reappear on the board.
+        const activeIds = new Set(activeJobsRef.current.map(j => j.id));
+        const filtered = jobs.filter(j => !activeIds.has(j.id));
+        setAvailableJobs(filtered);
+      }
+    }
+    // Account required — fetchPostedJobsFromSupabase no-ops when signed out.
+    if (tab === "home" && getSupabaseConfig()) {
+      // Clear SIM seeds immediately so they don't linger/flash while backend loads.
+      setAvailableJobs([]);
+      // Phase 1B A1: only read once connected with a server-confirmed session (getUser).
+      if (backendState === "ready" && authSession && authSession.id) {
+        load();
+        timerId = window.setInterval(load, 30000); // ~30s refresh cadence
+      }
+    }
+    return () => {
+      cancelled = true;
+      if (timerId) window.clearInterval(timerId);
+    };
+  }, [tab, activeJobs, travelRadius, backendState, authSession && authSession.id]);
 
   /* ── Account Readiness — derived, never stored directly. Only the 5
      mandatory baseline items gate marketplaceReady; optional credentials
@@ -308,6 +316,9 @@ export default function HavenProApp() {
   const readinessPercent = Math.round((mandatoryFlags.filter(Boolean).length / mandatoryFlags.length) * 100);
   const marketplaceReady = mandatoryFlags.every(Boolean);
   const needsOnboarding = accountStatus === "signed_out" || onboardingStatus !== "completed";
+  // Phase 1B A1: the app is not usable until Haven is connected, and a signed-in
+  // state with no real session is an error (Retry), never a usable local account.
+  const connectionBlocked = backendState !== "ready" || (accountStatus === "signed_in" && !authSession);
 
   /* ── Job-specific legal eligibility — architecture stub only, per
      HAVEN_PRO_ACCOUNT_CONTRACT.md §7. Not wired to anything: no
@@ -332,8 +343,12 @@ export default function HavenProApp() {
   const submittingReceiptRef = useRef(false);
   const completingJobIdRef = useRef(null);
   const longPressTimer = useRef(null);
-  // "local" = demo / onboarding without a Supabase session. "auth" = signed_in came from Supabase Auth.
+  // "auth" = signed_in came from Supabase Auth. "local" is only set by the Dev Testing
+  // demo buttons (gated separately in A2); Create Account never sets it (Phase 1B A1).
   const accountSourceRef = useRef(null);
+  const accountStatusRef = useRef("signed_out");
+  const authUnsubscribeRef = useRef(null);
+  const connectSeqRef = useRef(0);
   // Tracks which auth uid already had local workspace applied this boot.
   const workspaceAppliedForRef = useRef(null);
   const profileHydratedForRef = useRef(null);
@@ -657,6 +672,8 @@ export default function HavenProApp() {
     setAuthNotice("");
     setSettingsAuthOpen(false);
     clearAuthLinkedAccount();
+    // Signing out never leaves a sessionless (local) account behind.
+    if (accountSourceRef.current === "local") dropSessionlessAccount();
     showToast("Signed out");
   }
   async function continueSignedInSetup() {
@@ -699,16 +716,20 @@ export default function HavenProApp() {
     try {
       result = await havenAuthSignIn({ email: email, password: password });
     } catch (e) {
-      result = { ok: false, reason: (e && e.message) || "signin_failed" };
+      result = { ok: false, reason: (e && e.message) || "signin_failed", retryable: havenAuthErrorIsNetwork(e) };
     }
     setAuthBusy(false);
     if (!result.ok) {
       console.warn("Haven Pro sign-in failed:", result.reason);
-      const msg = result.reason === "not_configured"
-        ? "Sign-in isn't available right now. Please try again."
-        : "Couldn't sign in. Check your email and password, or try again in a moment.";
+      if (result.reason === "not_configured" || result.retryable) {
+        // Haven itself can't be reached — show the connection error with Retry.
+        setAuthNotice("");
+        setBackendState("error");
+        return;
+      }
+      const msg = "Couldn't sign in. Check your email and password, or try again in a moment.";
       setAuthNotice(msg);
-      showToast(result.reason === "not_configured" ? msg : "Couldn't sign in. Please try again.");
+      showToast("Couldn't sign in. Please try again.");
       return;
     }
     accountSourceRef.current = accountSourceRef.current === "local" ? "local" : "auth";
@@ -746,23 +767,97 @@ export default function HavenProApp() {
     setOperatingLng(null);
   }, [homeCity]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let unsubscribe = function () {};
-    (async function () {
-      if (!getSupabaseConfig() || !getHavenSupabaseClient()) return;
-      const restored = await havenAuthRestoreSession();
-      if (cancelled) return;
-      if (restored && restored.ok && restored.session) applyAuthSession(restored.session);
-      unsubscribe = subscribeHavenAuth(function (session) {
-        if (cancelled) return;
-        if (session) applyAuthSession(session);
+  useEffect(() => { accountStatusRef.current = accountStatus; }, [accountStatus]);
+
+  // No real session means no account. Never keep a local or replacement account:
+  // reset to the signed-out Welcome (Sign in / Create Account only).
+  function dropSessionlessAccount() {
+    applyProDefaults(freshProDefaults());
+    accountSourceRef.current = null;
+    setAuthSession(null);
+    setAccountStatus("signed_out");
+    setOnboardingStatus("not_started");
+    setOnboardingStep("welcome");
+    setWelcomeAuthView("home");
+    setSettingsAuthOpen(false);
+    setAccountEmail("");
+    setAccountPhone("");
+    setAccountCreatedAt(null);
+  }
+
+  // Phase 1B A1: connect on boot and on Retry. Uses the built-in public config.
+  // Failure (network, Supabase down, Auth client failed to load) shows the
+  // error screen with Retry. It never falls back to a local/demo mode.
+  async function connectHavenBackend() {
+    const seq = ++connectSeqRef.current;
+    setBackendState(prev => (prev === "error" || prev === "retrying" ? "retrying" : "connecting"));
+    let result;
+    try {
+      result = await havenConnectBackend();
+    } catch (e) {
+      result = { ok: false, reason: "network_error" };
+    }
+    if (seq !== connectSeqRef.current) return false;
+    if (!result || !result.ok) {
+      console.warn("Haven Pro could not connect:", result && result.reason);
+      setBackendState("error");
+      return false;
+    }
+    let restored;
+    try {
+      restored = await havenAuthRestoreSession();
+    } catch (e) {
+      restored = { ok: false, reason: (e && e.message) || "session_failed", retryable: true };
+    }
+    if (seq !== connectSeqRef.current) return false;
+    if (!restored || (!restored.ok && (restored.retryable || restored.reason === "not_configured"))) {
+      console.warn("Haven Pro could not restore the session:", restored && restored.reason);
+      setBackendState("error");
+      return false;
+    }
+    // havenAuthRestoreSession only returns a session the server confirmed (getUser).
+    const session = restored.ok ? restored.session : null;
+    if (session) {
+      applyAuthSession(session);
+    } else if (accountStatusRef.current === "signed_in" || restored.invalidated) {
+      dropSessionlessAccount();
+    }
+    if (!session && restored.invalidated) {
+      // Stored session was rejected by the server: signed out locally, cached profile cleared.
+      clearAuthLinkedAccount();
+      setSignInDraft({ email: "", password: "" });
+      setAuthNotice("You've been signed out. Please sign in again.");
+      setWelcomeAuthView("signIn");
+    }
+    if (!authUnsubscribeRef.current) {
+      authUnsubscribeRef.current = subscribeHavenAuth(function (next) {
+        if (next) applyAuthSession(next);
         else clearAuthLinkedAccount();
       });
-    })();
+    }
+    setBackendState("ready");
+    return true;
+  }
+
+  // Retry button. If the Auth client script itself never loaded (CDN blocked or
+  // offline at page load), reconnecting can't fix it — reload the page to
+  // fetch it again. Otherwise re-run the connect.
+  function retryHavenConnect() {
+    if (!havenAuthLib() && typeof window !== "undefined" && window.location && typeof window.location.reload === "function") {
+      window.location.reload();
+      return;
+    }
+    connectHavenBackend();
+  }
+
+  useEffect(() => {
+    connectHavenBackend();
     return () => {
-      cancelled = true;
-      unsubscribe();
+      connectSeqRef.current += 1;
+      if (authUnsubscribeRef.current) {
+        authUnsubscribeRef.current();
+        authUnsubscribeRef.current = null;
+      }
     };
   }, []);
 
@@ -3475,9 +3570,6 @@ export default function HavenProApp() {
     if (authSession) {
       title = authSession.email || "Signed in";
       detail = "Signed in";
-    } else if (accountStatus === "signed_in") {
-      title = "Not connected";
-      detail = "This device isn't connected to Haven yet. Jobs and updates won't be saved or reach customers.";
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
@@ -3490,7 +3582,6 @@ export default function HavenProApp() {
 
   function settingsScreen() {
     const notifOnCount = Object.values(notifPrefs).filter(Boolean).length;
-    const configured = !!getSupabaseConfig();
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("main"))}>
         {backHeader("Settings", () => setProfileView("main"))}
@@ -3511,7 +3602,7 @@ export default function HavenProApp() {
             </button>
           </div>
           {navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport"))}
-          {configured && !authSession && settingsAuthOpen && (
+          {!authSession && settingsAuthOpen && (
             <div style={{ marginTop: 8 }}>
               {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
               {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
@@ -3521,7 +3612,7 @@ export default function HavenProApp() {
               </button>
             </div>
           )}
-          {configured && !authSession && !settingsAuthOpen && (
+          {!authSession && !settingsAuthOpen && (
             <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Sign in with email
             </button>
@@ -3659,17 +3750,12 @@ export default function HavenProApp() {
               <button onClick={() => { setAuthNotice(""); setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
                 Create Account
               </button>
-              <button onClick={() => {
-                if (getSupabaseConfig()) openEmailSignIn();
-                else showToast("Sign-in isn't available right now. Please try again.");
-              }} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
+              <button onClick={openEmailSignIn} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 Sign In
               </button>
-              {getSupabaseConfig() && (
-                <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
-                  Sign in with email
-                </button>
-              )}
+              <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
+                Sign in with email
+              </button>
             </>
           )}
           <div style={{ marginTop: 14, fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", lineHeight: 1.45 }}>
@@ -3690,60 +3776,52 @@ export default function HavenProApp() {
       if (d.password.length < 6) { showToast("Password must be at least 6 characters"); return; }
       if (d.password !== d.confirm) { showToast("Passwords don't match"); return; }
       const email = d.email.trim();
-      if (getSupabaseConfig()) {
-        setAuthBusy(true);
-        setAuthNotice("");
-        let result;
-        try {
-          result = await havenAuthSignUp({ email: email, password: d.password });
-        } catch (e) {
-          result = { ok: false, reason: (e && e.message) || "signup_failed" };
-        }
-        setAuthBusy(false);
-        if (!result.ok) {
-          console.warn("Haven Pro sign-up failed:", result.reason);
-          const msg = result.reason === "not_configured"
-            ? "Account creation isn't available right now. Please try again."
-            : "Couldn't create your account. Please try again.";
-          setAuthNotice(msg);
-          showToast(msg);
+      // Account creation is Supabase Auth only. There is no local/demo account path.
+      setAuthBusy(true);
+      setAuthNotice("");
+      let result;
+      try {
+        result = await havenAuthSignUp({ email: email, password: d.password });
+      } catch (e) {
+        result = { ok: false, reason: (e && e.message) || "signup_failed", retryable: havenAuthErrorIsNetwork(e) };
+      }
+      setAuthBusy(false);
+      if (!result.ok) {
+        console.warn("Haven Pro sign-up failed:", result.reason);
+        if (result.reason === "not_configured" || result.retryable) {
+          // Haven itself can't be reached — show the connection error with Retry.
+          setBackendState("error");
           return;
         }
-        setFirstName(d.firstName.trim());
-        setLastName(d.lastName.trim());
-        setAccountEmail(email);
-        setAccountPhone(d.phone.trim());
-        setAccountCreatedAt(Date.now());
-        setEmailVerifyStatus("pending");
-        setPhoneVerifyStatus("pending");
-        if (result.session) {
-          accountSourceRef.current = "auth";
-          setAuthSession(sessionToAuthState(result.session));
-          setAccountStatus("signed_in");
-          setEmailVerifyStatus("verified");
-          setOnboardingStatus("in_progress");
-          setOnboardingStep("createProfile");
-          return;
-        }
-        setSignInDraft({ email: email, password: "" });
-        setWelcomeAuthView("confirmEmail");
-        setOnboardingStep("welcome");
-        setAuthNotice("Account created. Confirm your email, then sign in.");
-        showToast("Confirm your email to finish signing in");
+        const msg = "Couldn't create your account. Please try again.";
+        setAuthNotice(msg);
+        showToast(msg);
         return;
       }
-      accountSourceRef.current = "local";
       setFirstName(d.firstName.trim());
       setLastName(d.lastName.trim());
       setAccountEmail(email);
       setAccountPhone(d.phone.trim());
-      setAccountStatus("signed_in");
       setAccountCreatedAt(Date.now());
       setEmailVerifyStatus("pending");
       setPhoneVerifyStatus("pending");
-      onboardingNext();
+      if (result.session) {
+        accountSourceRef.current = "auth";
+        setAuthSession(sessionToAuthState(result.session));
+        setAccountStatus("signed_in");
+        setEmailVerifyStatus("verified");
+        setOnboardingStatus("in_progress");
+        setOnboardingStep("createProfile");
+        return;
+      }
+      // No session yet (email confirmation). Stay signed out until a real sign-in.
+      setSignInDraft({ email: email, password: "" });
+      setWelcomeAuthView("confirmEmail");
+      setOnboardingStep("welcome");
+      setAuthNotice("Account created. Confirm your email, then sign in.");
+      showToast("Confirm your email to finish signing in");
     }
-    return onboardingChrome("Create Account", getSupabaseConfig() ? "Creates a Haven Pro login." : null, (
+    return onboardingChrome("Create Account", "Creates a Haven Pro login.", (
       <>
         {formField("First Name", d.firstName, v => set("firstName", v), "Jordan")}
         {formField("Last Name", d.lastName, v => set("lastName", v), "Ellis")}
@@ -4071,6 +4149,11 @@ export default function HavenProApp() {
   }
 
   function onboardingScreen() {
+    // Account required: without a real session only Welcome / Sign in / Create Account
+    // (and the legal/support footer) are reachable.
+    if (!authSession && onboardingStep !== "welcome" && onboardingStep !== "createAccount") {
+      return welcomeAuthView === "signIn" || welcomeAuthView === "confirmEmail" ? onboardingAuthGateScreen() : onboardingWelcomeScreen();
+    }
     if (onboardingStep === "welcome" && (welcomeAuthView === "signIn" || welcomeAuthView === "confirmEmail")) return onboardingAuthGateScreen();
     if (onboardingStep === "welcome") return onboardingWelcomeScreen();
     if (onboardingStep === "createAccount") return onboardingCreateAccountScreen();
@@ -4084,6 +4167,39 @@ export default function HavenProApp() {
     if (onboardingStep === "tax") return onboardingTaxScreen();
     if (onboardingStep === "credentials") return onboardingCredentialsScreen();
     return onboardingReadyScreen();
+  }
+
+  /* ── Phase 1B A1: connection screen. Shown on boot while connecting, and
+     instead of the whole app whenever Haven can't be reached or there is no
+     real session behind a signed-in state. Retry re-runs the connect. ── */
+  function connectionScreen() {
+    const view = backendState === "ready" ? "error" : backendState;
+    const busy = view === "connecting" || view === "retrying";
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", background: `linear-gradient(180deg, ${T.pgt} 0%, ${T.bg} 55%)`, padding: "48px 24px 28px" }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 900, color: T.pgd, letterSpacing: 1.5, fontFamily: FONT, marginBottom: 4 }}>HAVEN PRO</div>
+          {view === "connecting" ? (
+            <div role="status" style={{ fontSize: 14.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginTop: 18 }}>{HAVEN_CONNECTING_COPY}</div>
+          ) : (
+            <div role="alert">
+              <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 18, marginBottom: 8 }}>{HAVEN_CONNECT_ERROR_TITLE}</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.5 }}>{HAVEN_CONNECT_ERROR_DETAIL}</div>
+            </div>
+          )}
+        </div>
+        <div>
+          {view !== "connecting" && (
+            <button onClick={retryHavenConnect} disabled={busy} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+              {busy ? "Retrying…" : "Retry"}
+            </button>
+          )}
+          <div style={{ marginTop: 14, fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", lineHeight: 1.45 }}>
+            Help &amp; Support · Terms · Privacy
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function toastEl() {
@@ -4141,7 +4257,7 @@ export default function HavenProApp() {
       <div className="haven-pro-frame-outer" style={outerStyle}>
         <div className="hp-phone-frame" style={frameStyle}>
           <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            {needsOnboarding ? onboardingScreen() : (
+            {connectionBlocked ? connectionScreen() : needsOnboarding ? onboardingScreen() : (
               <>
                 {tab === "home" && homeScreen()}
                 {tab === "jobs" && jobsScreen()}
@@ -4151,7 +4267,7 @@ export default function HavenProApp() {
               </>
             )}
           </div>
-          {!needsOnboarding && bottomNav()}
+          {!connectionBlocked && !needsOnboarding && bottomNav()}
           {toastEl()}
         </div>
       </div>

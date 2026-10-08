@@ -6,12 +6,11 @@
  * - signed-in claim / arrive / diagnosing / in_progress / materials / complete
  *   use the auth uid and the user access token as Bearer
  * - apikey stays the anon key
- * - no session stops the write and does not send DEMO_PRO_ID, even if anon mode is off
+ * - no session stops the write and does not send DEMO_PRO_ID
  * - a session missing uid or token does not fall back to DEMO_PRO_ID
- * - anon mode on does not override a real session
  * - lifecycle status strings and fee fields stay put
- * - local demo create-account still reaches Verify Your Contact Info
- * - a Supabase session skips that demo wall
+ * - Create Account without a session never creates a local account (no Verify Your Contact Info demo wall)
+ * - a Supabase session continues at Create Your Profile
  * - local Pro workspace snapshot save/load for refresh rehydration
  */
 
@@ -21,7 +20,14 @@ const vm = require("vm");
 const assert = require("assert");
 
 const root = path.resolve(__dirname, "..");
-const ANON = "anon-key-demo";
+// Phase 1B A1: the anon key is the built-in public config (read from the adapter, never hardcoded here).
+const ANON = (function () {
+  const sandbox = { console, atob, window: { localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} } } };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(root, "backend_adapter.js"), "utf8") + "\n;globalThis.__cfg = getSupabaseConfig();", sandbox);
+  return sandbox.__cfg.anon;
+})();
 const TOKEN = "access-token-pro";
 const AUTH_UID = "11111111-1111-4111-8111-111111111111";
 const DEMO_PRO_ID = "22222222-2222-4222-8222-222222222222";
@@ -40,16 +46,15 @@ function memoryStorage(seed) {
   };
 }
 
+// No Supabase keys in storage: the built-in public config is what connects.
 function configuredStorage(extra) {
-  return memoryStorage(Object.assign({
-    haven_supabase_url: "https://example.supabase.co",
-    haven_supabase_anon_key: ANON,
-  }, extra || {}));
+  return memoryStorage(Object.assign({}, extra || {}));
 }
 
 function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   const sandbox = {
     console,
+    atob,
     window: { localStorage, supabase: supabaseLib },
     fetch: fetchImpl,
     URL,
@@ -79,7 +84,6 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   const names = [
-    "isPrototypeAnonMode",
     "havenAuthSignIn",
     "havenAuthSignOut",
     "getHavenAccessToken",
@@ -186,8 +190,7 @@ async function checkSignedInWrites() {
     const status = body && body.status ? body.status : "posted";
     return [{ id: JOB_ID, status: status }];
   });
-  const api = loadAdapter(configuredStorage({ haven_prototype_anon_mode: "true" }), authLib(sessionRef), fakeFetch);
-  assert.strictEqual(api.isPrototypeAnonMode(), true, "anon mode on must not hide the session");
+  const api = loadAdapter(configuredStorage(), authLib(sessionRef), fakeFetch);
 
   const claim = await api.claimJobOnSupabase({ id: JOB_ID });
   assert.strictEqual(claim.ok, true);
@@ -296,8 +299,7 @@ async function checkSignedOutDemo() {
     const status = body && body.status ? body.status : "en_route";
     return [{ id: JOB_ID, status: status }];
   });
-  const api = loadAdapter(configuredStorage({ haven_prototype_anon_mode: "false" }), authLib(sessionRef), fakeFetch);
-  assert.strictEqual(api.isPrototypeAnonMode(), false);
+  const api = loadAdapter(configuredStorage(), authLib(sessionRef), fakeFetch);
   const claim = await api.claimJobOnSupabase({ id: JOB_ID });
   assert.strictEqual(claim.ok, false);
   assert.strictEqual(claim.reason, "no_session");
@@ -430,7 +432,8 @@ function clickButton(window, label) {
   btn.click();
 }
 
-async function renderWelcome(localStorageSeed) {
+async function renderWelcome(localStorageSeed, opts) {
+  opts = opts || {};
   const { JSDOM } = require("jsdom");
   const babel = require("@babel/core");
   const React = require("react");
@@ -446,7 +449,8 @@ async function renderWelcome(localStorageSeed) {
   window.localStorage.clear();
   const seed = localStorageSeed || {};
   Object.keys(seed).forEach(k => window.localStorage.setItem(k, seed[k]));
-  window.fetch = async () => ({ ok: true, status: 200, json: async () => [], text: async () => "" });
+  window.fetch = opts.fetch || (async () => ({ ok: true, status: 200, json: async () => [], text: async () => "" }));
+  if (opts.supabase) window.supabase = opts.supabase;
   const ReactDOM = Object.assign({}, ReactDOMLegacy, ReactDOMClient);
   window.React = React;
   window.ReactDOM = ReactDOM;
@@ -466,7 +470,12 @@ async function renderWelcome(localStorageSeed) {
     configFile: false,
   });
   window.eval(transpiled.code);
-  await new Promise(resolve => setTimeout(resolve, 30));
+  // Phase 1B A1: boot connects first; wait for the connect attempt to settle.
+  for (let i = 0; i < 100; i++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const text = window.document.getElementById("root").textContent || "";
+    if (text.includes("HAVEN PRO") && !text.includes("Connecting to Haven")) break;
+  }
   return { window, dom };
 }
 
@@ -483,24 +492,34 @@ async function fillCreateAccount(window) {
 }
 
 async function checkOnboardingWall() {
-  const local = await renderWelcome(null);
+  // Sign-up that returns no session (email confirmation): no local account, no demo contact wall.
+  const pendingLib = {
+    createClient() {
+      return {
+        auth: {
+          async signUp() { return { data: { session: null, user: goodUser() }, error: null }; },
+          async getSession() { return { data: { session: null }, error: null }; },
+          onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+        },
+      };
+    },
+  };
+  const local = await renderWelcome(null, { supabase: pendingLib });
   try {
     await fillCreateAccount(local.window);
     clickButton(local.window, "Continue");
     await new Promise(resolve => setTimeout(resolve, 40));
     const text = local.window.document.getElementById("root").textContent || "";
-    assert.ok(text.includes("Verify Your Contact Info"), "local demo create-account still uses the contact wall");
+    assert.ok(!text.includes("Verify Your Contact Info"), "create-account without a session must not open the local contact wall");
+    assert.ok(!text.includes("Create Your Profile"), "create-account without a session must not continue onboarding");
+    assert.ok(text.includes("Confirm your email"), "create-account without a session waits for email confirmation");
   } finally {
     try { local.window.close(); } catch (e) { /* ignore */ }
   }
 
-  const authed = await renderWelcome({
-    haven_supabase_url: "https://example.supabase.co",
-    haven_supabase_anon_key: ANON,
-  });
-  try {
-    const session = sessionFor(goodUser());
-    authed.window.supabase = {
+  const session = sessionFor(goodUser());
+  const authed = await renderWelcome(null, {
+    supabase: {
       createClient() {
         return {
           auth: {
@@ -508,7 +527,7 @@ async function checkOnboardingWall() {
               return { data: { session: session, user: session.user }, error: null };
             },
             async getSession() {
-              return { data: { session: session }, error: null };
+              return { data: { session: null }, error: null };
             },
             onAuthStateChange(cb) {
               return { data: { subscription: { unsubscribe() {} } } };
@@ -516,7 +535,9 @@ async function checkOnboardingWall() {
           },
         };
       },
-    };
+    },
+  });
+  try {
     await fillCreateAccount(authed.window);
     clickButton(authed.window, "Continue");
     await new Promise(resolve => setTimeout(resolve, 40));
