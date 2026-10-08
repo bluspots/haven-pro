@@ -1011,6 +1011,40 @@ async function fetchHavenProProfile(userId) {
 }
 
 // Update the signed-in Pro's own profiles row. No insert. No other users.
+// Phase 1B A2: founder-set QA tester flag (profiles.is_qa_tester, Customer
+// migration 0024). True only when the RPC returns the JSON boolean true for
+// the signed-in session. Signed out, error, missing RPC, or any other answer
+// is false. Never reads localStorage or the email.
+async function fetchHavenIsQaTester() {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return false;
+  let actor;
+  try {
+    actor = await resolveHavenJobWriteAuth(cfg);
+  } catch (e) {
+    return false;
+  }
+  if (!actor || !actor.ok || actor.mode !== "session" || !actor.headers) return false;
+  try {
+    const res = await fetch(`${cfg.url}/rest/v1/rpc/is_qa_tester`, {
+      method: "POST",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    if (!res || !res.ok) return false;
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    return body === true;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function saveHavenProProfile(userId, snapshot) {
   if (!userId || !snapshot) return { ok: false, reason: "no_user" };
   const cfg = getSupabaseConfig();
