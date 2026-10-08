@@ -12,20 +12,9 @@ Slice 2 (`docs/AUTH_SLICE2.md`) is what binds a signed-in session to claim and l
 - The session is persisted by the Auth client (refresh + restore on reload). The access token is kept in memory for a later slice.
 - ~~Local demo account creation still works when those keys are absent.~~ Retired in Phase 1B A1: there is no local/demo account. If Haven can't be reached the app shows an error with Retry.
 
-## Anonymous-mode flag
+## Anonymous-mode flag (removed)
 
-Key: `haven_prototype_anon_mode` (same name as the Customer app).
-
-| Value | Meaning |
-|---|---|
-| missing, empty, `true`, `1`, `on`, `yes` | **On** (default) |
-| `false`, `0`, `off`, `no` | Off |
-
-Default **on**. In slice 1, claim, arrive, materials, and complete kept `Authorization: Bearer <anon key>` and `DEMO_PRO_ID`. Turning the flag off did **not** switch those calls, and a signed-in session was not required for them. Slice 2 used the session when one existed. Slice 4 stops signed-out claim and later writes; the current app does not write as the demo pro. The flag does not choose that identity.
-
-```js
-localStorage.setItem("haven_prototype_anon_mode", "true"); // default even if unset
-```
+The `haven_prototype_anon_mode` localStorage flag never chose the job writer and was removed in Phase 1B A1. Signed-out job writes stop and never send `DEMO_PRO_ID`.
 
 ## Supabase setup (Customer project)
 

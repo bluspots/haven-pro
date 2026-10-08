@@ -16,6 +16,10 @@ returns it. It is concatenated into `prototype-pro.html` / `index.html` by `buil
   project (or an `sb_publishable_` key).
 - The old `haven_supabase_url` / `haven_supabase_anon_key` localStorage keys are not read
   (no override; nothing in the UI sets them).
+- **Runtime guard** (`havenSupabaseKeyIsPublic`, mirrors Customer #43): `getSupabaseConfig()` returns
+  `null` unless the URL is `https://<ref>.supabase.co` and the key is `sb_publishable_…` or a JWT with
+  `role: "anon"` whose `ref` claim equals `<ref>`. `service_role`, `sb_secret_…`, malformed JWTs and
+  other projects' keys are refused → not connectable → error screen (never demo mode).
 
 ## Connect flow
 
@@ -25,7 +29,15 @@ On boot (and on Retry) the app calls `havenConnectBackend()`:
 2. Supabase Auth client (CDN UMD `window.supabase`) loaded and created.
 3. `GET {url}/auth/v1/health` with the anon `apikey` answers 2xx (10 s timeout).
 
-Then it restores the Auth session. Until this succeeds nothing but the connection screen renders.
+Then it restores the Auth session and **confirms it with the server** (`auth.getUser()`, mirroring
+Customer #43 `auth_session.js`). Until this succeeds nothing but the connection screen renders —
+not the app, not the cached profile, not Dev Testing, and no job reads.
+
+- getUser OK (same user id) → the app opens with the server's user.
+- 401 / 403 / invalid or mismatched user → `signOut({ scope: "local" })`, the cached profile
+  (`haven_pro_workspace_v1` entry) is cleared, and the sign-in gate shows
+  "Your session has ended. Please sign in again."
+- Network failure (or no getUser) → "Can't connect to Haven" + Retry.
 
 | State | Screen |
 |---|---|

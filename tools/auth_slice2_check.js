@@ -6,9 +6,8 @@
  * - signed-in claim / arrive / diagnosing / in_progress / materials / complete
  *   use the auth uid and the user access token as Bearer
  * - apikey stays the anon key
- * - no session stops the write and does not send DEMO_PRO_ID, even if anon mode is off
+ * - no session stops the write and does not send DEMO_PRO_ID
  * - a session missing uid or token does not fall back to DEMO_PRO_ID
- * - anon mode on does not override a real session
  * - lifecycle status strings and fee fields stay put
  * - Create Account without a session never creates a local account (no Verify Your Contact Info demo wall)
  * - a Supabase session continues at Create Your Profile
@@ -23,7 +22,7 @@ const assert = require("assert");
 const root = path.resolve(__dirname, "..");
 // Phase 1B A1: the anon key is the built-in public config (read from the adapter, never hardcoded here).
 const ANON = (function () {
-  const sandbox = { console, window: { localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} } } };
+  const sandbox = { console, atob, window: { localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} } } };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(root, "backend_adapter.js"), "utf8") + "\n;globalThis.__cfg = getSupabaseConfig();", sandbox);
@@ -55,6 +54,7 @@ function configuredStorage(extra) {
 function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   const sandbox = {
     console,
+    atob,
     window: { localStorage, supabase: supabaseLib },
     fetch: fetchImpl,
     URL,
@@ -84,7 +84,6 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   const names = [
-    "isPrototypeAnonMode",
     "havenAuthSignIn",
     "havenAuthSignOut",
     "getHavenAccessToken",
@@ -191,8 +190,7 @@ async function checkSignedInWrites() {
     const status = body && body.status ? body.status : "posted";
     return [{ id: JOB_ID, status: status }];
   });
-  const api = loadAdapter(configuredStorage({ haven_prototype_anon_mode: "true" }), authLib(sessionRef), fakeFetch);
-  assert.strictEqual(api.isPrototypeAnonMode(), true, "anon mode on must not hide the session");
+  const api = loadAdapter(configuredStorage(), authLib(sessionRef), fakeFetch);
 
   const claim = await api.claimJobOnSupabase({ id: JOB_ID });
   assert.strictEqual(claim.ok, true);
@@ -301,8 +299,7 @@ async function checkSignedOutDemo() {
     const status = body && body.status ? body.status : "en_route";
     return [{ id: JOB_ID, status: status }];
   });
-  const api = loadAdapter(configuredStorage({ haven_prototype_anon_mode: "false" }), authLib(sessionRef), fakeFetch);
-  assert.strictEqual(api.isPrototypeAnonMode(), false);
+  const api = loadAdapter(configuredStorage(), authLib(sessionRef), fakeFetch);
   const claim = await api.claimJobOnSupabase({ id: JOB_ID });
   assert.strictEqual(claim.ok, false);
   assert.strictEqual(claim.reason, "no_session");

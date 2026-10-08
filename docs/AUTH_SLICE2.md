@@ -23,7 +23,7 @@ The same actor is used for the assigned-job reads that follow those writes (acti
 
 A session never falls through to `DEMO_PRO_ID`. If a session is present but the uid or access token is missing, the write returns `session_identity_missing` and does not call the demo path.
 
-`haven_prototype_anon_mode` does not override a real session.
+The old `haven_prototype_anon_mode` flag never overrode a real session (removed in Phase 1B A1).
 
 ## Signed out
 

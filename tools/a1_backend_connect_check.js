@@ -18,6 +18,13 @@
  *     (Retry → signed-out Welcome), never a usable app.
  * Config safety: the built-in key is public (JWT role "anon" for this project,
  * or sb_publishable_). service_role / secret keys fail the check.
+ * QA fixes (#41 round 1):
+ * - Runtime key guard: getSupabaseConfig() refuses service_role, sb_secret_,
+ *   malformed JWTs, and a ref that doesn't match the URL host → error screen.
+ * - A stored session is confirmed with auth.getUser() before the app renders.
+ *   401/403 → local sign-out + cached profile cleared → sign-in gate.
+ *   getUser network failure → error + Retry. Nothing renders while pending.
+ * - Retry after a supabase-js CDN failure reloads the page.
  */
 
 const fs = require("fs");
@@ -44,9 +51,9 @@ function memoryStorage(seed) {
   };
 }
 
-function loadAdapter(localStorage, supabaseLib, fetchImpl) {
+function loadAdapter(localStorage, supabaseLib, fetchImpl, sourceTransform) {
   const sandbox = {
-    console, window: { localStorage, supabase: supabaseLib }, fetch: fetchImpl,
+    console, atob, window: { localStorage, supabase: supabaseLib }, fetch: fetchImpl,
     URL, encodeURIComponent, Date, JSON, Math, Array, Object, String, Number, Error, Promise, Set, Map,
   };
   sandbox.globalThis = sandbox;
@@ -55,8 +62,10 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
     "getSupabaseConfig", "havenConnectBackend", "havenAuthSignUp", "havenAuthSignIn", "havenAuthRestoreSession",
     "havenAuthErrorIsNetwork", "claimJobOnSupabase", "patchJobArrivedOnSupabase", "fetchPostedJobsFromSupabase",
     "HAVEN_SUPABASE_PUBLIC_CONFIG", "HAVEN_CONNECT_ERROR_TITLE", "HAVEN_CONNECT_ERROR_DETAIL",
+    "havenSupabaseKeyIsPublic", "havenSupabaseProjectRef", "havenAuthErrorIsInvalidSession", "clearHavenProWorkspace",
   ];
-  vm.runInContext(read("backend_adapter.js") + "\n;globalThis.__haven = { " + names.join(", ") + " };", sandbox, { filename: "backend_adapter.js" });
+  const src = typeof sourceTransform === "function" ? sourceTransform(read("backend_adapter.js")) : read("backend_adapter.js");
+  vm.runInContext(src + "\n;globalThis.__haven = { " + names.join(", ") + " };", sandbox, { filename: "backend_adapter.js" });
   return sandbox.__haven;
 }
 
@@ -84,7 +93,7 @@ function checkPublicConfig() {
   }
   for (const rel of ["backend_adapter.js", "prototype-pro.html", "index.html"]) {
     const text = read(rel);
-    assert.ok(!/sb_secret_/.test(text), rel + " must not contain a secret key");
+    assert.ok(!/sb_secret_[A-Za-z0-9_-]{8,}/.test(text), rel + " must not contain a secret key");
     const jwts = text.match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g) || [];
     jwts.forEach(t => assert.strictEqual(decodeJwtPayload(t).role, "anon", rel + " ships only anon JWTs"));
     assert.ok(text.includes(cfg.url), rel + " ships the project URL");
@@ -201,7 +210,7 @@ async function renderApp(opts) {
   const ReactDOMClient = require("react-dom/client");
   let ReactDOMLegacy = {};
   try { ReactDOMLegacy = require("react-dom"); } catch (e) { ReactDOMLegacy = {}; }
-  const html = read("prototype-pro.html");
+  const html = typeof opts.htmlTransform === "function" ? opts.htmlTransform(read("prototype-pro.html")) : read("prototype-pro.html");
   const reloads = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (e) => {
@@ -262,10 +271,15 @@ function authLib(state) {
       return {
         auth: {
           async getSession() { state.getSessionCalls++; return { data: { session: state.session || null }, error: null }; },
+          async getUser() {
+            state.getUserCalls = (state.getUserCalls || 0) + 1;
+            if (state.getUser) return state.getUser();
+            return { data: { user: state.session ? state.session.user : null }, error: state.session ? null : { name: "AuthSessionMissingError", status: 400 } };
+          },
           onAuthStateChange(cb) { state.listeners.push(cb); return { data: { subscription: { unsubscribe() {} } } }; },
           async signUp(args) { return state.signUp ? state.signUp(args) : { data: { session: null, user: null }, error: null }; },
           async signInWithPassword(args) { return state.signIn ? state.signIn(args) : { data: { session: null }, error: { name: "AuthApiError", message: "Invalid login credentials", status: 400 } }; },
-          async signOut() { state.session = null; state.listeners.forEach(cb => cb("SIGNED_OUT", null)); return { error: null }; },
+          async signOut(opts) { state.signOutCalls = (state.signOutCalls || []).concat([opts || null]); state.session = null; state.listeners.forEach(cb => cb("SIGNED_OUT", null)); return { error: null }; },
         },
       };
     },
@@ -504,6 +518,194 @@ async function checkSessionlessSignedInIsError() {
   }
 }
 
+
+// ── QA fix 2: runtime key guard ──────────────────────────────────────────
+function fakeJwt(claims) {
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return enc({ alg: "HS256", typ: "JWT" }) + "." + enc(claims) + ".c2lnbmF0dXJl";
+}
+
+async function checkKeyGuard() {
+  const api = loadAdapter(memoryStorage(), null, null);
+  const real = api.HAVEN_SUPABASE_PUBLIC_CONFIG;
+  const ref = api.havenSupabaseProjectRef(real.url);
+  assert.strictEqual(ref, "tfykhsowsjffrrziefco", "project ref from URL host");
+  assert.strictEqual(api.havenSupabaseKeyIsPublic(real.anon, ref), true, "real anon key accepted");
+  assert.ok(api.getSupabaseConfig(), "real config passes the guard");
+  const forged = {
+    service_role: fakeJwt({ iss: "supabase", ref: ref, role: "service_role" }),
+    sb_secret: "sb_secret_" + "x".repeat(32),
+    malformed_two_parts: "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9",
+    malformed_json: "eyJhbGciOiJIUzI1NiJ9.bm90LWpzb24.c2ln",
+    ref_mismatch: fakeJwt({ iss: "supabase", ref: "abcdefghijklmnopqrst", role: "anon" }),
+    no_role: fakeJwt({ iss: "supabase", ref: ref }),
+    empty: "",
+  };
+  for (const name of Object.keys(forged)) {
+    assert.strictEqual(api.havenSupabaseKeyIsPublic(forged[name], ref), false, "guard rejects " + name);
+  }
+  assert.strictEqual(api.havenSupabaseKeyIsPublic("sb_publishable_" + "y".repeat(24), ref), true, "sb_publishable_ accepted");
+  assert.strictEqual(api.havenSupabaseKeyIsPublic(fakeJwt({ ref: ref, role: "anon" }), ref), true, "anon JWT for this project accepted");
+  assert.strictEqual(api.havenSupabaseProjectRef("https://evil.example.com"), "", "non-Supabase host has no ref");
+
+  // getSupabaseConfig refuses each forged key → not connectable (no client, no fetch).
+  for (const name of ["service_role", "sb_secret", "malformed_json", "ref_mismatch"]) {
+    const swap = (src) => {
+      assert.ok(src.includes(real.anon));
+      return src.split(real.anon).join(forged[name]);
+    };
+    let fetched = 0;
+    const lib = { createClient() { throw new Error("client must not be created for a refused key"); } };
+    const bad = loadAdapter(memoryStorage(), lib, async () => { fetched++; return { ok: true }; }, swap);
+    assert.strictEqual(bad.getSupabaseConfig(), null, "config refused: " + name);
+    const res = await bad.havenConnectBackend();
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.reason, "not_configured", name);
+    assert.strictEqual(fetched, 0, "no request with a refused key: " + name);
+    const signUp = await bad.havenAuthSignUp({ email: "a@b.c", password: "secret12" });
+    assert.strictEqual(signUp.ok, false, "no sign-up with a refused key: " + name);
+  }
+  // A URL that is not this project's host is refused too.
+  const wrongHost = loadAdapter(memoryStorage(), null, null, (src) => src.replace(real.url, "https://evil.example.com"));
+  assert.strictEqual(wrongHost.getSupabaseConfig(), null, "non-Supabase URL refused");
+
+  // UI: a build carrying a service_role key shows the error screen, never demo / Create Account.
+  const swapHtml = (html) => html.split(real.anon).join(forged.service_role);
+  const state = {};
+  const app = await renderApp({ supabase: authLib(state), fetch: okFetch(), htmlTransform: swapHtml });
+  try {
+    await waitFor(app.window, t => t.includes(ERROR_TITLE), "refused key shows the error");
+    assertErrorScreen(app.window, "refused key");
+    assert.strictEqual(state.createCalls.length, 0, "no Auth client for a refused key");
+    assert.strictEqual(app.hits.length, 0, "no network with a refused key");
+    clickButton(app.window, "Retry");
+    await waitFor(app.window, () => hasButton(app.window, "Retry"), "Retry settles");
+    assertErrorScreen(app.window, "refused key after Retry");
+  } finally {
+    try { app.window.close(); } catch (e) { /* ignore */ }
+  }
+}
+
+// ── QA fix 1: stored session must be confirmed with getUser ──────────────
+function cachedWorkspace() {
+  return JSON.stringify({ __v: 1, byUserId: { [AUTH_UID]: {
+    onboardingStatus: "completed", onboardingStep: "done", firstName: "Forged", lastName: "Profile",
+    homeCity: "Orlando, FL", travelRadius: 25, workCategories: ["Plumbing"],
+  } } });
+}
+function forgedSession() {
+  return { access_token: "forged-token", user: { id: AUTH_UID, email: "pro@example.com", user_metadata: { role: "pro" } } };
+}
+function assertNoApp(window, label) {
+  const text = rootText(window);
+  assert.ok(!text.includes("My Jobs"), label + ": no app tabs");
+  assert.ok(!text.includes("Job Board"), label + ": no board");
+  assert.ok(!text.includes("Dev Testing"), label + ": no Dev Testing");
+  assert.ok(!text.includes("Load Demo Pro"), label + ": no Load Demo Pro");
+  assert.ok(!text.includes("Forged"), label + ": cached profile not rendered");
+}
+
+async function checkForgedSession(status) {
+  const state = { session: forgedSession() };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  state.getUser = async () => {
+    await gate;
+    return { data: { user: null }, error: { name: "AuthApiError", message: "invalid JWT", status: status } };
+  };
+  const app = await renderApp({ supabase: authLib(state), fetch: okFetch(), storage: { haven_pro_workspace_v1: cachedWorkspace() } });
+  try {
+    // While getUser is pending, nothing but the connecting screen renders.
+    await waitFor(app.window, () => (state.getUserCalls || 0) >= 1, "getUser called");
+    await sleep(60);
+    assert.ok(rootText(app.window).includes("Connecting to Haven"), "connecting while getUser is pending");
+    assertNoApp(app.window, "getUser pending (" + status + ")");
+    assert.ok(!app.hits.some(h => h.url.includes("/rest/v1/")), "no profile/job reads before getUser confirms: " + app.hits.map(h => h.init.method + " " + h.url.replace(/^https:\/\/[^/]+/, "")).join(", "));
+    release();
+    await waitFor(app.window, t => t.includes("Your session has ended"), "sign-in gate after " + status);
+    const text = rootText(app.window);
+    assert.ok(text.includes("Sign in") && text.includes("Password"), "sign-in gate shown (" + status + ")");
+    assertNoApp(app.window, "forged session " + status);
+    assert.ok(!text.includes(ERROR_TITLE), "an invalid session is not a connection error");
+    assert.strictEqual(JSON.stringify(state.signOutCalls), JSON.stringify([{ scope: "local" }]), "local sign-out (" + status + ")");
+    assert.strictEqual(state.session, null, "session cleared (" + status + ")");
+    assert.strictEqual(app.window.localStorage.getItem("haven_pro_workspace_v1"), null, "cached profile cleared (" + status + ")");
+    assert.ok(!app.hits.some(h => h.url.includes("/rest/v1/")), "forged session never reads profiles/jobs (" + status + ")");
+    await sleep(80);
+    assertNoApp(app.window, "forged session settled " + status);
+  } finally {
+    try { app.window.close(); } catch (e) { /* ignore */ }
+  }
+}
+
+async function checkGetUserNetworkFailure() {
+  const state = { session: forgedSession() };
+  let mode = "offline";
+  state.getUser = async () => {
+    if (mode === "offline") return { data: { user: null }, error: { name: "AuthRetryableFetchError", message: "Failed to fetch", status: 0 } };
+    return { data: { user: forgedSession().user }, error: null };
+  };
+  const app = await renderApp({ supabase: authLib(state), fetch: okFetch(), storage: { haven_pro_workspace_v1: cachedWorkspace() } });
+  try {
+    await waitFor(app.window, t => t.includes(ERROR_TITLE), "getUser network failure shows the error");
+    assertErrorScreen(app.window, "getUser network failure");
+    assertNoApp(app.window, "getUser network failure");
+    assert.ok(!state.signOutCalls, "a network failure does not sign out");
+    assert.ok(app.window.localStorage.getItem("haven_pro_workspace_v1"), "a network failure keeps the cache");
+    const before = state.getUserCalls;
+    clickButton(app.window, "Retry");
+    await waitFor(app.window, () => hasButton(app.window, "Retry"), "Retry settles while still offline");
+    assert.strictEqual(state.getUserCalls, before + 1, "Retry re-checks the user");
+    assertErrorScreen(app.window, "still offline");
+    mode = "online";
+    clickButton(app.window, "Retry");
+    await waitFor(app.window, t => t.includes("My Jobs"), "app after getUser confirms");
+    assert.ok(!rootText(app.window).includes(ERROR_TITLE));
+  } finally {
+    try { app.window.close(); } catch (e) { /* ignore */ }
+  }
+}
+
+async function checkGetUserMismatch() {
+  // getUser answers with a different user than the stored session claims: treated as invalid.
+  const state = { session: forgedSession() };
+  state.getUser = async () => ({ data: { user: { id: "99999999-9999-4999-8999-999999999999", email: "other@example.com" } }, error: null });
+  const app = await renderApp({ supabase: authLib(state), fetch: okFetch(), storage: { haven_pro_workspace_v1: cachedWorkspace() } });
+  try {
+    await waitFor(app.window, t => t.includes("Your session has ended"), "mismatched user → sign-in gate");
+    assertNoApp(app.window, "mismatched user");
+    assert.strictEqual(app.window.localStorage.getItem("haven_pro_workspace_v1"), null);
+  } finally {
+    try { app.window.close(); } catch (e) { /* ignore */ }
+  }
+}
+
+async function checkAdapterRestoreConfirms() {
+  const sess = forgedSession();
+  const mk = (getUser) => ({ createClient() { return { auth: {
+    async getSession() { return { data: { session: sess }, error: null }; },
+    getUser,
+    async signOut() { return { error: null }; },
+  } }; } });
+  const ok = loadAdapter(memoryStorage(), mk(async () => ({ data: { user: sess.user }, error: null })), null);
+  const r1 = await ok.havenAuthRestoreSession();
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r1.session.user.id, AUTH_UID);
+  const missing = loadAdapter(memoryStorage(), { createClient() { return { auth: { async getSession() { return { data: { session: sess }, error: null }; } } }; } }, null);
+  const r2 = await missing.havenAuthRestoreSession();
+  assert.strictEqual(r2.ok, false, "no getUser → not trusted");
+  assert.strictEqual(r2.retryable, true);
+  const thrown = loadAdapter(memoryStorage(), mk(async () => { throw new TypeError("Failed to fetch"); }), null);
+  const r3 = await thrown.havenAuthRestoreSession();
+  assert.strictEqual(r3.ok, false);
+  assert.strictEqual(r3.retryable, true);
+  const bad = loadAdapter(memoryStorage(), mk(async () => ({ data: { user: null }, error: { status: 403, name: "AuthApiError" } })), null);
+  const r4 = await bad.havenAuthRestoreSession();
+  assert.strictEqual(JSON.stringify([r4.ok, r4.session, r4.invalidated]), JSON.stringify([true, null, true]));
+  assert.strictEqual(bad.havenAuthErrorIsInvalidSession({ status: 401, name: "AuthApiError" }), true);
+  assert.strictEqual(bad.havenAuthErrorIsInvalidSession({ status: 0, name: "AuthRetryableFetchError" }), false);
+}
+
 // ── Sources / built output ───────────────────────────────────────────────
 function checkSources() {
   const adapter = read("backend_adapter.js");
@@ -512,6 +714,8 @@ function checkSources() {
   assert.ok(!/localStorage\.getItem\(SUPABASE_/.test(adapter), "getSupabaseConfig does not read localStorage");
   assert.ok(!adapter.includes('mode: "sim" }; // no backend configured'), "no SIM claim when unconfigured");
   assert.ok(!jsx.includes("Not connected"), "Not connected state removed");
+  assert.ok(!adapter.includes("isPrototypeAnonMode") && !adapter.includes("haven_prototype_anon_mode"), "dead anon-mode flag removed");
+  assert.ok(adapter.includes("client.auth.getUser()"), "stored session is confirmed with getUser");
   assert.ok(!jsx.includes("isn't connected to Haven yet"), "Not connected copy removed");
   assert.ok(!jsx.includes("Sign-in isn't available right now"), "no unavailable-toast fallback");
   assert.ok(!jsx.includes("Account creation isn't available right now"), "no unavailable fallback in Create Account");
@@ -542,6 +746,12 @@ async function main() {
   await checkAuthClientMissingRetry();
   await checkAuthCallsUnreachable();
   await checkSessionlessSignedInIsError();
+  await checkKeyGuard();
+  await checkAdapterRestoreConfirms();
+  await checkForgedSession(401);
+  await checkForgedSession(403);
+  await checkGetUserNetworkFailure();
+  await checkGetUserMismatch();
   console.log("OK: Phase 1B A1 backend connect checks passed.");
 }
 

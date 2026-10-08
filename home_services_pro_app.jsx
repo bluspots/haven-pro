@@ -113,32 +113,6 @@ export default function HavenProApp() {
   // Active-job rehydrate effect is declared after authSession so a refresh
   // can re-run once the restored session is known (see below).
 
-  // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
-  useEffect(() => {
-    let cancelled = false;
-    let timerId = null;
-    async function load() {
-      const jobs = await fetchPostedJobsFromSupabase();
-      if (jobs && !cancelled) {
-        // Replace SIM_JOBS entirely when backend is configured (even if empty)
-        // Exclude any jobs that are currently active so they don't reappear on the board.
-        const activeIds = new Set(activeJobsRef.current.map(j => j.id));
-        const filtered = jobs.filter(j => !activeIds.has(j.id));
-        setAvailableJobs(filtered);
-      }
-    }
-    // Account required — fetchPostedJobsFromSupabase no-ops when signed out.
-    if (tab === "home" && getSupabaseConfig()) {
-      // Clear SIM seeds immediately so they don't linger/flash while backend loads.
-      setAvailableJobs([]);
-      load();
-      timerId = window.setInterval(load, 30000); // ~30s refresh cadence
-    }
-    return () => {
-      cancelled = true;
-      if (timerId) window.clearInterval(timerId);
-    };
-  }, [tab, activeJobs, travelRadius]);
 
   // Poll backend for status changes on active, backend-claimed jobs (e.g., materials approve/decline)
   useEffect(() => {
@@ -299,6 +273,36 @@ export default function HavenProApp() {
   // connecting (first boot) | retrying | error | ready. Nothing but the
   // connection screen renders until this is ready — there is no demo fallback.
   const [backendState, setBackendState] = useState("connecting");
+
+  // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
+  useEffect(() => {
+    let cancelled = false;
+    let timerId = null;
+    async function load() {
+      const jobs = await fetchPostedJobsFromSupabase();
+      if (jobs && !cancelled) {
+        // Replace SIM_JOBS entirely when backend is configured (even if empty)
+        // Exclude any jobs that are currently active so they don't reappear on the board.
+        const activeIds = new Set(activeJobsRef.current.map(j => j.id));
+        const filtered = jobs.filter(j => !activeIds.has(j.id));
+        setAvailableJobs(filtered);
+      }
+    }
+    // Account required — fetchPostedJobsFromSupabase no-ops when signed out.
+    if (tab === "home" && getSupabaseConfig()) {
+      // Clear SIM seeds immediately so they don't linger/flash while backend loads.
+      setAvailableJobs([]);
+      // Phase 1B A1: only read once connected with a server-confirmed session (getUser).
+      if (backendState === "ready" && authSession && authSession.id) {
+        load();
+        timerId = window.setInterval(load, 30000); // ~30s refresh cadence
+      }
+    }
+    return () => {
+      cancelled = true;
+      if (timerId) window.clearInterval(timerId);
+    };
+  }, [tab, activeJobs, travelRadius, backendState, authSession && authSession.id]);
 
   /* ── Account Readiness — derived, never stored directly. Only the 5
      mandatory baseline items gate marketplaceReady; optional credentials
@@ -811,11 +815,19 @@ export default function HavenProApp() {
       setBackendState("error");
       return false;
     }
+    // havenAuthRestoreSession only returns a session the server confirmed (getUser).
     const session = restored.ok ? restored.session : null;
     if (session) {
       applyAuthSession(session);
-    } else if (accountStatusRef.current === "signed_in") {
+    } else if (accountStatusRef.current === "signed_in" || restored.invalidated) {
       dropSessionlessAccount();
+    }
+    if (!session && restored.invalidated) {
+      // Stored session was rejected by the server: signed out locally, cached profile cleared.
+      clearAuthLinkedAccount();
+      setSignInDraft({ email: "", password: "" });
+      setAuthNotice("Your session has ended. Please sign in again.");
+      setWelcomeAuthView("signIn");
     }
     if (!authUnsubscribeRef.current) {
       authUnsubscribeRef.current = subscribeHavenAuth(function (next) {

@@ -3,7 +3,7 @@
 
 /**
  * Slice 1 checks:
- * - anon-mode flag defaults on
+ * - the dead anon-mode flag is gone (A1)
  * - signup metadata is role pro and redirect is the Pro Pages URL
  * - signed-in claim identity is covered by auth_slice2_check.js
  * - signed-in claim uses the auth uid; the demo pro id is not the runtime actor
@@ -39,6 +39,7 @@ function memoryStorage(seed) {
 function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   const sandbox = {
     console,
+    atob,
     window: { localStorage, supabase: supabaseLib },
     fetch: fetchImpl,
     URL,
@@ -57,7 +58,7 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  const code = read("backend_adapter.js") + "\n;globalThis.__haven = { isPrototypeAnonMode, havenAuthSignUp, havenAuthSignIn, havenAuthSignOut, havenAuthRestoreSession, getHavenAccessToken, getHavenAuthUser, claimJobOnSupabase, HAVEN_PRO_AUTH_REDIRECT_URL, HAVEN_SUPABASE_PUBLIC_CONFIG };";
+  const code = read("backend_adapter.js") + "\n;globalThis.__haven = { havenAuthSignUp, havenAuthSignIn, havenAuthSignOut, havenAuthRestoreSession, getHavenAccessToken, getHavenAuthUser, claimJobOnSupabase, HAVEN_PRO_AUTH_REDIRECT_URL, HAVEN_SUPABASE_PUBLIC_CONFIG };";
   vm.runInContext(code, sandbox, { filename: "backend_adapter.js" });
   return sandbox.__haven;
 }
@@ -65,23 +66,6 @@ function loadAdapter(localStorage, supabaseLib, fetchImpl) {
 async function checkAuthBehavior() {
   const storage = memoryStorage();
   const api = loadAdapter(storage, null, async () => { throw new Error("fetch should not run"); });
-  assert.strictEqual(api.isPrototypeAnonMode(), true, "missing flag defaults on");
-  storage.setItem("haven_prototype_anon_mode", "false");
-  assert.strictEqual(api.isPrototypeAnonMode(), false);
-  storage.setItem("haven_prototype_anon_mode", "off");
-  assert.strictEqual(api.isPrototypeAnonMode(), false);
-  storage.setItem("haven_prototype_anon_mode", "0");
-  assert.strictEqual(api.isPrototypeAnonMode(), false);
-  storage.setItem("haven_prototype_anon_mode", "no");
-  assert.strictEqual(api.isPrototypeAnonMode(), false);
-  storage.setItem("haven_prototype_anon_mode", "true");
-  assert.strictEqual(api.isPrototypeAnonMode(), true);
-  storage.setItem("haven_prototype_anon_mode", "yes");
-  assert.strictEqual(api.isPrototypeAnonMode(), true);
-  storage.setItem("haven_prototype_anon_mode", "maybe");
-  assert.strictEqual(api.isPrototypeAnonMode(), true, "unknown values stay on");
-  storage.removeItem("haven_prototype_anon_mode");
-
   // Auth client failed to load: sign-up fails closed (no local account).
   const unsigned = await api.havenAuthSignUp({ email: "a@b.c", password: "secret12" });
   assert.strictEqual(unsigned.ok, false);
@@ -89,7 +73,6 @@ async function checkAuthBehavior() {
 
   // Phase 1B A1: the built-in public config is used; no localStorage keys are needed.
   const PUBLIC = api.HAVEN_SUPABASE_PUBLIC_CONFIG;
-  storage.setItem("haven_prototype_anon_mode", "false");
 
   const calls = [];
   const session = {
@@ -127,7 +110,6 @@ async function checkAuthBehavior() {
   };
 
   const authed = loadAdapter(storage, lib, async () => { throw new Error("unexpected fetch"); });
-  assert.strictEqual(authed.isPrototypeAnonMode(), false, "flag off is visible; it does not choose the job actor");
   const signedUp = await authed.havenAuthSignUp({ email: "pro@example.com", password: "secret12" });
   assert.strictEqual(signedUp.ok, true);
   const signUpArgs = calls.find(c => c[0] === "signUp")[1];
@@ -173,7 +155,7 @@ function checkSources() {
   const jsx = read("home_services_pro_app.jsx");
   const shell = read("_shell_pre_pro.txt");
   const doc = read("docs/AUTH_SLICE1.md");
-  assertIncludes(adapter, 'const HAVEN_PROTOTYPE_ANON_MODE_KEY = "haven_prototype_anon_mode"', "flag key");
+  assert.ok(!adapter.includes("haven_prototype_anon_mode") && !adapter.includes("isPrototypeAnonMode"), "dead anon-mode flag removed");
   assertIncludes(adapter, 'data: { role: "pro" }', "signup role");
   assertIncludes(adapter, "https://bluspots.github.io/haven-pro/", "redirect");
   assert.ok(!adapter.includes("proId: DEMO_PRO_ID"), "demo pro id is not a write fallback");
@@ -189,7 +171,7 @@ function checkSources() {
 
   for (const built of ["prototype-pro.html", "index.html"]) {
     const html = read(built);
-    assertIncludes(html, "haven_prototype_anon_mode", built + " flag");
+    assert.ok(!html.includes("haven_prototype_anon_mode"), built + " has no anon-mode flag read");
     assertIncludes(html, 'data: { role: "pro" }', built + " role");
     assert.ok(!html.includes("proId: DEMO_PRO_ID"), built + " has no demo pro write");
     assertIncludes(html, 'reason: "no_session"', built + " signed-out stop");
