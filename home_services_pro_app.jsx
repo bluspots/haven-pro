@@ -53,6 +53,44 @@ class ErrorBoundary extends React.Component {
    APP
    ══════════════════════════════════════════════════════════════════════ */
 
+// Phase 1B A2: provider-result defaults. Used for initial state, sign-out,
+// and filling guarded sections a server row does not have.
+function havenDefaultIdentityVerification() {
+  return { provider: "persona", providerVerificationId: null, status: "not_started", verifiedAt: null, failureReasonCode: null, recheckAt: null };
+}
+function havenDefaultBackgroundCheck() {
+  return { provider: "checkr", providerReportId: null, status: "not_started", clearedAt: null };
+}
+function havenDefaultPayoutAccount() {
+  return { provider: "stripe", providerAccountId: null, payoutsEnabled: false, requirementsDue: [], status: "not_started", last4: null };
+}
+function havenDefaultTaxProfile() {
+  return { provider: "stripe_connect", status: "not_started", providerReference: null, taxFormAvailability: "Future 1099/tax-document flow, subject to legal and tax review" };
+}
+// The four guarded sections exactly as the server holds them; anything the
+// row lacks is the default (not_started / payouts off).
+function havenGuardedSectionsFromServer(ws) {
+  const src = ws && typeof ws === "object" ? ws : {};
+  function section(key, makeDefault) {
+    const v = src[key];
+    const out = Object.assign(makeDefault(), v && typeof v === "object" && !Array.isArray(v) ? v : {});
+    if (typeof out.status !== "string" || !out.status.trim()) out.status = "not_started";
+    return out;
+  }
+  const payout = section("payoutAccount", havenDefaultPayoutAccount);
+  payout.payoutsEnabled = payout.payoutsEnabled === true;
+  return {
+    identityVerification: section("identityVerification", havenDefaultIdentityVerification),
+    backgroundCheck: section("backgroundCheck", havenDefaultBackgroundCheck),
+    payoutAccount: payout,
+    taxProfile: section("taxProfile", havenDefaultTaxProfile),
+  };
+}
+function havenGuardedSignature(snapshot) {
+  const g = havenGuardedSectionsFromServer(snapshot);
+  return JSON.stringify([g.identityVerification.status, g.backgroundCheck.status, g.payoutAccount.status, g.payoutAccount.payoutsEnabled, g.taxProfile.status]);
+}
+
 export default function HavenProApp() {
   const [tab, setTab] = useState("home");
   const [theme, setTheme] = useState("light");
@@ -68,7 +106,7 @@ export default function HavenProApp() {
   const [proLiveLocation, setProLiveLocation] = useState(null); // {lat,lng} from the browser, or null if unavailable/denied
 
   // Permanent profile preferences — the eligibility pool. Starts blank
-  // (true first-launch state); onboarding or "Load Demo Pro" populates it.
+  // (true first-launch state); onboarding or the saved profile populates it.
   const [workCategories, setWorkCategories] = useState(new Set());
   const [travelRadius, setTravelRadius] = useState(15);
   const [homeCity, setHomeCity] = useState("");
@@ -219,26 +257,18 @@ export default function HavenProApp() {
      auto-resolves from a timer or from the pro's own submission alone.
      Matches HAVEN_PRO_ACCOUNT_CONTRACT.md. Insurance removed per product
      decision (see contract) — not carried forward in any form. ── */
-  const [identityVerification, setIdentityVerification] = useState({
-    provider: "persona", providerVerificationId: null, status: "not_started", verifiedAt: null, failureReasonCode: null, recheckAt: null,
-  }); // status: not_started|session_created|pending|verified|needs_review|failed|expired
+  const [identityVerification, setIdentityVerification] = useState(havenDefaultIdentityVerification); // status: not_started|session_created|pending|verified|needs_review|failed|expired
   const [identityProgress, setIdentityProgress] = useState({ idCaptured: false, selfieCaptured: false });
 
-  const [backgroundCheck, setBackgroundCheck] = useState({
-    provider: "checkr", providerReportId: null, status: "not_started", clearedAt: null,
-  }); // status: not_started|consent_required|invited|pending|clear|consider|disputed|suspended|expired
+  const [backgroundCheck, setBackgroundCheck] = useState(havenDefaultBackgroundCheck); // status: not_started|consent_required|invited|pending|clear|consider|disputed|suspended|expired
   const [backgroundConsent, setBackgroundConsent] = useState(false);
 
   const [credentials, setCredentials] = useState([]);
   const [credentialDraft, setCredentialDraft] = useState(null);
 
-  const [payoutAccount, setPayoutAccount] = useState({
-    provider: "stripe", providerAccountId: null, payoutsEnabled: false, requirementsDue: [], status: "not_started", last4: null,
-  }); // status: not_started|pending|enabled|restricted
+  const [payoutAccount, setPayoutAccount] = useState(havenDefaultPayoutAccount); // status: not_started|pending|enabled|restricted
 
-  const [taxProfile, setTaxProfile] = useState({
-    provider: "stripe_connect", status: "not_started", providerReference: null, taxFormAvailability: "Future 1099/tax-document flow, subject to legal and tax review",
-  }); // status: not_started|pending|verified|needs_review
+  const [taxProfile, setTaxProfile] = useState(havenDefaultTaxProfile); // status: not_started|pending|verified|needs_review
   const [taxLegalName, setTaxLegalName] = useState("");
   const [taxClassification, setTaxClassification] = useState("Individual");
   const [taxDraft, setTaxDraft] = useState(null); // {legalName, classification} while editing, pre-submission only
@@ -264,6 +294,11 @@ export default function HavenProApp() {
   const [accountCreatedAt, setAccountCreatedAt] = useState(null);
   // Real Supabase session. The app is not usable without one (no local/demo account).
   const [authSession, setAuthSession] = useState(null); // { id, email, role } | null
+  // Phase 1B A2: server-confirmed QA tester (is_qa_tester RPC). False by
+  // default, while the check runs, and on any error. Never localStorage/email.
+  const [qaTester, setQaTester] = useState(false);
+  const [qaBusy, setQaBusy] = useState(false);
+  const qaSeqRef = useRef(0);
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
   const [welcomeAuthView, setWelcomeAuthView] = useState("home"); // home | signIn | confirmEmail
@@ -435,56 +470,10 @@ export default function HavenProApp() {
     setSupportMessages([{ from: "support", text: "Hi! I'm here to help with anything Haven Pro related. What's up?", at: Date.now() }]);
     setSupportInput("");
   }
-  function resetToFreshPro() {
-    applyProDefaults(freshProDefaults());
-    accountSourceRef.current = null;
-    setWelcomeAuthView("home");
-    setAuthNotice("");
-    setSettingsAuthOpen(false);
-    setAccountStatus("signed_out");
-    setOnboardingStatus("not_started");
-    setOnboardingStep("welcome");
-    setAccountEmail("");
-    setAccountPhone("");
-    setAccountCreatedAt(null);
-    setEmailVerifyStatus("not_sent");
-    setPhoneVerifyStatus("not_sent");
-    setSignUpDraft({ firstName: "", lastName: "", email: "", phone: "", password: "", confirm: "" });
-    showToast("Reset to fresh Pro (dev)");
-  }
-  function loadDemoPro() {
-    applyProDefaults(demoProDefaults());
-    accountSourceRef.current = "local";
-    setWelcomeAuthView("home");
-    setAccountStatus("signed_in");
-    setOnboardingStatus("completed");
-    setOnboardingStep("done");
-    setAccountEmail("alex.rivera@example.com");
-    setAccountPhone("(407) 555-0142");
-    setEmailVerifyStatus("verified");
-    setPhoneVerifyStatus("verified");
-    setAccountCreatedAt(Date.now() - 400 * DAY_MS);
-    showToast("Loaded demo Pro (dev)");
-  }
-  /* Dev shortcut only — skips straight to a ready-to-work state without
-     walking through each onboarding step, for testing screens downstream
-     of onboarding without re-doing it every time. */
-  function devJumpToMarketplaceReady() {
-    accountSourceRef.current = "local";
-    setAccountStatus("signed_in");
-    if (!accountCreatedAt) setAccountCreatedAt(Date.now());
-    if (!homeCity.trim()) setHomeCity("Orlando, FL");
-    if (!firstName.trim()) setFirstName("Jordan");
-    if (!lastName.trim()) setLastName("Ellis");
-    if (workCategories.size === 0) setWorkCategories(new Set(DEFAULT_WORK_CATEGORIES));
-    setIdentityVerification(v => ({ ...v, status: "verified", verifiedAt: Date.now() }));
-    setBackgroundCheck(v => ({ ...v, status: "clear", clearedAt: Date.now() }));
-    setPayoutAccount(v => ({ ...v, status: "enabled", payoutsEnabled: true, providerAccountId: v.providerAccountId || `acct_demo_${Math.floor(10000 + Math.random() * 89999)}`, last4: v.last4 || String(Math.floor(1000 + Math.random() * 8999)) }));
-    setTaxProfile(v => ({ ...v, status: "verified" }));
-    setOnboardingStatus("completed");
-    setOnboardingStep("done");
-    showToast("Jumped to Marketplace Ready (dev)");
-  }
+  /* Phase 1B A2: "Reset to Fresh Pro" and "Load Demo Pro" are removed. They
+     replaced the signed-in Pro with a local account / demo profile, which is
+     local-only advancement. "Jump to Marketplace Ready" is kept as a real,
+     server-side, tester-gated write (devJumpToMarketplaceReady below). */
 
   function sessionToAuthState(session) {
     if (!session || !session.user) return null;
@@ -576,6 +565,42 @@ export default function HavenProApp() {
     return { first: parts[0] || "", last: parts.slice(1).join(" ") };
   }
   // Profiles row wins when it has a saved profile. Local snapshot is only the cache.
+  /* Phase 1B A2: stale-cache recovery. If the 0024 guard rejects a profile
+     save (this device holds a provider result the server does not have),
+     refetch the server's pro_workspace, replace the four guarded sections in
+     local state and the device cache with the server values (missing ->
+     not_started / payouts off), and retry the save once with the user's
+     other edits (name, city, ...) intact. At most one retry per rejection;
+     no retry when the server already matches what was sent (not stale), so
+     this can never loop. Any other failure keeps the existing handling. */
+  const guardRecoveryRef = useRef(false);
+  async function saveProProfileWithGuardRecovery(userId, snapshot) {
+    let first;
+    try { first = await saveHavenProProfile(userId, snapshot); } catch (e) { first = { ok: false, reason: "exception" }; }
+    if (!first || first.ok || !first.guard) return first;
+    if (guardRecoveryRef.current || typeof fetchHavenProServerWorkspace !== "function") return first;
+    guardRecoveryRef.current = true;
+    try {
+      let server = null;
+      try { server = await fetchHavenProServerWorkspace(userId); } catch (e) { server = null; }
+      if (!server || !server.ok) return first;
+      const guarded = havenGuardedSectionsFromServer(server.workspace);
+      if (havenGuardedSignature(guarded) === havenGuardedSignature(snapshot)) return first;
+      // Signed out or switched user while refetching: do nothing.
+      if (profileHydrateUserRef.current !== userId) return first;
+      setIdentityVerification(guarded.identityVerification);
+      setBackgroundCheck(guarded.backgroundCheck);
+      setPayoutAccount(guarded.payoutAccount);
+      setTaxProfile(guarded.taxProfile);
+      const retrySnapshot = Object.assign({}, snapshot, guarded);
+      if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, retrySnapshot);
+      let retry;
+      try { retry = await saveHavenProProfile(userId, retrySnapshot); } catch (e) { retry = { ok: false, reason: "exception" }; }
+      return retry;
+    } finally {
+      guardRecoveryRef.current = false;
+    }
+  }
   function hydrateSignedInProProfile(userId) {
     if (!userId) return Promise.resolve(false);
     if (profileHydratedForRef.current === userId) return Promise.resolve(!!profileHydrateResultRef.current);
@@ -609,7 +634,7 @@ export default function HavenProApp() {
         }
         if (snap) applied = applyHavenProWorkspace(snap) || applied;
         if (remote && remote.writable && snap && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snap) && typeof saveHavenProProfile === "function") {
-          try { await saveHavenProProfile(userId, snap); } catch (e) { /* cache remains until the row accepts the write */ }
+          try { await saveProProfileWithGuardRecovery(userId, snap); } catch (e) { /* cache remains until the row accepts the write */ }
         }
       }
       if (profileHydrateUserRef.current === userId) {
@@ -641,6 +666,12 @@ export default function HavenProApp() {
   }
   function clearAuthLinkedAccount() {
     setAuthSession(null);
+    // Phase 1B A2: a previous user's provider results must not carry over to
+    // the next sign-in in this tab.
+    setIdentityVerification(havenDefaultIdentityVerification());
+    setBackgroundCheck(havenDefaultBackgroundCheck());
+    setPayoutAccount(havenDefaultPayoutAccount());
+    setTaxProfile(havenDefaultTaxProfile());
     workspaceAppliedForRef.current = null;
     profileHydratedForRef.current = null;
     profileHydrateResultRef.current = false;
@@ -861,6 +892,20 @@ export default function HavenProApp() {
     };
   }, []);
 
+  // Phase 1B A2: ask the server whether this signed-in Pro is a QA tester.
+  // Hidden while the check runs; a late answer for an older session is dropped.
+  useEffect(() => {
+    const seq = ++qaSeqRef.current;
+    setQaTester(false);
+    const uid = authSession && authSession.id;
+    if (!uid || typeof fetchHavenIsQaTester !== "function") return;
+    (async function () {
+      let flag = false;
+      try { flag = (await fetchHavenIsQaTester()) === true; } catch (e) { flag = false; }
+      if (seq === qaSeqRef.current) setQaTester(flag);
+    })();
+  }, [authSession && authSession.id]);
+
   // Cache locally and write the signed-in Pro's own profiles row.
   // Wait until hydrate finishes so a blank first paint cannot overwrite a saved profile.
   useEffect(() => {
@@ -870,7 +915,7 @@ export default function HavenProApp() {
     const snapshot = buildHavenProWorkspaceSnapshot();
     if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(authSession.id, snapshot);
     if (typeof saveHavenProProfile === "function" && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snapshot)) {
-      saveHavenProProfile(authSession.id, snapshot);
+      saveProProfileWithGuardRecovery(authSession.id, snapshot);
     }
   }, [
     authSession,
@@ -1517,8 +1562,41 @@ export default function HavenProApp() {
     setIdentityVerification({ provider: "persona", providerVerificationId: null, status: "not_started", verifiedAt: null, failureReasonCode: null, recheckAt: null });
     setIdentityProgress({ idCaptured: false, selfieCaptured: false });
   }
+  /* Phase 1B A2: every Dev Testing action is a real server write. The new
+     provider status is PATCHed into the tester's own profiles.pro_workspace
+     first; the database (0024 profiles_guard_qa_fields) accepts it only for
+     a founder-flagged tester. Local state changes only after the server
+     accepts. A rejected or failed write changes nothing locally. */
+  async function devCommitQaWorkspace(patch, label) {
+    if (qaBusy) return false;
+    if (!qaTester || !authSession || !authSession.id || accountSourceRef.current !== "auth") {
+      showToast("QA tools need a signed-in tester account");
+      return false;
+    }
+    if (typeof saveHavenProProfile !== "function") return false;
+    setQaBusy(true);
+    let res = null;
+    try {
+      const snapshot = Object.assign({}, buildHavenProWorkspaceSnapshot(), patch);
+      res = await saveHavenProProfile(authSession.id, snapshot);
+    } catch (e) {
+      res = null;
+    }
+    setQaBusy(false);
+    if (!res || !res.ok) {
+      showToast("Haven didn't accept that QA change");
+      return false;
+    }
+    if (patch.identityVerification) setIdentityVerification(patch.identityVerification);
+    if (patch.backgroundCheck) setBackgroundCheck(patch.backgroundCheck);
+    if (patch.payoutAccount) setPayoutAccount(patch.payoutAccount);
+    if (patch.taxProfile) setTaxProfile(patch.taxProfile);
+    if (label) showToast(label);
+    return true;
+  }
   function devSetIdentityStatus(status) {
-    setIdentityVerification(v => ({ ...v, status, verifiedAt: status === "verified" ? Date.now() : v.verifiedAt, failureReasonCode: status === "failed" ? "dev_simulated_mismatch" : null }));
+    const v = identityVerification || {};
+    return devCommitQaWorkspace({ identityVerification: { ...v, status, verifiedAt: status === "verified" ? Date.now() : v.verifiedAt, failureReasonCode: status === "failed" ? "dev_simulated_mismatch" : null } }, "Identity set to " + status + " (QA, saved)");
   }
 
   /* ── Background Check — separate provider (Checkr) and separate consent
@@ -1539,7 +1617,8 @@ export default function HavenProApp() {
     // Then waits for the provider's report — see the Dev Testing panel below.
   }
   function devSetBackgroundStatus(status) {
-    setBackgroundCheck(v => ({ ...v, status, clearedAt: status === "clear" ? Date.now() : v.clearedAt }));
+    const v = backgroundCheck || {};
+    return devCommitQaWorkspace({ backgroundCheck: { ...v, status, clearedAt: status === "clear" ? Date.now() : v.clearedAt } }, "Background check set to " + status + " (QA, saved)");
   }
 
   /* ── Professional Credentials — uploading never auto-verifies. A
@@ -1569,11 +1648,9 @@ export default function HavenProApp() {
   function verifyProfessionalCredential(id) {
     setCredentials(prev => prev.map(c => (c.id === id ? { ...c, status: "pending" } : c)));
   }
-  function devSetCredentialStatus(id, status) {
-    setCredentials(prev => prev.map(c => (c.id === id
-      ? { ...c, status, verifiedAt: status === "verified" ? Date.now() : c.verifiedAt, verificationSource: status === "verified" ? (c.jurisdiction ? `${c.jurisdiction} registry (simulated)` : "Issuer confirmation (simulated)") : c.verificationSource }
-      : c)));
-  }
+  /* Phase 1B A2: the credential-source Dev Testing panel is removed.
+     Credentials are not stored on the server yet, so a simulated result
+     could only be a local-only advancement. */
 
   /* ── Payout Setup — Stripe-Connect-style: Haven never collects raw bank
      details or auto-enables an account. "Set Up Payouts" conceptually
@@ -1583,12 +1660,13 @@ export default function HavenProApp() {
     setPayoutAccount(v => ({ ...v, status: "pending", providerAccountId: `acct_demo_${Math.floor(10000 + Math.random() * 89999)}`, requirementsDue: ["identity_document", "bank_account"] }));
   }
   function devSetPayoutStatus(status) {
-    setPayoutAccount(v => ({
+    const v = payoutAccount || {};
+    return devCommitQaWorkspace({ payoutAccount: {
       ...v, status,
       payoutsEnabled: status === "enabled",
       requirementsDue: status === "enabled" ? [] : v.requirementsDue,
       last4: status === "enabled" ? String(Math.floor(1000 + Math.random() * 8999)) : v.last4,
-    }));
+    } }, "Payouts set to " + status + " (QA, saved)");
   }
 
   /* ── Tax Information — no TIN is ever collected, only status + safe
@@ -1608,7 +1686,23 @@ export default function HavenProApp() {
     showToast("Submitted to tax provider for verification");
   }
   function cancelTaxInfo() { setTaxDraft(null); setProfileView("main"); }
-  function devSetTaxStatus(status) { setTaxProfile(v => ({ ...v, status })); }
+  function devSetTaxStatus(status) {
+    const v = taxProfile || {};
+    return devCommitQaWorkspace({ taxProfile: { ...v, status } }, "Tax status set to " + status + " (QA, saved)");
+  }
+  /* Dev shortcut, tester only: writes the four provider results to the
+     tester's own profile on the server, then mirrors them locally. Does not
+     change the account, name, city, categories, or onboarding. */
+  function devJumpToMarketplaceReady() {
+    const now = Date.now();
+    const pa = payoutAccount || {};
+    return devCommitQaWorkspace({
+      identityVerification: { ...(identityVerification || {}), status: "verified", verifiedAt: now, failureReasonCode: null },
+      backgroundCheck: { ...(backgroundCheck || {}), status: "clear", clearedAt: now },
+      payoutAccount: { ...pa, status: "enabled", payoutsEnabled: true, requirementsDue: [], last4: pa.last4 || String(Math.floor(1000 + Math.random() * 8999)) },
+      taxProfile: { ...(taxProfile || {}), status: "verified" },
+    }, "Marketplace Ready (QA, saved)");
+  }
 
   function openEditProfile() {
     setEditDraft({ firstName, lastName, about, homeCity, avatarEmoji, avatarPhoto });
@@ -3102,12 +3196,14 @@ export default function HavenProApp() {
      of these buttons with the actual provider integration (Persona /
      Checkr / Stripe Connect / a per-credential verification adapter). */
   function devTestPanel(label, options) {
+    // Phase 1B A2: QA testers only, confirmed by the server for this session.
+    if (!qaTester || !authSession || !authSession.id || accountSourceRef.current !== "auth") return null;
     return (
       <div style={{ marginTop: 18, padding: 12, borderRadius: 10, border: `1px dashed ${T.tm}` }}>
         <div style={{ fontSize: 9.5, fontWeight: 800, color: T.tm, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8, fontFamily: "monospace" }}>⚙ Dev Testing — simulate {label} provider webhook</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {options.map((o, i) => (
-            <button key={i} onClick={o.onClick} style={{ fontSize: 10, fontWeight: 700, padding: "5px 9px", borderRadius: 7, border: `1px solid ${T.tm}`, background: "transparent", color: T.ts, cursor: "pointer", fontFamily: "monospace" }}>{o.label}</button>
+            <button key={i} onClick={o.onClick} disabled={qaBusy} style={{ fontSize: 10, fontWeight: 700, padding: "5px 9px", borderRadius: 7, border: `1px solid ${T.tm}`, background: "transparent", color: T.ts, cursor: "pointer", fontFamily: "monospace" }}>{o.label}</button>
           ))}
         </div>
       </div>
@@ -3266,12 +3362,6 @@ export default function HavenProApp() {
                 {c.status === "pending" && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.tm }}>Verifying…</span>}
                 <button onClick={() => removeCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, background: "none", border: "none", cursor: "pointer", padding: 0, marginLeft: "auto" }}>Remove</button>
               </div>
-              {devTestPanel("credential source", [
-                { label: "Verified", onClick: () => devSetCredentialStatus(c.id, "verified") },
-                { label: "Unable to Verify", onClick: () => devSetCredentialStatus(c.id, "unable_to_verify") },
-                { label: "Pending", onClick: () => devSetCredentialStatus(c.id, "pending") },
-                { label: "Expired", onClick: () => devSetCredentialStatus(c.id, "expired") },
-              ])}
             </div>
           ))}
 
@@ -3626,8 +3716,6 @@ export default function HavenProApp() {
           )}
 
           {devTestPanel("account state", [
-            { label: "Reset to Fresh Pro", onClick: resetToFreshPro },
-            { label: "Load Demo Pro", onClick: loadDemoPro },
             { label: "Jump to Marketplace Ready", onClick: devJumpToMarketplaceReady },
           ])}
         </div>

@@ -457,67 +457,6 @@ async function checkAuthCallsUnreachable() {
   }
 }
 
-// ── (c) no demo fallback: sessionless signed-in is an error, never usable ─
-async function checkSessionlessSignedInIsError() {
-  const session = { access_token: "access-token-pro", user: { id: AUTH_UID, email: "pro@example.com", user_metadata: { role: "pro" } } };
-  const state = { session };
-  const workspace = JSON.stringify({ __v: 1, byUserId: { [AUTH_UID]: {
-    onboardingStatus: "completed", onboardingStep: "done", firstName: "Ada", lastName: "Lovelace",
-    homeCity: "Orlando, FL", travelRadius: 25, workCategories: ["Plumbing"],
-  } } });
-  const app = await renderApp({ supabase: authLib(state), fetch: okFetch(), storage: { haven_pro_workspace_v1: workspace } });
-  try {
-    await waitFor(app.window, t => t.includes("My Jobs"), "signed-in app with a real session");
-    // Reach the only remaining sessionless path: Dev Testing "Load Demo Pro" (local source),
-    // then the Auth session ends (e.g. expiry) without a sign-out from this screen.
-    clickText(app.window, "Profile");
-    await sleep(30);
-    clickText(app.window, "Settings");
-    await waitFor(app.window, t => t.includes("Load Demo Pro"), "Settings");
-    clickButton(app.window, "Load Demo Pro");
-    await sleep(30);
-    state.session = null;
-    state.listeners.forEach(cb => cb("SIGNED_OUT", null));
-    await waitFor(app.window, t => t.includes(ERROR_TITLE), "sessionless signed-in shows the error");
-    assertErrorScreen(app.window, "signed-in without a session");
-    assert.ok(!rootText(app.window).includes("Not connected"), "no Not connected card");
-    const before = healthHits(app.hits).length;
-    clickButton(app.window, "Retry");
-    await waitFor(app.window, t => t.includes("Create Account") && !t.includes(ERROR_TITLE), "Retry with no session lands on signed-out Welcome");
-    assert.strictEqual(healthHits(app.hits).length, before + 1, "Retry re-attempts the connect");
-    assert.ok(!rootText(app.window).includes("My Jobs"), "no usable app without a session");
-  } finally {
-    try { app.window.close(); } catch (e) { /* ignore */ }
-  }
-
-  // Sign Out after a dev demo load still ends signed out (no local account left behind).
-  const state2 = { session };
-  const workspace2 = JSON.stringify({ __v: 1, byUserId: { [AUTH_UID]: {
-    onboardingStatus: "completed", onboardingStep: "done", firstName: "Ada", lastName: "Lovelace",
-    homeCity: "Orlando, FL", travelRadius: 25, workCategories: ["Plumbing"],
-  } } });
-  const app2 = await renderApp({ supabase: authLib(state2), fetch: okFetch(), storage: { haven_pro_workspace_v1: workspace2 } });
-  try {
-    await waitFor(app2.window, t => t.includes("My Jobs"), "signed-in app");
-    clickText(app2.window, "Profile");
-    await sleep(30);
-    clickText(app2.window, "Settings");
-    await waitFor(app2.window, t => t.includes("Load Demo Pro"), "Settings");
-    clickButton(app2.window, "Load Demo Pro");
-    await sleep(30);
-    clickText(app2.window, "Profile"); // Load Demo Pro returns to Home
-    await sleep(30);
-    clickText(app2.window, "Settings");
-    await waitFor(app2.window, () => hasButton(app2.window, "Sign Out"), "Settings with Sign Out");
-    clickButton(app2.window, "Sign Out");
-    await waitFor(app2.window, t => t.includes("Create Account"), "signed-out Welcome after Sign Out");
-    assert.ok(!rootText(app2.window).includes("My Jobs"));
-    assert.ok(!rootText(app2.window).includes(ERROR_TITLE));
-  } finally {
-    try { app2.window.close(); } catch (e) { /* ignore */ }
-  }
-}
-
 
 // ── QA fix 2: runtime key guard ──────────────────────────────────────────
 function fakeJwt(claims) {
@@ -721,7 +660,7 @@ function checkSources() {
   assert.ok(!jsx.includes("Account creation isn't available right now"), "no unavailable fallback in Create Account");
   // The only remaining "local" account sources are the Dev Testing buttons (A2 gates them).
   const localSets = jsx.split('accountSourceRef.current = "local"').length - 1;
-  assert.strictEqual(localSets, 2, "only loadDemoPro / devJumpToMarketplaceReady set a local source");
+  assert.strictEqual(localSets, 0, "no local account source remains (A2 removed the Dev Testing local sets)");
   const create = jsx.slice(jsx.indexOf("function onboardingCreateAccountScreen()"), jsx.indexOf("function onboardingAuthGateScreen()"));
   assert.ok(!create.includes('"local"'), "Create Account has no local branch");
   assert.ok(!create.includes("getSupabaseConfig()"), "Create Account does not branch on config");
@@ -745,7 +684,6 @@ async function main() {
   await checkNetworkFailureRetry();
   await checkAuthClientMissingRetry();
   await checkAuthCallsUnreachable();
-  await checkSessionlessSignedInIsError();
   await checkKeyGuard();
   await checkAdapterRestoreConfirms();
   await checkForgedSession(401);

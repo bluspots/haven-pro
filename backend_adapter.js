@@ -1183,6 +1183,78 @@ async function fetchHavenProProfile(userId) {
 }
 
 // Update the signed-in Pro's own profiles row. No insert. No other users.
+// Phase 1B A2: founder-set QA tester flag (profiles.is_qa_tester, Customer
+// migration 0024). True only when the RPC returns the JSON boolean true for
+// the signed-in session. Signed out, error, missing RPC, or any other answer
+// is false. Never reads localStorage or the email.
+async function fetchHavenIsQaTester() {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return false;
+  let actor;
+  try {
+    actor = await resolveHavenJobWriteAuth(cfg);
+  } catch (e) {
+    return false;
+  }
+  if (!actor || !actor.ok || actor.mode !== "session" || !actor.headers) return false;
+  try {
+    const res = await fetch(`${cfg.url}/rest/v1/rpc/is_qa_tester`, {
+      method: "POST",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    if (!res || !res.ok) return false;
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    return body === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Phase 1B A2: true only for the 0024 profiles_guard_qa_fields rejection
+// (PostgREST 403, errcode 42501, message "QA tester only: ..."). A plain
+// permission error (also 42501) or any other failure is not a guard rejection.
+function havenIsQaGuardRejection(status, body) {
+  if (status !== 403 || !body || typeof body !== "object") return false;
+  if (String(body.code || "") !== "42501") return false;
+  return /^QA tester only\b/.test(String(body.message || ""));
+}
+
+// Phase 1B A2: the server's pro_workspace for the signed-in Pro's own row,
+// used only to recover from a guard rejection. { ok, workspace } where
+// workspace is {} when the row has none.
+async function fetchHavenProServerWorkspace(userId) {
+  if (!userId) return { ok: false, reason: "no_user" };
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, reason: "not_configured" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok || actor.proId !== userId) return { ok: false, reason: "no_session" };
+  try {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=id,pro_workspace`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" },
+    });
+    if (!res.ok) return { ok: false, reason: "read_failed", status: res.status };
+    const text = await res.text();
+    let rows = null;
+    try { rows = text ? JSON.parse(text) : null; } catch (e) { rows = null; }
+    if (!Array.isArray(rows) || !rows.length) return { ok: false, reason: "row_missing" };
+    const ws = rows[0] && rows[0].pro_workspace && typeof rows[0].pro_workspace === "object" && !Array.isArray(rows[0].pro_workspace)
+      ? rows[0].pro_workspace
+      : {};
+    return { ok: true, workspace: ws };
+  } catch (e) {
+    return { ok: false, reason: "network_error" };
+  }
+}
+
 async function saveHavenProProfile(userId, snapshot) {
   if (!userId || !snapshot) return { ok: false, reason: "no_user" };
   const cfg = getSupabaseConfig();
@@ -1225,7 +1297,14 @@ async function saveHavenProProfile(userId, snapshot) {
       used = "legacy";
       got = await patch("legacy", toSave);
     }
-    if (!got.ok) return { ok: false, reason: "write_failed", status: got.status };
+    if (!got.ok) {
+      // Phase 1B A2: the 0024 profiles guard rejected a QA-only provider
+      // result (stale cache). The caller may refetch and retry once.
+      if (havenIsQaGuardRejection(got.status, got.body)) {
+        return { ok: false, reason: "guard_rejected", guard: true, status: got.status };
+      }
+      return { ok: false, reason: "write_failed", status: got.status };
+    }
     if (used === "located") havenProProfileSchema = "located";
     else if (used === "full") havenProProfileSchema = "full";
     const rows = Array.isArray(got.body) ? got.body : [];
