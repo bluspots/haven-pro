@@ -706,7 +706,7 @@ export default function HavenProApp() {
       console.warn("Haven Pro sign-in failed:", result.reason);
       const msg = result.reason === "not_configured"
         ? "Sign-in isn't available right now. Please try again."
-        : "Couldn't sign in. Check your email and password and try again.";
+        : "Couldn't sign in. Check your email and password, or try again in a moment.";
       setAuthNotice(msg);
       showToast(msg);
       return;
