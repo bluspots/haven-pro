@@ -648,7 +648,8 @@ export default function HavenProApp() {
     }
     setAuthBusy(false);
     if (!result.ok) {
-      const msg = result.reason || "Sign out failed";
+      console.warn("Haven Pro sign-out failed:", result.reason);
+      const msg = "Couldn't sign out. Please try again.";
       setAuthNotice(msg);
       showToast(msg);
       return;
@@ -702,9 +703,10 @@ export default function HavenProApp() {
     }
     setAuthBusy(false);
     if (!result.ok) {
+      console.warn("Haven Pro sign-in failed:", result.reason);
       const msg = result.reason === "not_configured"
         ? "Sign-in isn't available right now. Please try again."
-        : (result.reason || "Could not sign in");
+        : "Couldn't sign in. Check your email and password and try again.";
       setAuthNotice(msg);
       showToast(msg);
       return;
@@ -3699,9 +3701,10 @@ export default function HavenProApp() {
         }
         setAuthBusy(false);
         if (!result.ok) {
+          console.warn("Haven Pro sign-up failed:", result.reason);
           const msg = result.reason === "not_configured"
             ? "Account creation isn't available right now. Please try again."
-            : (result.reason || "Could not create account");
+            : "Couldn't create your account. Please try again.";
           setAuthNotice(msg);
           showToast(msg);
           return;
