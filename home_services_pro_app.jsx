@@ -3477,7 +3477,7 @@ export default function HavenProApp() {
       detail = "Signed in";
     } else if (accountStatus === "signed_in") {
       title = "Not connected";
-      detail = "This device isn't connected to Haven yet. Jobs and updates won't be saved.";
+      detail = "This device isn't connected to Haven yet. Jobs and updates stay on this device and won't reach customers.";
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
@@ -3530,7 +3530,7 @@ export default function HavenProApp() {
             <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
               {authBusy ? "Signing out…" : "Sign Out"}
             </button>
-          ) : (
+          ) : accountStatus === "signed_in" ? null : (
             <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
           )}
 
