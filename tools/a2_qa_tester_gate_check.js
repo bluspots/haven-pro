@@ -522,6 +522,9 @@ async function checkSameTabSwitch() {
     clickText(window, "Settings");
     await waitFor(window, () => !!findButton(window, "Sign Out"), "Settings Sign Out");
     findButton(window, "Sign Out").click();
+    // Sign Out asks for confirmation first.
+    await waitFor(window, () => !!window.document.querySelector('[role="dialog"][aria-labelledby="hp-signout-title"]'), "sign-out confirmation");
+    Array.from(window.document.querySelectorAll('[role="dialog"] button')).find(b => (b.textContent || "").trim() === "Sign out").click();
     await waitFor(window, t => t.includes("Signed out"), "signed out");
     // A non-tester signs in on the same tab.
     const before = be.events.length;
