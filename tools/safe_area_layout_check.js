@@ -83,8 +83,8 @@ async function render(width) {
     console.log("(3) Home-indicator inset applied once");
     const jsx = read("home_services_pro_app.jsx");
     const nav = jsx.slice(jsx.indexOf("function bottomNav()"), jsx.indexOf("function pill("));
-    ok(/padding:\s*"8px 4px calc\(10px \+ env\(safe-area-inset-bottom\)\)"/.test(nav), "bottom nav pads the home indicator itself");
-    ok(/\.hp-scroll \{[^}]*padding-bottom:\s*calc\(84px \+ env\(safe-area-inset-bottom\)\)/.test(jsx), ".hp-scroll content clears the nav and home indicator");
+    ok(/padding:\s*"6px 4px max\(6px, calc\(env\(safe-area-inset-bottom\) - 12px\)\)"/.test(nav), "bottom nav pads the home indicator itself (low, Instagram-style height)");
+    ok(/\.hp-scroll \{[^}]*padding-bottom:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/.test(jsx), ".hp-scroll content clears the nav and home indicator");
 
     console.log("(4) Shell");
     ok(/name="viewport"[^>]*viewport-fit=cover/.test(read("_shell_pre_pro.txt")), "viewport-fit=cover kept (env() insets work)");

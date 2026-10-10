@@ -1762,8 +1762,10 @@ export default function HavenProApp() {
           display: "flex",
           borderTop: `1px solid ${T.bd}`,
           background: T.w,
-          // Respect iOS home-indicator safe area
-          padding: "8px 4px calc(10px + env(safe-area-inset-bottom))",
+          // Sits low like native iOS tab bars (e.g. Instagram): icons ~52pt
+          // above the screen edge on Face ID iPhones, labels still clear of
+          // the home indicator. 6px minimum on phones without an inset.
+          padding: "6px 4px max(6px, calc(env(safe-area-inset-bottom) - 12px))",
         }}
       >
         {items.map(it => {
@@ -1773,7 +1775,7 @@ export default function HavenProApp() {
               key={it.key}
               className="hp-tab-btn"
               onClick={() => goTab(it.key)}
-              style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "6px 0" }}
+              style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "5px 0" }}
             >
               <span style={{ fontSize: 20, opacity: active ? 1 : 0.55, filter: active ? "none" : "grayscale(35%)" }}>{it.icon}</span>
               <span style={{ fontSize: 11, fontWeight: active ? 700 : 500, color: active ? T.pg : T.tm, fontFamily: FONT }}>{it.label}</span>
@@ -4346,7 +4348,7 @@ export default function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
-    .hp-scroll { scrollbar-width: none; padding-bottom: calc(84px + env(safe-area-inset-bottom)) !important; }
+    .hp-scroll { scrollbar-width: none; padding-bottom: calc(60px + env(safe-area-inset-bottom)) !important; }
     .hp-tab-btn { background:none; border:none; cursor:pointer; }
     .hp-accept-btn:active { transform: scale(0.97); }
     .hp-toggle:active { transform: scale(0.98); }
