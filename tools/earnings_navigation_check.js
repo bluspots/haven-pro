@@ -119,6 +119,22 @@ async function swipe(w, el, from, to) {
   touch(w, el, "touchend", to[0], to[1]);
   await sleep(40);
 }
+// Swipe-back is an interactive edge gesture driven by pointer events
+// (tools/swipe_back_check.js covers it in depth). jsdom has no PointerEvent,
+// so these are MouseEvents with the pointer fields added.
+function ptr(w, el, type, x, y) {
+  const ev = new w.MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
+  Object.defineProperty(ev, "pointerId", { value: 1 });
+  Object.defineProperty(ev, "isPrimary", { value: true });
+  Object.defineProperty(ev, "pointerType", { value: "touch" });
+  el.dispatchEvent(ev);
+}
+async function edgeSwipe(w, el, from, to) {
+  ptr(w, el, "pointerdown", from[0], from[1]);
+  for (let i = 1; i <= 20; i++) { await sleep(20); ptr(w, el, "pointermove", from[0] + (to[0] - from[0]) * i / 20, from[1] + (to[1] - from[1]) * i / 20); }
+  ptr(w, el, "pointerup", to[0], to[1]);
+  await sleep(360); // slide-out animation
+}
 function chartEl(w) { return w.document.querySelector("[data-earnings-chart]"); }
 function chartTitle(w) {
   const el = chartEl(w);
@@ -194,7 +210,7 @@ function backButton(w) {
 
     firstLedgerRow(w).dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
     await waitFor(w, t => t.includes("Job Earnings Statement"), "statement again");
-    await swipe(w, scroller(w), [20, 400], [220, 410]); // swipe back
+    await edgeSwipe(w, scroller(w), [10, 400], [220, 410]); // swipe back from the left edge
     await waitFor(w, t => !t.includes("Job Earnings Statement") && !!chartEl(w), "back on main after swipe");
     ok(scroller(w).scrollTop === 640, "swipe back returns to the same scroll position (640)");
 
