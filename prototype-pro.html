@@ -2051,6 +2051,7 @@ function HavenProApp() {
   function goTab(t) {
     setTab(t);
     setEarningsStack([{ view: "main" }]);
+    earningsScrollMemory.current = {};
     setMyJobsStack([{ view: "list" }]);
     setMessagesStack([{ view: "list" }]);
     setMaterialsDraft(null);
@@ -2623,8 +2624,38 @@ function HavenProApp() {
     return () => { cancelled = true; };
   }, [authSession && authSession.id]);
 
-  function pushEarnings(view) { setEarningsStack(prev => [...prev, view]); }
-  function popEarnings() { setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
+  // Earnings remembers each level's scroll position: opening a detail
+  // starts at the top, and Back (button or swipe) returns to the same spot.
+  // The selected period and bar stay as they were (they're screen state,
+  // not part of the stack).
+  const earningsScrollMemory = useRef({});
+  const earningsRestoreDepth = useRef(null);
+  function earningsScrollEl() {
+    return typeof document !== "undefined" ? document.querySelector("[data-earnings-scroll]") : null;
+  }
+  function pushEarnings(view) {
+    const el = earningsScrollEl();
+    if (el) earningsScrollMemory.current[earningsStack.length - 1] = el.scrollTop;
+    setEarningsStack(prev => [...prev, view]);
+  }
+  function popEarnings() {
+    if (earningsStack.length <= 1) return;
+    earningsRestoreDepth.current = earningsStack.length - 2;
+    setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev));
+  }
+  // Runs before paint so nothing visibly jumps. Every Earnings screen uses
+  // the same scroll container element, so React can reuse it between
+  // screens; a new screen therefore has to be reset to the top explicitly.
+  React.useLayoutEffect(() => {
+    const depth = earningsStack.length - 1;
+    const restoreDepth = earningsRestoreDepth.current;
+    earningsRestoreDepth.current = null;
+    const el = earningsScrollEl();
+    if (!el) return;
+    // Back restores; anything else (opening a screen, tapping the Earnings
+    // tab, even when already on it) starts at the top.
+    el.scrollTop = restoreDepth != null ? (earningsScrollMemory.current[restoreDepth] || 0) : 0;
+  }, [earningsStack]);
   const currentEarningsView = earningsStack[earningsStack.length - 1];
 
   function pushMyJobs(view) { setMyJobsStack(prev => [...prev, view]); }
@@ -4135,19 +4166,30 @@ function HavenProApp() {
     return computeWeekBuckets(ts);
   }
 
-  const periodSwipeStartX = useRef(null);
+  // A swipe only counts when it's clearly horizontal (at least 50px across
+  // and twice as far across as up/down), so scrolling the page never flips
+  // the chart by accident.
+  const periodSwipeStart = useRef(null);
+  function isHorizontalSwipe(dx, dy) { return Math.abs(dx) >= 50 && Math.abs(dx) >= 2 * Math.abs(dy); }
   function periodSwipeHandlers() {
     const order = ["week", "month", "year"];
     return {
-      onTouchStart: e => { periodSwipeStartX.current = e.touches[0].clientX; },
-      onTouchEnd: e => {
-        if (periodSwipeStartX.current == null) return;
-        const dx = e.changedTouches[0].clientX - periodSwipeStartX.current;
-        const idx = order.indexOf(earningsPeriod);
-        if (dx < -50 && idx < order.length - 1) setEarningsPeriod(order[idx + 1]); // swipe left -> next (coarser)
-        else if (dx > 50 && idx > 0) setEarningsPeriod(order[idx - 1]); // swipe right -> previous (finer)
-        periodSwipeStartX.current = null;
+      onTouchStart: e => {
+        const t = e.touches[0];
+        periodSwipeStart.current = e.touches.length === 1 ? { x: t.clientX, y: t.clientY } : null;
       },
+      onTouchEnd: e => {
+        const start = periodSwipeStart.current;
+        periodSwipeStart.current = null;
+        if (!start) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - start.x, dy = t.clientY - start.y;
+        if (!isHorizontalSwipe(dx, dy)) return;
+        const idx = order.indexOf(earningsPeriod);
+        if (dx < 0 && idx < order.length - 1) setEarningsPeriod(order[idx + 1]); // swipe left -> next (coarser)
+        else if (dx > 0 && idx > 0) setEarningsPeriod(order[idx - 1]); // swipe right -> previous (finer)
+      },
+      onTouchCancel: () => { periodSwipeStart.current = null; },
     };
   }
   function clickBucket(bucket) {
@@ -4233,7 +4275,7 @@ function HavenProApp() {
     const sortedJobs = [...categoryFilteredJobs].sort((a, b) => b.completedAt - a.completedAt); // most-recent-first for the general ledger
 
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", position: "relative" }}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto", position: "relative" }}>
         {screenHeader("Earnings")}
         <div style={{ padding: "0 20px 32px" }}>
           {/* Swipeable period chart — swipe right for coarser (Week -> Month -> Year), left to go back */}
@@ -4346,7 +4388,7 @@ function HavenProApp() {
     });
     const months = Object.values(byMonth).sort((a, b) => b.sortTs - a.sortTs);
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader("Monthly Breakdown", popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           {months.map((m, i) => (
@@ -4390,7 +4432,7 @@ function HavenProApp() {
     for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader(monthLabel(firstOfMonth.getTime()), popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, marginBottom: 8 }}>
@@ -4431,7 +4473,7 @@ function HavenProApp() {
       .sort((a, b) => a.completedAt - b.completedAt); // order completed
     const label = new Date(year, month, day).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader(label, popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           {dayJobs.length === 0
@@ -4505,7 +4547,7 @@ function HavenProApp() {
     if (!job) return monthlyBreakdownScreen();
     const statement = earningsStatements.find(s => s.jobId === jobId);
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader("Job Earnings Statement", popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           {earningsStatementBody(job)}
