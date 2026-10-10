@@ -2176,7 +2176,7 @@ export default function HavenProApp() {
                 onChange={e => updateActiveJob(job.id, { jobNotes: e.target.value })}
                 placeholder="e.g. Replaced worn fill valve. Customer asked me to leave old part in garage."
                 rows={2}
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 13, fontFamily: FONT, outline: "none", resize: "none", marginBottom: 14 }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", resize: "none", marginBottom: 14 }}
               />
               <div style={{ fontSize: 12, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 10 }}>Photos (Optional)</div>
               <div style={{ display: "flex", gap: 10 }}>
@@ -2239,14 +2239,14 @@ export default function HavenProApp() {
                 value={it.name}
                 onChange={e => updateItem(i, "name", e.target.value)}
                 placeholder="Material name"
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none", marginBottom: 8 }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", marginBottom: 8 }}
               />
               <input
                 value={it.cost}
                 onChange={e => updateItem(i, "cost", e.target.value.replace(/[^0-9.]/g, ""))}
                 placeholder="Cost ($)"
                 inputMode="decimal"
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none" }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
               />
             </div>
           ))}
@@ -2288,7 +2288,7 @@ export default function HavenProApp() {
               onChange={e => set("cost", e.target.value.replace(/[^0-9.]/g, ""))}
               placeholder="$"
               inputMode="decimal"
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
             />
           </div>
           <div style={{ marginBottom: 18 }}>
@@ -2909,7 +2909,7 @@ export default function HavenProApp() {
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") onSend(); }}
           placeholder="Type a message…"
-          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none" }}
+          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
         />
         <button onClick={onSend} style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: T.pgb, color: "#fff", fontSize: 16, cursor: "pointer", flexShrink: 0 }}>➤</button>
       </div>
@@ -3021,7 +3021,7 @@ export default function HavenProApp() {
           placeholder={placeholder}
           inputMode={inputMode}
           type={type || "text"}
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
         />
       </div>
     );
@@ -3520,7 +3520,7 @@ export default function HavenProApp() {
             value={value}
             onChange={e => onChange(e.target.value)}
             placeholder={placeholder}
-            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
           />
         </div>
       );
@@ -3558,7 +3558,7 @@ export default function HavenProApp() {
               value={d.about}
               onChange={e => set("about", e.target.value)}
               rows={4}
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none", resize: "none" }}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", resize: "none" }}
             />
           </div>
           {field("Home Operating City", d.homeCity, v => set("homeCity", v), "City, ST")}
@@ -4026,7 +4026,7 @@ export default function HavenProApp() {
             onChange={e => setAbout(e.target.value)}
             placeholder="A sentence or two about your experience"
             rows={3}
-            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none", resize: "none" }}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", resize: "none" }}
           />
         </div>
       </>
