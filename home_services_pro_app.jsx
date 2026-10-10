@@ -140,7 +140,11 @@ export default function HavenProApp() {
   const [supportInput, setSupportInput] = useState("");
   const [materialsDraft, setMaterialsDraft] = useState(null); // { jobId, items:[{name,cost}] } while filling out a request
   const [receiptDraft, setReceiptDraft] = useState(null); // { jobId, cost, photo } while submitting a post-purchase receipt
-  const [earningsPeriod, setEarningsPeriod] = useState("week"); // week | month | year — swipeable on the chart panel
+  const [earningsPeriod, setEarningsPeriod] = useState("week"); // week | month | year — picked with the toggle under the chart
+  // Which week/month/year the chart shows: null = the current one (follows
+  // the clock), otherwise any timestamp inside the period being viewed.
+  // Swiping the chart moves it one period at a time.
+  const [earningsAnchor, setEarningsAnchor] = useState(null);
   const [selectedBucket, setSelectedBucket] = useState(null); // { start, end, fullLabel } — inline swap on the main screen's chart, any period
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("all");
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
@@ -421,6 +425,7 @@ export default function HavenProApp() {
     setReceiptDraft(null);
     setSelectedBucket(null);
     setEarningsPeriod("week");
+    setEarningsAnchor(null);
     setProfileView("main");
     setEditDraft(null);
     setCategoriesDraft(null);
@@ -467,6 +472,7 @@ export default function HavenProApp() {
     setCategoriesDraft(null);
     setSelectedBucket(null);
     setEarningsPeriod("week");
+    setEarningsAnchor(null);
     setLedgerCategoryFilter("all");
     setMaterialsDraft(null);
     setReceiptDraft(null);
@@ -2556,30 +2562,109 @@ export default function HavenProApp() {
     return computeWeekBuckets(ts);
   }
 
+  // ── Earnings time navigation ──
+  // The chart shows one week, month or year. Swipe left for the next
+  // (newer) period, right for the previous (older) one, or use the ‹ ›
+  // buttons. It stops at the current period and at the period of the first
+  // completed job. The totals come from the same bucket functions as
+  // before; only the date they're anchored to changes.
+  function periodStart(period, ts) {
+    const d = new Date(ts);
+    if (period === "year") return new Date(d.getFullYear(), 0, 1).getTime();
+    if (period === "month") return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    return startOfWeek(ts);
+  }
+  function shiftPeriod(period, ts, dir) {
+    const d = new Date(ts);
+    if (period === "week") { d.setDate(d.getDate() + 7 * dir); return d.getTime(); }
+    const y = d.getFullYear() + (period === "year" ? dir : 0);
+    const m = d.getMonth() + (period === "month" ? dir : 0);
+    const last = new Date(y, m + 1, 0).getDate();
+    return new Date(y, m, Math.min(d.getDate(), last), d.getHours(), d.getMinutes()).getTime();
+  }
+  function earningsNav() {
+    const anchor = earningsAnchor == null ? now : earningsAnchor;
+    const start = periodStart(earningsPeriod, anchor);
+    const currentStart = periodStart(earningsPeriod, now);
+    const firstJobAt = completedJobsHistory.length ? Math.min(...completedJobsHistory.map(j => j.completedAt)) : now;
+    const earliestStart = periodStart(earningsPeriod, Math.min(firstJobAt, now));
+    const lastStart = periodStart(earningsPeriod, shiftPeriod(earningsPeriod, now, -1));
+    return {
+      anchor,
+      isCurrent: start >= currentStart,
+      isLast: start === lastStart,
+      canPrev: start > earliestStart,
+      canNext: start < currentStart,
+    };
+  }
+  function goEarningsPeriod(dir) {
+    const nav = earningsNav();
+    if (dir < 0 ? !nav.canPrev : !nav.canNext) return false;
+    const next = shiftPeriod(earningsPeriod, nav.anchor, dir);
+    setEarningsAnchor(periodStart(earningsPeriod, next) >= periodStart(earningsPeriod, now) ? null : next);
+    return true;
+  }
+  function selectEarningsPeriod(p) {
+    if (p === earningsPeriod) return;
+    // Keep the date being viewed: last week -> the month that week is in.
+    if (earningsAnchor != null && periodStart(p, earningsAnchor) >= periodStart(p, now)) setEarningsAnchor(null);
+    setEarningsPeriod(p);
+  }
+
   // A swipe only counts when it's clearly horizontal (at least 50px across
-  // and twice as far across as up/down), so scrolling the page never flips
-  // the chart by accident.
+  // and twice as far across as up/down), so scrolling the page never moves
+  // the chart by accident. The card follows the finger once the gesture is
+  // clearly sideways (touch-action: pan-y leaves vertical scrolling to the
+  // browser), then slides to the next period or springs back.
   const periodSwipeStart = useRef(null);
+  const periodSlideRef = useRef(null);
   function isHorizontalSwipe(dx, dy) { return Math.abs(dx) >= 50 && Math.abs(dx) >= 2 * Math.abs(dy); }
+  function reducedMotion() {
+    try { return typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; }
+  }
+  function slideTo(x, ms) {
+    const el = periodSlideRef.current;
+    if (!el) return;
+    el.style.transition = ms ? `transform ${ms}ms ease-out` : "none";
+    el.style.transform = x ? `translateX(${x}px)` : "";
+  }
   function periodSwipeHandlers() {
-    const order = ["week", "month", "year"];
     return {
       onTouchStart: e => {
         const t = e.touches[0];
-        periodSwipeStart.current = e.touches.length === 1 ? { x: t.clientX, y: t.clientY } : null;
+        periodSwipeStart.current = e.touches.length === 1 ? { x: t.clientX, y: t.clientY, lock: null } : null;
+      },
+      onTouchMove: e => {
+        const st = periodSwipeStart.current;
+        if (!st) return;
+        const t = e.touches[0];
+        const dx = t.clientX - st.x, dy = t.clientY - st.y;
+        if (!st.lock && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) st.lock = Math.abs(dx) > Math.abs(dy) * 1.2 ? "h" : "v";
+        if (st.lock !== "h" || reducedMotion()) return;
+        const nav = earningsNav();
+        const blocked = dx < 0 ? !nav.canNext : !nav.canPrev;
+        slideTo(blocked ? dx * 0.25 : dx, 0); // resist at the ends
       },
       onTouchEnd: e => {
-        const start = periodSwipeStart.current;
+        const st = periodSwipeStart.current;
         periodSwipeStart.current = null;
-        if (!start) return;
+        if (!st) return;
         const t = e.changedTouches[0];
-        const dx = t.clientX - start.x, dy = t.clientY - start.y;
-        if (!isHorizontalSwipe(dx, dy)) return;
-        const idx = order.indexOf(earningsPeriod);
-        if (dx < 0 && idx < order.length - 1) setEarningsPeriod(order[idx + 1]); // swipe left -> next (coarser)
-        else if (dx > 0 && idx > 0) setEarningsPeriod(order[idx - 1]); // swipe right -> previous (finer)
+        const dx = t.clientX - st.x, dy = t.clientY - st.y;
+        const dir = dx < 0 ? 1 : -1; // swipe left -> newer, right -> older
+        const nav = earningsNav();
+        const allowed = dir > 0 ? nav.canNext : nav.canPrev;
+        if (!isHorizontalSwipe(dx, dy) || !allowed) { slideTo(0, 180); return; }
+        if (reducedMotion() || !periodSlideRef.current) { goEarningsPeriod(dir); slideTo(0, 0); return; }
+        const w = periodSlideRef.current.offsetWidth || 320;
+        slideTo(dir > 0 ? -w : w, 140);
+        setTimeout(() => {
+          goEarningsPeriod(dir);
+          slideTo(dir > 0 ? w * 0.35 : -w * 0.35, 0);
+          setTimeout(() => slideTo(0, 160), 16);
+        }, 140);
       },
-      onTouchCancel: () => { periodSwipeStart.current = null; },
+      onTouchCancel: () => { periodSwipeStart.current = null; slideTo(0, 180); },
     };
   }
   function clickBucket(bucket) {
@@ -2646,10 +2731,14 @@ export default function HavenProApp() {
       return (<div style={{ flex: 1, display: "flex", flexDirection: "column" }}>{screenHeader("Earnings")}{emptyState("💵", "No completed payouts yet", "Every job you complete — payout, materials, and tips — will show up here, job by job.")}</div>);
     }
 
-    const { buckets, rangeLabel, highlightIndex } = periodData(earningsPeriod, now);
+    const nav = earningsNav();
+    const { buckets, rangeLabel } = periodData(earningsPeriod, nav.anchor);
+    // "Today" is only highlighted when the chart shows the current period.
+    const highlightIndex = buckets.findIndex(b => now >= b.start && now < b.end);
     const periodTotal = buckets.reduce((a, b) => a + b.total, 0);
     const maxBucket = Math.max(1, ...buckets.map(b => b.total));
-    const periodTitle = { week: "This Week", month: "This Month", year: "This Year" }[earningsPeriod];
+    const periodName = { week: "Week", month: "Month", year: "Year" }[earningsPeriod];
+    const periodTitle = nav.isCurrent ? `This ${periodName}` : nav.isLast ? `Last ${periodName}` : periodName;
     const lifetimeTotal = completedJobsHistory.reduce((sum, j) => sum + jobAmount(j).net, 0);
     const totalDurationHrs = completedJobsHistory.reduce((sum, j) => sum + j.durationMin, 0) / 60;
     const avgPerHour = totalDurationHrs > 0 ? Math.round(lifetimeTotal / totalDurationHrs) : 0;
@@ -2668,11 +2757,16 @@ export default function HavenProApp() {
       <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto", position: "relative" }}>
         {screenHeader("Earnings")}
         <div style={{ padding: "0 20px 32px" }}>
-          {/* Swipeable period chart — swipe right for coarser (Week -> Month -> Year), left to go back */}
-          <div {...periodSwipeHandlers()} style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+          {/* Period chart — swipe left/right (or ‹ ›) to move through time; the toggle below picks Week / Month / Year */}
+          <div {...periodSwipeHandlers()} data-earnings-chart style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 14, overflow: "hidden", touchAction: "pan-y" }}>
+            <div ref={periodSlideRef}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
               <div style={{ fontSize: 12, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3 }}>{periodTitle}</div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: T.tm, fontFamily: FONT }}>{rangeLabel}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <button onClick={() => goEarningsPeriod(-1)} disabled={!nav.canPrev} aria-label={`Previous ${periodName.toLowerCase()}`} className="hp-nav-btn" style={{ width: 26, height: 26, border: "none", background: "none", color: T.tm, fontSize: 18, lineHeight: 1, cursor: nav.canPrev ? "pointer" : "default", opacity: nav.canPrev ? 1 : 0.3, padding: 0 }}>‹</button>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.tm, fontFamily: FONT, fontVariantNumeric: "tabular-nums" }}>{rangeLabel}</div>
+                <button onClick={() => goEarningsPeriod(1)} disabled={!nav.canNext} aria-label={`Next ${periodName.toLowerCase()}`} className="hp-nav-btn" style={{ width: 26, height: 26, border: "none", background: "none", color: T.tm, fontSize: 18, lineHeight: 1, cursor: nav.canNext ? "pointer" : "default", opacity: nav.canNext ? 1 : 0.3, padding: 0 }}>›</button>
+              </div>
             </div>
             <div style={{ fontSize: 30, fontWeight: 900, color: T.pg, fontFamily: FONT, marginBottom: 16 }}>${periodTotal}</div>
             <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 90, marginBottom: 6 }}>
@@ -2702,10 +2796,14 @@ export default function HavenProApp() {
                 <div key={i} style={{ flex: 1, textAlign: "center", fontSize: 10.5, fontWeight: i === highlightIndex ? 800 : 600, color: i === highlightIndex ? T.pg : T.tm }}>{b.label}</div>
               ))}
             </div>
-            <div style={{ display: "flex", justifyContent: "center", gap: 6 }}>
-              {["week", "month", "year"].map(p => (
-                <div key={p} style={{ width: 6, height: 6, borderRadius: 3, background: earningsPeriod === p ? T.pg : T.bd }} />
-              ))}
+            </div>
+            <div role="tablist" aria-label="Earnings period" style={{ display: "flex", gap: 3, background: T.bg, border: `1px solid ${T.bd}`, borderRadius: 10, padding: 3 }}>
+              {[["week", "Week"], ["month", "Month"], ["year", "Year"]].map(([p, label]) => {
+                const on = earningsPeriod === p;
+                return (
+                  <button key={p} role="tab" aria-selected={on} onClick={() => selectEarningsPeriod(p)} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", background: on ? T.w : "transparent", boxShadow: on ? "0 1px 2px rgba(15,26,23,.12)" : "none", color: on ? T.pg : T.ts, fontSize: 12, fontWeight: on ? 800 : 600, fontFamily: FONT, cursor: "pointer" }}>{label}</button>
+                );
+              })}
             </div>
           </div>
 

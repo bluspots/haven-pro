@@ -119,16 +119,30 @@ async function swipe(w, el, from, to) {
   touch(w, el, "touchend", to[0], to[1]);
   await sleep(40);
 }
-function period(w) {
-  const t = text(w);
-  return /This Year/i.test(t) ? "year" : /This Month/i.test(t) ? "month" : /This Week/i.test(t) ? "week" : "?";
+function chartEl(w) { return w.document.querySelector("[data-earnings-chart]"); }
+function chartTitle(w) {
+  const el = chartEl(w);
+  const t = el && Array.from(el.querySelectorAll("div")).find(d => d.children.length === 0 && /^(This |Last )?(Week|Month|Year)$/i.test((d.textContent || "").trim()));
+  return t ? t.textContent.trim() : "?";
 }
-function chartEl(w) {
-  // The period card: the element that renders the "This Week/Month/Year" title.
-  const title = Array.from(w.document.querySelectorAll("#root div")).find(d => d.children.length === 0 && /^This (Week|Month|Year)$/i.test((d.textContent || "").trim()));
-  if (!title) throw new Error("no period title");
-  return title.parentElement.parentElement;
+function chartRange(w) {
+  const el = chartEl(w);
+  const r = el && Array.from(el.querySelectorAll("div")).find(d => d.children.length === 0 && /\d+\/\d+\/\d+ - |^[A-Z][a-z]+ \d{4}$|^\d{4}$/.test((d.textContent || "").trim()));
+  return r ? r.textContent.trim() : "?";
 }
+function chartTotal(w) {
+  const el = chartEl(w);
+  const t = el && Array.from(el.querySelectorAll("div")).find(d => d.children.length === 0 && /^\$\d+$/.test((d.textContent || "").trim()));
+  return t ? t.textContent.trim() : "?";
+}
+function selectedScale(w) {
+  const b = Array.from(chartEl(w).querySelectorAll('[role="tab"]')).find(x => x.getAttribute("aria-selected") === "true");
+  return b ? b.textContent.trim() : "?";
+}
+function clickEl(w, el) { el.dispatchEvent(new w.MouseEvent("click", { bubbles: true })); }
+function scaleTab(w, label) { return Array.from(chartEl(w).querySelectorAll('[role="tab"]')).find(x => x.textContent.trim() === label); }
+function navBtn(w, label) { return chartEl(w).querySelector(`button[aria-label="${label}"]`); }
+async function chartSwipe(w, from, to) { await swipe(w, chartEl(w), from, to); await sleep(420); } // slide animation
 function firstLedgerRow(w) {
   return Array.from(scroller(w).querySelectorAll("button")).find(b => /Faucet|Repair|Install|Mounting|Cleaning|Assembly|Cooling/.test(b.textContent || "") && /\$/.test(b.textContent || ""));
 }
@@ -143,16 +157,30 @@ function backButton(w) {
     tab(w, "Earnings");
     await waitFor(w, t => /This Week/i.test(t) && /Completed Jobs/.test(t), "Earnings main with sample history");
 
-    console.log("(5) Chart swipe ignores diagonal drags");
-    ok(period(w) === "week", "starts on Week");
-    await swipe(w, chartEl(w), [300, 300], [220, 360]); // 80 across, 60 down
-    ok(period(w) === "week", "diagonal drag (80px across, 60px down) does not change the period");
-    await swipe(w, chartEl(w), [300, 300], [300, 420]); // vertical
-    ok(period(w) === "week", "vertical drag does not change the period");
-    await swipe(w, chartEl(w), [300, 300], [210, 310]); // clear horizontal swipe left
-    ok(period(w) === "month", "clear horizontal swipe still changes the period (Week → Month)");
+    console.log("(5) Swiping moves through time; the toggle picks the scale");
+    ok(chartTitle(w) === "This Week" && selectedScale(w) === "Week", "starts on This Week");
+    const thisWeekRange = chartRange(w), thisWeekTotal = chartTotal(w);
+    ok(navBtn(w, "Next week").disabled, "› (next) is disabled on the current week");
+    await chartSwipe(w, [300, 300], [220, 360]); // 80 across, 60 down
+    ok(chartTitle(w) === "This Week", "diagonal drag (80px across, 60px down) does not move the chart");
+    await chartSwipe(w, [300, 300], [300, 420]);
+    ok(chartTitle(w) === "This Week", "vertical drag does not move the chart");
+    await chartSwipe(w, [300, 300], [210, 310]); // swipe left: newer, blocked at current
+    ok(chartTitle(w) === "This Week" && chartRange(w) === thisWeekRange, "swipe left on the current week stays put (no future periods)");
+    await chartSwipe(w, [120, 300], [230, 306]); // swipe right: older
+    ok(chartTitle(w) === "Last Week" && chartRange(w) !== thisWeekRange, "swipe right shows Last Week (" + chartRange(w) + ")");
+    ok(selectedScale(w) === "Week", "scale stays Week while swiping");
+    await chartSwipe(w, [300, 300], [190, 304]); // swipe left: back to newer
+    ok(chartTitle(w) === "This Week" && chartTotal(w) === thisWeekTotal, "swipe left returns to This Week with the same total (" + thisWeekTotal + ")");
+    clickEl(w, scaleTab(w, "Month"));
+    await sleep(40);
+    ok(chartTitle(w) === "This Month" && selectedScale(w) === "Month", "toggle switches to Month");
+    clickEl(w, navBtn(w, "Previous month"));
+    await sleep(40);
+    ok(chartTitle(w) === "Last Month", "‹ shows Last Month (" + chartRange(w) + ")");
+    const lastMonthRange = chartRange(w);
 
-    console.log("(1)(2)(3) Detail starts at top; Back restores scroll and period");
+    console.log("(1)(2)(3) Detail starts at top; Back restores scroll, scale and period");
     scroller(w).scrollTop = 640;
     const row = firstLedgerRow(w);
     ok(!!row, "ledger has a job row to open");
@@ -160,14 +188,14 @@ function backButton(w) {
     await waitFor(w, t => t.includes("Job Earnings Statement"), "statement");
     ok(scroller(w).scrollTop === 0, "statement opens at the top");
     backButton(w).dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
-    await waitFor(w, t => /This Month/i.test(t), "back on main");
+    await waitFor(w, t => !t.includes("Job Earnings Statement") && !!chartEl(w), "back on main");
     ok(scroller(w).scrollTop === 640, "‹ Back returns to the same scroll position (640)");
-    ok(period(w) === "month", "selected period (Month) kept after Back");
+    ok(selectedScale(w) === "Month" && chartTitle(w) === "Last Month" && chartRange(w) === lastMonthRange, "Month scale and the viewed month (" + lastMonthRange + ") kept after Back");
 
     firstLedgerRow(w).dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
     await waitFor(w, t => t.includes("Job Earnings Statement"), "statement again");
     await swipe(w, scroller(w), [20, 400], [220, 410]); // swipe back
-    await waitFor(w, t => /This Month/i.test(t), "back on main after swipe");
+    await waitFor(w, t => !t.includes("Job Earnings Statement") && !!chartEl(w), "back on main after swipe");
     ok(scroller(w).scrollTop === 640, "swipe back returns to the same scroll position (640)");
 
     console.log("(4) Tapping the Earnings tab resets to the top");
@@ -181,6 +209,14 @@ function backButton(w) {
     tab(w, "Earnings");
     await sleep(40);
     ok(scroller(w).scrollTop === 0, "tapping the Earnings tab while already on it scrolls to the top");
+
+    console.log("(6) Limits");
+    clickEl(w, scaleTab(w, "Year"));
+    await sleep(40);
+    ok(chartTitle(w) === "This Year", "Year scale shows This Year (the viewed September is in it)");
+    ok(navBtn(w, "Previous year").disabled && navBtn(w, "Next year").disabled, "‹ and › are disabled: no completed jobs before this year, no future years");
+    await chartSwipe(w, [120, 300], [240, 304]);
+    ok(chartTitle(w) === "This Year", "swipe right past the first completed job's year stays put");
 
     w.close();
     console.log("OK: earnings navigation checks passed (" + passed + " assertions).");
