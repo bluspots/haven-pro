@@ -1937,6 +1937,9 @@ function HavenProApp() {
   const [qaBusy, setQaBusy] = useState(false);
   const qaSeqRef = useRef(0);
   const [authBusy, setAuthBusy] = useState(false);
+  // Sign Out asks first (Settings and the signed-in onboarding card).
+  const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
+  const signOutInFlight = useRef(false);
   const [authNotice, setAuthNotice] = useState("");
   const [welcomeAuthView, setWelcomeAuthView] = useState("home"); // home | signIn | confirmEmail
   const [signInDraft, setSignInDraft] = useState({ email: "", password: "" });
@@ -2321,7 +2324,19 @@ function HavenProApp() {
     setOnboardingStep("welcome");
     setWelcomeAuthView("home");
   }
+  // Both Sign Out buttons call this. It only opens the confirmation;
+  // performProSignOut runs the existing sign-out flow.
   async function signOutHavenAccount() {
+    if (authBusy || !authSession) return;
+    setShowSignOutConfirm(true);
+  }
+  function cancelProSignOut() {
+    if (signOutInFlight.current) return;
+    setShowSignOutConfirm(false);
+  }
+  async function performProSignOut() {
+    if (signOutInFlight.current || authBusy || !authSession) return;
+    signOutInFlight.current = true;
     setAuthBusy(true);
     let result;
     try {
@@ -2330,6 +2345,8 @@ function HavenProApp() {
       result = { ok: false, reason: (e && e.message) || "signout_failed" };
     }
     setAuthBusy(false);
+    setShowSignOutConfirm(false);
+    signOutInFlight.current = false;
     if (!result.ok) {
       console.warn("Haven Pro sign-out failed:", result.reason);
       const msg = "Couldn't sign out. Please try again.";
@@ -5927,6 +5944,24 @@ function HavenProApp() {
     );
   }
 
+  function signOutConfirmSheet() {
+    if (!showSignOutConfirm || !authSession) return null;
+    return (
+      <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.35)", zIndex: 40, display: "flex", alignItems: "flex-end" }} onClick={cancelProSignOut}>
+        <div role="dialog" aria-modal="true" aria-labelledby="hp-signout-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === "Escape") cancelProSignOut(); }} style={{ background: T.w, width: "100%", borderRadius: "22px 22px 0 0", padding: "18px 20px 28px", paddingBottom: "max(28px, env(safe-area-inset-bottom))" }}>
+          <div style={{ width: 36, height: 4, borderRadius: 3, background: T.bd, margin: "0 auto 16px" }} />
+          <div id="hp-signout-title" style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT, textAlign: "center", marginBottom: 6 }}>Sign out of Haven Pro?</div>
+          <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5, marginBottom: 18 }}>You'll need to sign in again to see and claim jobs.</div>
+          <button type="button" onClick={() => { void performProSignOut(); }} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: authBusy ? T.bd : "#B42318", color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", marginBottom: 10 }}>
+            {authBusy ? "Signing out…" : "Sign out"}
+          </button>
+          <button type="button" autoFocus onClick={cancelProSignOut} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.ts, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
   function toastEl() {
     if (!toast) return null;
     return (
@@ -5993,6 +6028,7 @@ function HavenProApp() {
             )}
           </div>
           {!connectionBlocked && !needsOnboarding && bottomNav()}
+          {signOutConfirmSheet()}
           {toastEl()}
         </div>
       </div>
