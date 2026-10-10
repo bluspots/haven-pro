@@ -4538,8 +4538,8 @@ export default function HavenProApp() {
         // Respect iOS safe areas when launched standalone. No bottom padding
         // here: the bottom nav pads itself for the home indicator (its
         // background runs to the screen edge, like a native tab bar), and
-        // .hp-scroll pads its content to clear the nav.
-        paddingTop: "env(safe-area-inset-top)",
+        // .hp-scroll pads its content to clear the nav. The top inset is a
+        // dark strip (statusBarStrip below), not padding.
         paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",
       };
@@ -4551,6 +4551,13 @@ export default function HavenProApp() {
     <>
       <style>{CSS}</style>
       <div className="haven-pro-frame-outer" style={outerStyle}>
+        {/* Behind the iPhone status bar. The installed app uses a translucent
+            status bar, which iOS always draws in white, so this strip stays
+            dark in both themes (Haven Pro's #0b1a16, the same color as the
+            splash screen and theme-color). Zero height where there's no inset. */}
+        {!showFrameChrome && (
+          <div className="hp-status-strip" aria-hidden="true" style={{ flexShrink: 0, height: "env(safe-area-inset-top)", background: STATUS_BAR_BG }} />
+        )}
         <div className="hp-phone-frame" style={frameStyle}>
           <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
             {connectionBlocked ? connectionScreen() : needsOnboarding ? onboardingScreen() : (
