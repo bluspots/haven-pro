@@ -2005,7 +2005,7 @@ function HavenProApp() {
   }
 
   const toastTimer = useRef(null);
-  const swipeStartX = useRef(null);
+  const swipeStart = useRef(null);
   const materialsTimers = useRef({});
   useEffect(() => () => { Object.values(materialsTimers.current).forEach(clearTimeout); }, []);
   // Timers fire well after the render that scheduled them, so they can't
@@ -2669,15 +2669,42 @@ function HavenProApp() {
 
   /* ── Swipe-right-to-go-back — same gesture as the Customer App. Only
      meaningful on a screen that has somewhere to go back to. ── */
+  // Swipe right to go back. Only a clearly horizontal swipe counts (at least
+  // 60px right and twice as far across as up/down), so a slightly diagonal
+  // scroll never throws you back a screen. Ignored when it starts in a text
+  // field, in anything that scrolls sideways, or in an element marked
+  // data-no-swipe-back.
+  function swipeBackBlocked(target) {
+    for (let el = target; el && el.nodeType === 1; el = el.parentElement) {
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (el.hasAttribute && el.hasAttribute("data-no-swipe-back")) return true;
+      if (el.scrollWidth > el.clientWidth + 1 && typeof window !== "undefined" && window.getComputedStyle) {
+        // Only rows that scroll sideways (not the vertical page scroller,
+        // whose overflow-x also computes to "auto").
+        const cs = window.getComputedStyle(el);
+        const scrollsX = cs.overflowX === "auto" || cs.overflowX === "scroll";
+        const scrollsY = cs.overflowY === "auto" || cs.overflowY === "scroll";
+        if (scrollsX && !scrollsY) return true;
+      }
+    }
+    return false;
+  }
   function swipeBackHandlers(onBack) {
     return {
-      onTouchStart: e => { swipeStartX.current = e.touches[0].clientX; },
-      onTouchEnd: e => {
-        if (swipeStartX.current == null) return;
-        const dx = e.changedTouches[0].clientX - swipeStartX.current;
-        if (dx > 60) onBack();
-        swipeStartX.current = null;
+      onTouchStart: e => {
+        const t = e.touches[0];
+        swipeStart.current = e.touches.length === 1 && !swipeBackBlocked(e.target) ? { x: t.clientX, y: t.clientY } : null;
       },
+      onTouchEnd: e => {
+        const start = swipeStart.current;
+        swipeStart.current = null;
+        if (!start) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - start.x, dy = t.clientY - start.y;
+        if (dx >= 60 && dx >= 2 * Math.abs(dy)) onBack();
+      },
+      onTouchCancel: () => { swipeStart.current = null; },
     };
   }
 
