@@ -255,6 +255,8 @@ const LIGHT = {
   emTx: "#C2410C", emBg: "#FFF1EE", emBd: "#FFD4C7",
   dxTx: "#43536B", dxBg: "#EEF1F5", dxBd: "#D7DEE6",
   soonBg: "#EDEFEC",
+  // "You're Online" card. Same deep green in both themes.
+  online: "#0F6E4E",
 };
 const DARK = {
   bg: "#111815", w: "#1A2320", tx: "#EDF3EF", ts: "#9FB3AA", tm: "#5E7368", bd: "#293832",
@@ -262,6 +264,8 @@ const DARK = {
   emTx: "#FF8A65", emBg: "#3A1F14", emBd: "#5C2E1C",
   dxTx: "#AEBBD1", dxBg: "#232B36", dxBd: "#333F4E",
   soonBg: "#22302B",
+  // Deep green, not the brighter dark-mode accent (founder: it read as neon).
+  online: "#0F6E4E",
 };
 
 // Geocoder boundary. Callers use havenGeocodeAddress only.
@@ -3585,7 +3589,7 @@ function HavenProApp() {
           <button
             className="hp-toggle"
             onClick={() => setOnline(o => !o)}
-            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.pg : T.soonBg, transition: "background .18s ease" }}
+            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.online : T.soonBg, transition: "background .18s ease" }}
           >
             <div style={{ textAlign: "left" }}>
               <div style={{ fontSize: 15, fontWeight: 800, color: online ? "#FFFFFF" : T.tx, fontFamily: FONT }}>{online ? "You're Online" : "You're Offline"}</div>

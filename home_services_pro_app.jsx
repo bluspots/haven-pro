@@ -1948,7 +1948,7 @@ export default function HavenProApp() {
           <button
             className="hp-toggle"
             onClick={() => setOnline(o => !o)}
-            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.pg : T.soonBg, transition: "background .18s ease" }}
+            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.online : T.soonBg, transition: "background .18s ease" }}
           >
             <div style={{ textAlign: "left" }}>
               <div style={{ fontSize: 15, fontWeight: 800, color: online ? "#FFFFFF" : T.tx, fontFamily: FONT }}>{online ? "You're Online" : "You're Offline"}</div>

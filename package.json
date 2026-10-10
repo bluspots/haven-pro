@@ -6,7 +6,7 @@
   "scripts": {
     "build": "bash ./build-pro.sh",
     "boot-check": "node tools/boot_check.js",
-    "verify": "npm run build && npm run boot-check && node tools/auth_slice1_check.js && node tools/auth_slice2_check.js && node tools/a1_backend_connect_check.js && node tools/a2_qa_tester_gate_check.js && node tools/ios_input_zoom_check.js && node tools/signout_confirmation_check.js && node tools/safe_area_layout_check.js && node tools/earnings_navigation_check.js && node tools/swipe_back_check.js"
+    "verify": "npm run build && npm run boot-check && node tools/auth_slice1_check.js && node tools/auth_slice2_check.js && node tools/a1_backend_connect_check.js && node tools/a2_qa_tester_gate_check.js && node tools/ios_input_zoom_check.js && node tools/signout_confirmation_check.js && node tools/safe_area_layout_check.js && node tools/earnings_navigation_check.js && node tools/swipe_back_check.js && node tools/online_card_check.js"
   },
   "devDependencies": {
     "@babel/core": "^7.26.0",
