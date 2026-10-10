@@ -2010,7 +2010,6 @@ function HavenProApp() {
   }
 
   const toastTimer = useRef(null);
-  const swipeStart = useRef(null);
   const materialsTimers = useRef({});
   useEffect(() => () => { Object.values(materialsTimers.current).forEach(clearTimeout); }, []);
   // Timers fire well after the render that scheduled them, so they can't
@@ -2056,7 +2055,8 @@ function HavenProApp() {
   function goTab(t) {
     setTab(t);
     setEarningsStack([{ view: "main" }]);
-    earningsScrollMemory.current = {};
+    scrollMemory.current = {};
+    setTabResetTick(n => n + 1);
     setMyJobsStack([{ view: "list" }]);
     setMessagesStack([{ view: "list" }]);
     setMaterialsDraft(null);
@@ -2631,38 +2631,8 @@ function HavenProApp() {
     return () => { cancelled = true; };
   }, [authSession && authSession.id]);
 
-  // Earnings remembers each level's scroll position: opening a detail
-  // starts at the top, and Back (button or swipe) returns to the same spot.
-  // The selected period and bar stay as they were (they're screen state,
-  // not part of the stack).
-  const earningsScrollMemory = useRef({});
-  const earningsRestoreDepth = useRef(null);
-  function earningsScrollEl() {
-    return typeof document !== "undefined" ? document.querySelector("[data-earnings-scroll]") : null;
-  }
-  function pushEarnings(view) {
-    const el = earningsScrollEl();
-    if (el) earningsScrollMemory.current[earningsStack.length - 1] = el.scrollTop;
-    setEarningsStack(prev => [...prev, view]);
-  }
-  function popEarnings() {
-    if (earningsStack.length <= 1) return;
-    earningsRestoreDepth.current = earningsStack.length - 2;
-    setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev));
-  }
-  // Runs before paint so nothing visibly jumps. Every Earnings screen uses
-  // the same scroll container element, so React can reuse it between
-  // screens; a new screen therefore has to be reset to the top explicitly.
-  React.useLayoutEffect(() => {
-    const depth = earningsStack.length - 1;
-    const restoreDepth = earningsRestoreDepth.current;
-    earningsRestoreDepth.current = null;
-    const el = earningsScrollEl();
-    if (!el) return;
-    // Back restores; anything else (opening a screen, tapping the Earnings
-    // tab, even when already on it) starts at the top.
-    el.scrollTop = restoreDepth != null ? (earningsScrollMemory.current[restoreDepth] || 0) : 0;
-  }, [earningsStack]);
+  function pushEarnings(view) { setEarningsStack(prev => [...prev, view]); }
+  function popEarnings() { setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
   const currentEarningsView = earningsStack[earningsStack.length - 1];
 
   function pushMyJobs(view) { setMyJobsStack(prev => [...prev, view]); }
@@ -2674,18 +2644,201 @@ function HavenProApp() {
   const currentMessagesView = messagesStack[messagesStack.length - 1];
 
 
-  /* ── Swipe-right-to-go-back — same gesture as the Customer App. Only
-     meaningful on a screen that has somewhere to go back to. ── */
-  // Swipe right to go back. Only a clearly horizontal swipe counts (at least
-  // 60px right and twice as far across as up/down), so a slightly diagonal
-  // scroll never throws you back a screen. Ignored when it starts in a text
-  // field, in anything that scrolls sideways, or in an element marked
-  // data-no-swipe-back.
+  /* ── Scroll memory — every screen remembers where it was scrolled.
+     Opening a screen starts at the top; Back (button or swipe) returns to
+     the same spot. Tapping a tab starts that tab fresh. ── */
+  const PROFILE_PARENT = {
+    settings: "main", notifications: "settings", helpSupport: "settings", supportChat: "helpSupport",
+    verificationCenter: "main", identity: "verificationCenter", backgroundCheck: "verificationCenter",
+    credentials: "verificationCenter", payout: "main", taxInfo: "main", edit: "main", categories: "main",
+  };
+  function profileDepth(v) { let d = 0; for (let p = v; PROFILE_PARENT[p]; p = PROFILE_PARENT[p]) d++; return d; }
+  function stackFor(t) { return t === "earnings" ? earningsStack : t === "jobs" ? myJobsStack : t === "messages" ? messagesStack : null; }
+  const screenDepth = tab === "profile" ? profileDepth(profileView) : (stackFor(tab) ? stackFor(tab).length - 1 : 0);
+  const screenKey = tab === "profile" ? "profile:" + profileView : tab + ":" + screenDepth;
+  const scrollMemory = useRef({});
+  const [tabResetTick, setTabResetTick] = useState(0);
+  const screenRef = useRef({ key: screenKey, tab, depth: screenDepth });
+  const swipeLayerRef = useRef(null);
+  const underlayRef = useRef(null);
+  // The scrolling area of a screen: its .hp-scroll, or the first element
+  // that scrolls vertically (the message thread).
+  function scrollerIn(root) {
+    if (!root) return null;
+    const el = root.querySelector(".hp-scroll");
+    if (el) return el;
+    if (typeof window === "undefined" || !window.getComputedStyle) return null;
+    for (const c of root.querySelectorAll("div")) {
+      const oy = window.getComputedStyle(c).overflowY;
+      if (oy === "auto" || oy === "scroll") return c;
+    }
+    return null;
+  }
+  function rememberScroll() {
+    const el = scrollerIn(swipeLayerRef.current);
+    if (el) scrollMemory.current[screenRef.current.key] = el.scrollTop;
+  }
+  // Every navigation starts from a tap, key press or swipe, so recording on
+  // those (capture phase, before the app's own handlers run) always saves
+  // the position of the screen being left.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const evs = ["pointerdown", "touchstart", "mousedown", "click", "keydown"];
+    evs.forEach(ev => document.addEventListener(ev, rememberScroll, true));
+    document.addEventListener("scroll", rememberScroll, true);
+    return () => {
+      evs.forEach(ev => document.removeEventListener(ev, rememberScroll, true));
+      document.removeEventListener("scroll", rememberScroll, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Before paint, so nothing visibly jumps. Screens share scroll container
+  // elements, so React can reuse one between screens; a new screen has to
+  // be reset to the top explicitly.
+  React.useLayoutEffect(() => {
+    const prev = screenRef.current;
+    screenRef.current = { key: screenKey, tab, depth: screenDepth };
+    const isBack = prev.tab === tab && screenDepth < prev.depth;
+    const el = scrollerIn(swipeLayerRef.current);
+    if (!el) return;
+    el.scrollTop = isBack ? (scrollMemory.current[screenKey] || 0) : 0;
+  }, [screenKey, tabResetTick]);
+
+  /* ── Interactive swipe-back — the same gesture as the Customer app.
+     Drag right from the left edge: the screen follows the finger and the
+     previous screen shows underneath (slight parallax and dim, like iOS).
+     Pause to peek, drag back to cover it again. Release past ~35% of the
+     width (or with a quick flick) to finish; otherwise it slides back.
+     Finishing calls the screen's own Back action, the same one its ‹ button
+     uses, exactly once. ── */
+  const EDGE_ZONE_PX = 24;
+  const EDGE_COMMIT_PROGRESS = 0.35;  // past ~35% of the width
+  const EDGE_COMMIT_VELOCITY = 0.55;  // px/ms: a quick flick finishes even if short
+  const EDGE_SETTLE_MS = 280;
+  const IDLE_EDGE = { phase: "idle", dragX: 0, width: 390, settleTo: 0, dest: null, destKey: null };
+  const [edgeBack, setEdgeBack] = useState(IDLE_EDGE);
+  const edgeRef = useRef({ phase: "idle" });
+  const edgeTimer = useRef(null);
+  // The visible screen registers its Back action while it renders (see
+  // swipeBackHandlers); the previous screen drawn underneath does not.
+  const backActionRef = useRef(null);
+  const renderingUnderlay = useRef(false);
+  const backDestRef = useRef(null);
+  function backDestination() {
+    if (tab === "profile") {
+      const p = PROFILE_PARENT[profileView];
+      return p ? { view: p, key: "profile:" + p } : null;
+    }
+    const s = stackFor(tab);
+    return s && s.length > 1 ? { view: s[s.length - 2], key: tab + ":" + (s.length - 2) } : null;
+  }
+  function renderTabView(view) {
+    if (tab === "earnings") return earningsScreen(view);
+    if (tab === "jobs") return jobsScreen(view);
+    if (tab === "messages") return messagesScreen(view);
+    if (tab === "profile") return profileScreen(view);
+    return null;
+  }
+  function prefersReducedMotion() {
+    try { return typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; }
+  }
+  function edgeNow() { return typeof performance !== "undefined" ? performance.now() : Date.now(); }
+  function settleEdgeBack(to) {
+    const g = edgeRef.current;
+    if (g.phase !== "tracking" && g.phase !== "dragging") return;
+    if (g.phase === "tracking") { edgeRef.current = { phase: "idle" }; setEdgeBack(IDLE_EDGE); return; }
+    edgeRef.current = { ...g, phase: "settling" };
+    setEdgeBack(e => ({ ...e, phase: "settling", settleTo: to }));
+    clearTimeout(edgeTimer.current);
+    edgeTimer.current = setTimeout(() => {
+      const onBack = to === 1 ? g.onBack : null;
+      edgeRef.current = { phase: "idle" };
+      setEdgeBack(IDLE_EDGE);
+      if (onBack) onBack();
+    }, prefersReducedMotion() ? 0 : EDGE_SETTLE_MS);
+  }
+  useEffect(() => () => clearTimeout(edgeTimer.current), []);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onDown = e => {
+      const g = edgeRef.current;
+      // A second finger (pinch) cancels a swipe in progress.
+      if (!e.isPrimary || (g.phase !== "idle" && e.pointerId !== g.pointerId)) { settleEdgeBack(0); return; }
+      if (g.phase !== "idle") return; // still finishing the last swipe
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      const layer = swipeLayerRef.current;
+      const onBack = backActionRef.current, dest = backDestRef.current;
+      if (!layer || !onBack || !dest || !layer.contains(e.target)) return;
+      const r = layer.getBoundingClientRect();
+      if (e.clientX - r.left > EDGE_ZONE_PX || e.clientX < r.left) return;
+      if (swipeBackBlocked(e.target)) return;
+      edgeRef.current = { phase: "tracking", pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastT: edgeNow(), vx: 0, dragX: 0, width: r.width || 390, onBack };
+      setEdgeBack({ phase: "tracking", dragX: 0, width: r.width || 390, settleTo: 0, dest: dest.view, destKey: dest.key });
+    };
+    const onMove = e => {
+      const g = edgeRef.current;
+      if ((g.phase !== "tracking" && g.phase !== "dragging") || e.pointerId !== g.pointerId) return;
+      const dx = e.clientX - g.startX, dy = e.clientY - g.startY, t = edgeNow();
+      if (g.phase === "tracking") {
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+          // Direction locked on this move: measure speed from here, not from
+          // the touch-down point, or the first reading is inflated.
+          const dragX = Math.max(0, Math.min(g.width, dx));
+          edgeRef.current = { ...g, phase: "dragging", lastX: e.clientX, lastT: t, dragX };
+          setEdgeBack(s => ({ ...s, phase: "dragging", dragX }));
+        } else if (Math.abs(dy) > 10) {
+          // Mostly vertical: it's a scroll. Hand it to the page.
+          edgeRef.current = { phase: "idle" };
+          setEdgeBack(IDLE_EDGE);
+        }
+        return;
+      }
+      if (e.cancelable) e.preventDefault();
+      const vx = (e.clientX - g.lastX) / Math.max(1, t - g.lastT);
+      const dragX = Math.max(0, Math.min(g.width, dx));
+      edgeRef.current = { ...g, lastX: e.clientX, lastT: t, vx, dragX };
+      setEdgeBack(s => ({ ...s, dragX }));
+    };
+    const onUp = e => {
+      const g = edgeRef.current;
+      if ((g.phase !== "tracking" && g.phase !== "dragging") || e.pointerId !== g.pointerId) return;
+      if (g.phase === "tracking") { settleEdgeBack(0); return; }
+      const progress = g.dragX / g.width;
+      // Moving back toward the edge on release means "never mind".
+      const commit = (progress >= EDGE_COMMIT_PROGRESS && g.vx > -0.3) || g.vx >= EDGE_COMMIT_VELOCITY;
+      settleEdgeBack(commit ? 1 : 0);
+    };
+    // The browser took the touch over (scroll or pinch): slide back, never go back.
+    const onCancel = e => { const g = edgeRef.current; if (e.pointerId === g.pointerId) settleEdgeBack(0); };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("pointermove", onMove, { passive: false });
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onCancel);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onCancel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // The previous screen underneath shows where it was scrolled.
+  React.useLayoutEffect(() => {
+    if (!edgeBack.destKey) return;
+    const el = scrollerIn(underlayRef.current);
+    if (el) el.scrollTop = scrollMemory.current[edgeBack.destKey] || 0;
+  }, [edgeBack.destKey]);
+
+  // A swipe never starts in a text field, in anything that scrolls
+  // sideways, in the Earnings chart (it has its own swipe), in an element
+  // that handles its own touches (touch-action: none), or in an element
+  // marked data-no-swipe-back.
   function swipeBackBlocked(target) {
     for (let el = target; el && el.nodeType === 1; el = el.parentElement) {
       const tag = el.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
-      if (el.hasAttribute && el.hasAttribute("data-no-swipe-back")) return true;
+      if (el.hasAttribute && (el.hasAttribute("data-no-swipe-back") || el.hasAttribute("data-earnings-chart"))) return true;
+      if ((el.style && el.style.touchAction === "none") || /touch-action:\s*none/.test(el.getAttribute("style") || "")) return true;
       if (el.scrollWidth > el.clientWidth + 1 && typeof window !== "undefined" && window.getComputedStyle) {
         // Only rows that scroll sideways (not the vertical page scroller,
         // whose overflow-x also computes to "auto").
@@ -2697,22 +2850,11 @@ function HavenProApp() {
     }
     return false;
   }
+  // A screen with a Back action calls this while rendering, passing the same
+  // function its ‹ button uses; the edge swipe above calls it on release.
   function swipeBackHandlers(onBack) {
-    return {
-      onTouchStart: e => {
-        const t = e.touches[0];
-        swipeStart.current = e.touches.length === 1 && !swipeBackBlocked(e.target) ? { x: t.clientX, y: t.clientY } : null;
-      },
-      onTouchEnd: e => {
-        const start = swipeStart.current;
-        swipeStart.current = null;
-        if (!start) return;
-        const t = e.changedTouches[0];
-        const dx = t.clientX - start.x, dy = t.clientY - start.y;
-        if (dx >= 60 && dx >= 2 * Math.abs(dy)) onBack();
-      },
-      onTouchCancel: () => { swipeStart.current = null; },
-    };
+    if (!renderingUnderlay.current) backActionRef.current = onBack;
+    return { "data-swipe-back": "" };
   }
 
   function showToast(msg) {
@@ -4124,8 +4266,7 @@ function HavenProApp() {
     );
   }
 
-  function jobsScreen() {
-    const v = currentMyJobsView;
+  function jobsScreen(v = currentMyJobsView) {
     if (v.view === "detail") return activeJobDetailScreen(v.jobId);
     if (v.view === "materials") return materialsFormScreen();
     if (v.view === "receipt") return receiptFormScreen();
@@ -4698,8 +4839,7 @@ function HavenProApp() {
     );
   }
 
-  function earningsScreen() {
-    const v = currentEarningsView;
+  function earningsScreen(v = currentEarningsView) {
     if (v.view === "monthly") return monthlyBreakdownScreen();
     if (v.view === "calendar") return calendarScreen(v.monthKey);
     if (v.view === "day") return dayDetailScreen(v.dateKey);
@@ -4790,8 +4930,7 @@ function HavenProApp() {
     );
   }
 
-  function messagesScreen() {
-    const v = currentMessagesView;
+  function messagesScreen(v = currentMessagesView) {
     if (v.view === "thread") return messageThreadScreen(v.jobId);
     return messagesListScreen();
   }
@@ -5547,19 +5686,19 @@ function HavenProApp() {
     );
   }
 
-  function profileScreen() {
-    if (profileView === "edit" && editDraft) return editProfileScreen();
-    if (profileView === "categories" && categoriesDraft) return manageCategoriesScreen();
-    if (profileView === "settings") return settingsScreen();
-    if (profileView === "notifications") return notificationsScreen();
-    if (profileView === "helpSupport") return helpSupportScreen();
-    if (profileView === "supportChat") return supportChatScreen();
-    if (profileView === "verificationCenter") return verificationCenterScreen();
-    if (profileView === "identity") return identityScreen();
-    if (profileView === "backgroundCheck") return backgroundCheckScreen();
-    if (profileView === "credentials") return credentialsScreen();
-    if (profileView === "payout") return payoutScreen();
-    if (profileView === "taxInfo" && taxDraft) return taxInfoScreen();
+  function profileScreen(view = profileView) {
+    if (view === "edit" && editDraft) return editProfileScreen();
+    if (view === "categories" && categoriesDraft) return manageCategoriesScreen();
+    if (view === "settings") return settingsScreen();
+    if (view === "notifications") return notificationsScreen();
+    if (view === "helpSupport") return helpSupportScreen();
+    if (view === "supportChat") return supportChatScreen();
+    if (view === "verificationCenter") return verificationCenterScreen();
+    if (view === "identity") return identityScreen();
+    if (view === "backgroundCheck") return backgroundCheckScreen();
+    if (view === "credentials") return credentialsScreen();
+    if (view === "payout") return payoutScreen();
+    if (view === "taxInfo" && taxDraft) return taxInfoScreen();
     return profileMainScreen();
   }
 
@@ -6153,6 +6292,9 @@ function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
+    /* Vertical scrolling and pinch zoom stay with the browser; a sideways
+       drag stays with the app, so the edge swipe isn't cancelled. */
+    [data-swipe-host], [data-swipe-foreground], .hp-scroll { touch-action: pan-y; touch-action: pan-y pinch-zoom; }
     .hp-scroll { scrollbar-width: none; padding-bottom: calc(60px + env(safe-area-inset-bottom)) !important; }
     .hp-tab-btn { background:none; border:none; cursor:pointer; }
     .hp-accept-btn:active { transform: scale(0.97); }
@@ -6160,6 +6302,47 @@ function HavenProApp() {
     .hp-chip:active { transform: scale(0.96); }
     .hp-nav-btn:active { transform: scale(0.92); }
   `;
+
+  // The visible screen (it registers its Back action as it renders), then
+  // the previous screen underneath while an edge swipe is in progress.
+  backActionRef.current = null;
+  const foregroundScreen = connectionBlocked ? connectionScreen() : needsOnboarding ? onboardingScreen() : (
+    <>
+      {tab === "home" && homeScreen()}
+      {tab === "jobs" && jobsScreen()}
+      {tab === "earnings" && earningsScreen()}
+      {tab === "messages" && messagesScreen()}
+      {tab === "profile" && profileScreen()}
+    </>
+  );
+  backDestRef.current = connectionBlocked || needsOnboarding ? null : backDestination();
+  const edgeAnimated = edgeBack.phase !== "idle" && !prefersReducedMotion();
+  const edgeSettling = edgeBack.phase === "settling";
+  const edgeW = edgeBack.width || 390;
+  const edgeProgress = edgeSettling ? edgeBack.settleTo : Math.max(0, Math.min(1, edgeBack.dragX / edgeW));
+  const edgeX = edgeAnimated ? (edgeSettling ? (edgeBack.settleTo === 1 ? edgeW : 0) : edgeBack.dragX) : 0;
+  const edgeEase = edgeSettling ? `${EDGE_SETTLE_MS}ms cubic-bezier(0.32,0.72,0,1)` : null;
+  let swipeUnderlay = null;
+  if (edgeAnimated && edgeBack.dest) {
+    renderingUnderlay.current = true;
+    let under = null;
+    try { under = renderTabView(edgeBack.dest); } finally { renderingUnderlay.current = false; }
+    swipeUnderlay = (
+      <div ref={underlayRef} data-swipe-underlay="" aria-hidden="true" inert=""
+        style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", background: T.bg, zIndex: 0, pointerEvents: "none",
+          transform: `translateX(${-0.25 * edgeW * (1 - edgeProgress)}px)`, transition: edgeEase ? "transform " + edgeEase : "none" }}>
+        {under}
+        <div style={{ position: "absolute", inset: 0, background: "#000", opacity: 0.18 * (1 - edgeProgress), pointerEvents: "none", transition: edgeEase ? "opacity " + edgeEase : "none" }} />
+      </div>
+    );
+  }
+  const swipeForegroundStyle = {
+    flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: T.bg, zIndex: 1,
+    position: edgeAnimated ? "absolute" : "relative", inset: edgeAnimated ? 0 : "auto",
+    transform: edgeAnimated ? `translateX(${edgeX}px)` : "none",
+    transition: edgeEase ? "transform " + edgeEase : "none",
+    boxShadow: edgeAnimated && edgeX > 0 ? "-8px 0 24px rgba(0,0,0,.15)" : "none",
+  };
 
   // Compute outer and inner frame styles to support full-bleed on phones
   const outerStyle = showFrameChrome
@@ -6190,16 +6373,11 @@ function HavenProApp() {
       <style>{CSS}</style>
       <div className="haven-pro-frame-outer" style={outerStyle}>
         <div className="hp-phone-frame" style={frameStyle}>
-          <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            {connectionBlocked ? connectionScreen() : needsOnboarding ? onboardingScreen() : (
-              <>
-                {tab === "home" && homeScreen()}
-                {tab === "jobs" && jobsScreen()}
-                {tab === "earnings" && earningsScreen()}
-                {tab === "messages" && messagesScreen()}
-                {tab === "profile" && profileScreen()}
-              </>
-            )}
+          <div data-swipe-host style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
+            {swipeUnderlay}
+            <div ref={swipeLayerRef} data-swipe-foreground style={swipeForegroundStyle}>
+              {foregroundScreen}
+            </div>
           </div>
           {!connectionBlocked && !needsOnboarding && bottomNav()}
           {signOutConfirmSheet()}
