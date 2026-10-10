@@ -75,10 +75,7 @@ async function render(width) {
     const src = read("home_services_pro_app.jsx");
     const phoneOuter = src.slice(src.indexOf("const outerStyle = showFrameChrome"), src.indexOf("const frameStyle = showFrameChrome"));
     const phoneOuterBranch = phoneOuter.slice(phoneOuter.indexOf(": {"));
-    // The status-bar inset is taken by a dark strip (hp-status-strip) instead of padding.
-    ok(/paddingTop:\s*"env\(safe-area-inset-top\)"/.test(phoneOuterBranch) ||
-       /className="hp-status-strip"[^>]*height:\s*"env\(safe-area-inset-top\)"/.test(src),
-       "the status-bar inset is reserved above the app frame");
+    ok(/paddingTop:\s*"env\(safe-area-inset-top\)"/.test(phoneOuterBranch), "outer container pads the status-bar inset");
     ok(!/paddingBottom:\s*"env\(safe-area-inset-bottom\)"/.test(phoneOuterBranch), "outer container does not pad the home-indicator inset");
     ok(/flex:\s*1/.test(fsx) && !/100dvh/.test(fsx), "app frame fills the remaining space (flex: 1, no own 100dvh)");
     w.close();

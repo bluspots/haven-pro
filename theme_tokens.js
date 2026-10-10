@@ -6,11 +6,6 @@
 
 const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
 
-// Behind the iPhone status bar in both themes. iOS draws the translucent
-// status bar in white, so this must stay dark. Same as theme-color and the
-// manifest's splash background.
-const STATUS_BAR_BG = "#0b1a16";
-
 const LIGHT = {
   bg: "#F3F4F1", w: "#FFFFFF", tx: "#16211D", ts: "#57645D", tm: "#94A39B", bd: "#DEE5DF",
   pg: "#0F6E4E", pgd: "#0A4F38", pgt: "#E7F4EC", pgb: "#16A34A",
