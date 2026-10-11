@@ -193,7 +193,7 @@ export default function HavenProApp() {
         const backendStatus = row.status;
         if (backendStatus === "materials_approved" && currentJob.status === "materials_requested") {
           updateActiveJob(job.id, { status: "materials_approved" });
-          showToast(`Customer approved materials for ${currentJob.title} — go ahead and purchase, then submit your receipt`);
+          showToast(`Materials approved for ${currentJob.title}. Buy them, then add your receipt to be reimbursed.`);
         } else if (backendStatus === "inspection_completed" && currentJob.status !== "inspection_completed") {
           const cents = typeof row.inspection_fee_cents === "number" ? row.inspection_fee_cents : Math.round(((currentJob.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
           const fee = Math.round(cents / 100);
@@ -208,7 +208,7 @@ export default function HavenProApp() {
           const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
           if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
-          showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
+          showToast(`Customer declined materials, so the job couldn't be finished. You're paid a $${conv} convenience fee.`);
           setMyJobsStack([{ view: "list" }]);
         } else if (
           (backendStatus === "in_progress" || backendStatus === "complete") &&
@@ -1578,7 +1578,7 @@ export default function HavenProApp() {
       updateActiveJob(jobId, localUpdates);
       setReceiptDraft(null);
       popMyJobs();
-      showToast("Receipt submitted — reimbursement added, job continues");
+      showToast("Receipt added. Your materials will be reimbursed in full. You can keep working on the job.");
     } finally {
       submittingReceiptRef.current = false;
     }
@@ -1621,8 +1621,8 @@ export default function HavenProApp() {
     setTimeout(() => {
       const lower = text.toLowerCase();
       let reply = "Thanks for reaching out! This is a demo of Haven Support chat — a real team member will follow up here once this is connected to live support.";
-      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept — it's exactly what you receive, no fee deducted. Materials and tips are 100% yours too.";
-      else if (lower.includes("material")) reply = "Once a customer approves your materials request, buy it, then submit the actual cost and a receipt photo in the app — you're reimbursed 100%.";
+      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.";
+      else if (lower.includes("material")) reply = "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed in full.";
       else if (lower.includes("categor")) reply = "You can update your Work Categories anytime from Profile — only jobs in your enabled categories show up on your board.";
       setSupportMessages(prev => [...prev, { from: "support", text: reply, at: Date.now() }]);
     }, 1400);
@@ -2231,7 +2231,7 @@ export default function HavenProApp() {
     if (job.status === "materials_approved") {
       return (
         <div>
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 8, textAlign: "center" }}>Approved to purchase — go buy it, then submit your receipt to get reimbursed.</div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 8, textAlign: "center" }}>Approved. Buy the materials, then add your receipt to be reimbursed.</div>
           <button style={{ ...btnStyle(true), width: "100%" }} onClick={() => openReceiptForm(job.id)}>Submit Receipt</button>
         </div>
       );
@@ -2455,7 +2455,7 @@ export default function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(cancelMaterialsForm)}>
         {backHeader("Request Materials", cancelMaterialsForm)}
         <div style={{ padding: "0 20px 32px" }}>
-          {job && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 }}>For {job.title} — the customer reviews and approves this before you buy anything. 100% of approved cost is reimbursed to you.</div>}
+          {job && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 }}>For {job.title} — the customer approves this before you buy anything. You're reimbursed in full for what you buy.</div>}
           {materialsDraft.items.map((it, i) => (
             <div key={i} style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -2505,7 +2505,7 @@ export default function HavenProApp() {
         <div style={{ padding: "0 20px 32px" }}>
           {job && (
             <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 }}>
-              For {job.title}. Enter what you actually paid — it can differ from the estimate — and attach a photo of the receipt. The customer covers this cost; it's reimbursed to you 100%, no platform fee.
+              For {job.title}. Enter what you actually paid (it can differ from the estimate) and add a photo of the receipt. The customer covers this cost, and you're reimbursed in full with no fee taken out.
             </div>
           )}
           <div style={{ marginBottom: 16 }}>
@@ -3002,7 +3002,7 @@ export default function HavenProApp() {
           )}
 
           <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 4, lineHeight: 1.5 }}>
-            The payout shown before you accept is exactly what you receive — no fee deducted. Materials and tips are 100% yours too.
+            The payout shown before you accept is exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.
           </div>
         </div>
         {ledgerFilterSheet()}
@@ -3907,9 +3907,9 @@ export default function HavenProApp() {
   }
 
   const FAQ_ITEMS = [
-    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job — it's exactly what you receive, with no fee deducted. Materials reimbursement and tips are 100% yours too." },
-  { q: "What happens if a customer declines materials?", a: "The outcome depends on the path. Diagnosis: Inspection Completed + $45 Inspection Visit (Haven $0). Standard: Materials declined — job could not be completed + $30 convenience fee (Haven $0)." },
-    { q: "How do I get reimbursed for materials?", a: "Once a customer approves your request, go make the purchase, then submit the actual cost and a receipt photo in the app. You're reimbursed 100% — no platform fee, even if the actual cost differs from your estimate." },
+    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full. Reimbursement repays what you spent; it isn't extra earnings." },
+  { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and you're paid the $${INSPECTION_VISIT_FEE} inspection fee. If it was a standard job, it ends as not completed and you're paid a $${CONVENIENCE_FEE} convenience fee. Haven keeps nothing either way.` },
+    { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed the full amount with no fee taken out, even if it differs from your estimate." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." },
   ];
 
