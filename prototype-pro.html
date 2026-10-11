@@ -5096,6 +5096,7 @@ function HavenProApp() {
             {sectionLabel("Settings")}
             {navRow("⚙️", "Settings", "Notifications, Appearance, Help & Support", () => setProfileView("settings"))}
           </div>
+          {accountSection()}
         </div>
       </div>
     );
@@ -5617,7 +5618,7 @@ function HavenProApp() {
     );
   }
 
-  function authAccountCard() {
+  function authAccountCard({ showLabel = true } = {}) {
     let title = "Signed out";
     let detail = "Sign in to accept and manage jobs.";
     if (authSession) {
@@ -5626,9 +5627,42 @@ function HavenProApp() {
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
-        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>
-        <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
+        {showLabel && <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>}
+        <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: showLabel ? 4 : 0 }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
+      </div>
+    );
+  }
+
+  // Account (email, sign in / sign out) lives on Profile, like the Customer
+  // app; it used to be inside Settings.
+  function accountSection() {
+    return (
+      <div style={{ marginTop: 18 }}>
+        {sectionLabel("Account")}
+        {authAccountCard({ showLabel: false })}
+        {!authSession && settingsAuthOpen && (
+          <div style={{ marginTop: 8 }}>
+            {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
+            {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
+            {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginBottom: 8 }}>{authNotice}</div>}
+            <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+              {authBusy ? "Signing in…" : "Sign in"}
+            </button>
+          </div>
+        )}
+        {!authSession && !settingsAuthOpen && (
+          <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            Sign in with email
+          </button>
+        )}
+        {authSession ? (
+          <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+            {authBusy ? "Signing out…" : "Sign Out"}
+          </button>
+        ) : accountStatus === "signed_in" ? null : (
+          <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
+        )}
       </div>
     );
   }
@@ -5639,7 +5673,6 @@ function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("main"))}>
         {backHeader("Settings", () => setProfileView("main"))}
         <div style={{ padding: "0 20px 32px" }}>
-          {authAccountCard()}
           {navRow("🔔", "Notifications", `${notifOnCount} of ${Object.keys(notifPrefs).length} on`, () => setProfileView("notifications"))}
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: "14px", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div>
@@ -5655,29 +5688,6 @@ function HavenProApp() {
             </button>
           </div>
           {navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport"))}
-          {!authSession && settingsAuthOpen && (
-            <div style={{ marginTop: 8 }}>
-              {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
-              {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
-              {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginBottom: 8 }}>{authNotice}</div>}
-              <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
-                {authBusy ? "Signing in…" : "Sign in"}
-              </button>
-            </div>
-          )}
-          {!authSession && !settingsAuthOpen && (
-            <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
-              Sign in with email
-            </button>
-          )}
-          {authSession ? (
-            <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
-              {authBusy ? "Signing out…" : "Sign Out"}
-            </button>
-          ) : accountStatus === "signed_in" ? null : (
-            <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
-          )}
-
           {devTestPanel("account state", [
             { label: "Jump to Marketplace Ready", onClick: devJumpToMarketplaceReady },
           ])}

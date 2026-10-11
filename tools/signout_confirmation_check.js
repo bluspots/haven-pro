@@ -4,7 +4,7 @@
 /**
  * Sign-out confirmation (Pro). Mocked backend only (no real network).
  *
- * (1) Settings > Sign Out opens "Sign out of Haven Pro?" and does not sign
+ * (1) Profile > Sign Out opens "Sign out of Haven Pro?" and does not sign
  *     out by itself. Cancel has focus.
  * (2) Cancel, tapping outside, and Escape close it; the session is untouched.
  * (3) Confirm runs the existing flow once: one auth.signOut call, the
@@ -126,21 +126,35 @@ async function renderApp(state) {
 function freshState() {
   return { session: { access_token: "pro-access-token", user: { id: PRO_ID, email: "pro@example.com", user_metadata: { role: "pro" } } } };
 }
-async function openSettingsSignOut(window) {
+async function openProfileSignOut(window) {
   await waitFor(window, t => t.includes("My Jobs"), "signed-in app");
   clickText(window, "Profile");
   await sleep(40);
-  clickText(window, "Settings");
-  await waitFor(window, () => !!findButton(window, "Sign Out"), "Settings Sign Out");
+  // Sign Out is on Profile (it moved there from Settings).
+  await waitFor(window, () => !!findButton(window, "Sign Out"), "Profile Sign Out");
   findButton(window, "Sign Out").click();
   await waitFor(window, () => !!dialog(window), "sign-out confirmation");
+}
+
+async function checkAccountOnProfile() {
+  console.log("(0) Account lives on Profile, not in Settings");
+  const window = await renderApp(freshState());
+  await waitFor(window, t => t.includes("My Jobs"), "signed-in app");
+  clickText(window, "Profile");
+  await waitFor(window, () => !!findButton(window, "Sign Out"), "Profile Sign Out");
+  const txt = window.document.getElementById("root").textContent;
+  ok(/pro@example\.com/.test(txt) && /Signed in/.test(txt), "Profile shows the account card (email, Signed in)");
+  clickText(window, "Settings");
+  await waitFor(window, t => t.includes("Appearance"), "Settings");
+  ok(!findButton(window, "Sign Out") && !/pro@example\.com/.test(window.document.getElementById("root").textContent), "Settings no longer has the account card or Sign Out");
+  try { window.close(); } catch (_) {}
 }
 
 async function checkOpenAndCancel() {
   console.log("(1)(2) Opens a confirmation; Cancel / outside / Escape keep the session");
   const state = freshState();
   const window = await renderApp(state);
-  await openSettingsSignOut(window);
+  await openProfileSignOut(window);
   ok(/Sign out of Haven Pro\?/.test(dialog(window).textContent), 'asks "Sign out of Haven Pro?"');
   ok(dialog(window).getAttribute("aria-modal") === "true", "dialog is aria-modal");
   ok(!state.signOutCalls, "auth.signOut not called by opening it");
@@ -150,7 +164,7 @@ async function checkOpenAndCancel() {
   await sleep(40);
   ok(!dialog(window), "Cancel closes it");
   ok(!state.signOutCalls && !!state.session, "Cancel keeps the session (no signOut)");
-  ok(!!findButton(window, "Sign Out"), "still on Settings, signed in");
+  ok(!!findButton(window, "Sign Out"), "still on Profile, signed in");
 
   findButton(window, "Sign Out").click();
   await waitFor(window, () => !!dialog(window), "reopened");
@@ -172,7 +186,7 @@ async function checkConfirmOnce() {
   let release;
   state.signOutImpl = () => new Promise(r => { release = () => { state.session = null; (state.listeners || []).forEach(cb => cb("SIGNED_OUT", null)); r({ error: null }); }; });
   const window = await renderApp(state);
-  await openSettingsSignOut(window);
+  await openProfileSignOut(window);
   const confirm = findButton(window, "Sign out", true);
   confirm.click(); confirm.click(); confirm.click();
   await sleep(40);
@@ -196,18 +210,19 @@ async function checkFailure() {
   const window = await renderApp(state);
   const warn = console.warn; console.warn = () => {};
   try {
-    await openSettingsSignOut(window);
+    await openProfileSignOut(window);
     findButton(window, "Sign out", true).click();
     await waitFor(window, t => t.includes("Couldn't sign out. Please try again."), "failure message");
   } finally { console.warn = warn; }
   ok(state.signOutCalls === 1, "one sign-out attempt");
   ok(!dialog(window), "sheet closes so the message is visible");
-  ok(!!findButton(window, "Sign Out"), "still signed in on Settings (can retry)");
+  ok(!!findButton(window, "Sign Out"), "still signed in on Profile (can retry)");
   window.close();
 }
 
 (async () => {
   try {
+    await checkAccountOnProfile();
     await checkOpenAndCancel();
     await checkConfirmOnce();
     await checkFailure();

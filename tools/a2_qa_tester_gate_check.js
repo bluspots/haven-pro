@@ -174,7 +174,8 @@ async function openSettings(window) {
   clickText(window, "Profile");
   await sleep(40);
   clickText(window, "Settings");
-  await waitFor(window, t => t.includes("Sign Out"), "Settings");
+  // Sign Out moved from Settings to Profile; "Appearance" marks Settings.
+  await waitFor(window, t => t.includes("Appearance"), "Settings");
 }
 async function openIdentity(window) {
   clickText(window, "Profile");
@@ -519,8 +520,8 @@ async function checkSameTabSwitch() {
     await settle(be);
     await openProfileMain(window);
     assert.ok(/Verified/.test(identityRowStatus(window)), "tester's identity is Verified");
-    clickText(window, "Settings");
-    await waitFor(window, () => !!findButton(window, "Sign Out"), "Settings Sign Out");
+    // Sign Out lives on Profile (it moved there from Settings).
+    await waitFor(window, () => !!findButton(window, "Sign Out"), "Profile Sign Out");
     findButton(window, "Sign Out").click();
     // Sign Out asks for confirmation first.
     await waitFor(window, () => !!window.document.querySelector('[role="dialog"][aria-labelledby="hp-signout-title"]'), "sign-out confirmation");
