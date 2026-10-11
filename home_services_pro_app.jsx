@@ -3171,6 +3171,38 @@ export default function HavenProApp() {
     );
   }
 
+  // Share / print a Job Earnings Statement (backlog: "Shareable and
+  // printable receipts"). Same figures the statement shows (jobAmount); no
+  // backend involved.
+  function statementShareText(job) {
+    const a = jobAmount(job);
+    const statement = earningsStatements.find(s => s.jobId === job.id);
+    const label = job.status === "inspection_completed" ? "Inspection Visit" : job.status === "materials_declined" ? "Convenience Fee" : "Labor Payout";
+    return [
+      "Haven Pro — Job Earnings Statement" + (statement ? ` (${statement.id})` : ""),
+      `${job.title} · ${job.category} · ${job.city}`,
+      `Completed ${formatShortDate(job.completedAt)}`,
+      `${label}: $${a.gross}`,
+      a.materials ? `Materials reimbursed: $${a.materials}` : null,
+      a.tip ? `Tip (100% to you): $${a.tip}` : null,
+      `Total earnings: $${a.net}`,
+      "Recordkeeping document, not a tax form.",
+    ].filter(Boolean).join("\n");
+  }
+  async function shareStatement(job) {
+    const text = statementShareText(job);
+    try {
+      if (typeof navigator !== "undefined" && navigator.share) { await navigator.share({ title: "Haven Pro earnings statement", text }); return; }
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) { await navigator.clipboard.writeText(text); showToast("Statement copied"); return; }
+    } catch (_) {}
+    showToast("Sharing isn't available on this device");
+  }
+  function printStatement() {
+    try { window.print(); } catch (_) {}
+  }
+
   function earningsStatementScreen(jobId) {
     const job = completedJobsHistory.find(j => j.id === jobId);
     if (!job) return monthlyBreakdownScreen();
@@ -3179,7 +3211,11 @@ export default function HavenProApp() {
       <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader("Job Earnings Statement", popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
-          {earningsStatementBody(job)}
+          <div data-print-statement>{earningsStatementBody(job)}</div>
+          <div className="hp-no-print" style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button onClick={() => shareStatement(job)} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>⬆️ Share</button>
+            <button onClick={printStatement} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>🖨️ Print</button>
+          </div>
 
           {statement && (
             <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginTop: 14 }}>
@@ -4665,6 +4701,15 @@ export default function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
+    /* Printing an earnings statement prints only the statement card, in
+       black on white whichever theme is on. */
+    @media print {
+      html, body { background: #fff !important; }
+      body * { visibility: hidden !important; background: transparent !important; }
+      [data-print-statement], [data-print-statement] * { visibility: visible !important; color: #000 !important; background: #fff !important; border-color: #ccc !important; }
+      [data-print-statement] { position: absolute; left: 0; top: 0; width: 100%; }
+      .hp-no-print { display: none !important; }
+    }
     /* Vertical scrolling and pinch zoom stay with the browser; a sideways
        drag stays with the app, so the edge swipe isn't cancelled. */
     [data-swipe-host], [data-swipe-foreground], .hp-scroll { touch-action: pan-y; touch-action: pan-y pinch-zoom; }
