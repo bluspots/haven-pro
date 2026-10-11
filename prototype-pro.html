@@ -5107,6 +5107,8 @@ function HavenProApp() {
             {sectionLabel("Settings")}
             {navRow("⚙️", "Settings", "Notifications, Appearance, Help & Support", () => setProfileView("settings"))}
           </div>
+
+          {profileSignOut()}
         </div>
       </div>
     );
@@ -5646,8 +5648,8 @@ function HavenProApp() {
     );
   }
 
-  // Account (email, sign in / sign out) lives on Profile, above Settings
-  // (founder's call); it used to be inside Settings.
+  // Account (email, sign in) lives on Profile, above Settings (founder's
+  // call); it used to be inside Settings. Sign Out is at the bottom of Profile.
   function accountSection() {
     return (
       <div style={{ marginBottom: 14 }}>
@@ -5668,12 +5670,21 @@ function HavenProApp() {
             Sign in with email
           </button>
         )}
+      </div>
+    );
+  }
+
+  // Sign Out sits alone at the very bottom of Profile, below Account and
+  // Settings (founder's call). It still asks before signing out.
+  function profileSignOut() {
+    return (
+      <div style={{ marginTop: 14 }}>
         {authSession ? (
-          <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+          <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
             {authBusy ? "Signing out…" : "Sign Out"}
           </button>
         ) : accountStatus === "signed_in" ? null : (
-          <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
+          <button disabled style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
         )}
       </div>
     );
