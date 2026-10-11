@@ -2893,6 +2893,42 @@ function HavenProApp() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [activeJobs]);
 
+  // Tap the status bar to scroll to the top (same as Haven Customer). iOS
+  // scrolls the page, not the app's inner scroll areas, when the status bar
+  // is tapped. The page is one pixel taller than the screen and kept
+  // scrolled down by that pixel; when it lands at 0 (the tap), the visible
+  // screen scrolls to the top and the pixel is re-armed. Never while typing
+  // (iOS also scrolls the page to show the keyboard).
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    let armed = false, timer = null;
+    const se = () => document.scrollingElement || document.documentElement;
+    const arm = () => {
+      const canScroll = se().scrollHeight > window.innerHeight;
+      if (canScroll && window.scrollY < 1) window.scrollTo(0, 1);
+      armed = canScroll && window.scrollY >= 1;
+    };
+    const typing = () => { const a = document.activeElement; return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT"); };
+    const onScroll = () => {
+      if (armed && window.scrollY <= 0) {
+        armed = false;
+        if (!typing()) {
+          document.querySelectorAll("[data-swipe-foreground] .hp-scroll").forEach(el => {
+            if (el.scrollTop > 0) {
+              try { el.scrollTo({ top: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" }); } catch (e) { el.scrollTop = 0; }
+            }
+          });
+        }
+        clearTimeout(timer); timer = setTimeout(arm, 400);
+      }
+    };
+    const t0 = setTimeout(arm, 600);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", arm);
+    return () => { clearTimeout(t0); clearTimeout(timer); window.removeEventListener("scroll", onScroll); window.removeEventListener("resize", arm); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function isNearJob(job) {
     if (!proLiveLocation || job.lat == null || job.lng == null) return false;
     return haversineMiles(proLiveLocation.lat, proLiveLocation.lng, job.lat, job.lng) <= ARRIVAL_THRESHOLD_MI;
@@ -6388,9 +6424,12 @@ function HavenProApp() {
   const outerStyle = showFrameChrome
     ? { minHeight: "100vh", background: "linear-gradient(155deg,#C7D2CB 0%,#B9C7BE 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT }
     : {
-        // Exactly one screen tall. The frame below fills what's left after
-        // the status-bar inset, so the page never grows past the screen.
-        height: "100dvh",
+        // One screen tall plus one pixel. The frame below fills what's left
+        // after the status-bar inset. The spare pixel lets the page scroll by
+        // 1px, which "tap the status bar to scroll to top" needs (see the
+        // effect above); it is the bottom edge of the tab bar's padding, so
+        // nothing shows.
+        height: "calc(100dvh + 1px)",
         background: T.bg,
         display: "flex",
         flexDirection: "column",
