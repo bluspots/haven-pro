@@ -112,11 +112,11 @@ async function renderApp({ reducedMotion } = {}) {
     await waitFor(w, x => /Job Earnings Statement/.test(text(x)), "statement");
     const btn = re => Array.from(w.document.querySelectorAll("[data-swipe-foreground] button")).find(b => re.test(b.textContent));
     const card = w.document.querySelector("[data-print-statement]").textContent;
-    const total = (card.match(/TOTAL EARNINGS\s*\$(\d+)/i) || [])[1];
+    const total = (card.match(/Total earnings\s*\$([\d.]+)/) || [])[1];
     console.log("(1) Share sheet");
     click(btn(/Share/)); await sleep(30);
-    ok(shared.length === 1 && /Haven Pro — Job Earnings Statement/.test(shared[0].text), "Share opens the share sheet with the statement");
-    ok(new RegExp("Total earnings: \\$" + total + "\\b").test(shared[0].text) && /Labor Payout: \$\d+/.test(shared[0].text) && /Tip \(100% to you\): \$\d+/.test(shared[0].text), "shared text uses the statement's own figures (total $" + total + ")");
+    ok(shared.length === 1 && /Haven Pro — Earnings Statement/.test(shared[0].text), "Share opens the share sheet with the statement");
+    ok(!!total && shared[0].text.includes("Total earnings: $" + total) && /Labor payout: \$\d+\.\d\d/.test(shared[0].text) && /Tip \(100% yours\): \$\d+\.\d\d/.test(shared[0].text), "shared text uses the statement's own figures (total $" + total + ")");
     mode = "abort"; click(btn(/Share/)); await sleep(30);
     ok(copied.length === 0 && !/Statement copied|isn't available/.test(text(w)), "cancelling the share sheet does nothing else");
     console.log("(2) No share sheet");
