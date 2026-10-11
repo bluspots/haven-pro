@@ -3453,12 +3453,13 @@ export default function HavenProApp() {
             {navRow("🧾", "Tax Information", statusLabelText(taxProfile.status), openTaxInfo)}
           </div>
 
+          {accountSection()}
+
           {/* E. Settings — single destination */}
           <div style={{ marginBottom: 8 }}>
             {sectionLabel("Settings")}
             {navRow("⚙️", "Settings", "Notifications, Appearance, Help & Support", () => setProfileView("settings"))}
           </div>
-          {accountSection()}
         </div>
       </div>
     );
@@ -3996,11 +3997,11 @@ export default function HavenProApp() {
     );
   }
 
-  // Account (email, sign in / sign out) lives on Profile, like the Customer
-  // app; it used to be inside Settings.
+  // Account (email, sign in / sign out) lives on Profile, above Settings
+  // (founder's call); it used to be inside Settings.
   function accountSection() {
     return (
-      <div style={{ marginTop: 18 }}>
+      <div style={{ marginBottom: 14 }}>
         {sectionLabel("Account")}
         {authAccountCard({ showLabel: false })}
         {!authSession && settingsAuthOpen && (
