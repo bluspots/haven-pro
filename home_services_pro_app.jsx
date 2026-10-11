@@ -3170,89 +3170,159 @@ export default function HavenProApp() {
     );
   }
 
+  /* ── Job Earnings Statement document. Same document system as Haven
+     Customer receipts (always light, HAVEN wordmark, small-caps sections,
+     a heavy rule above the total) so both read as Haven paperwork.
+     Earnings (labor or fee, plus tip) and materials reimbursement are kept
+     apart: reimbursement repays what the Pro spent; it is not earnings.
+     Amounts come from jobAmount(); nothing here recalculates pay. No
+     statement number or payment status is shown: none exists yet. ── */
+  const STMT = { paper: "#FFFFFF", tint: "#F5F2ED", tx: "#1C2B3A", ts: "#5A6B78", tm: "#66727C", bd: "#E5DED4", ok: "#047857", okBg: "#ECFDF5", dx: "#43536B", dxBg: "#EEF1F5" };
+  const stmtMoney = n => "$" + (Math.round((Number(n) || 0) * 100) / 100).toFixed(2);
+  const stmtDate = ts => new Date(ts).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const stmtTime = ts => new Date(ts).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  // A job reference only when the job has a real backend id (UUID).
+  const stmtJobRef = job => (typeof job.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(job.id)) ? job.id.slice(0, 8).toUpperCase() : null;
+  function stmtEarningLabel(job) {
+    return job.status === "inspection_completed" ? "Inspection visit" : job.status === "materials_declined" ? "Convenience fee" : "Labor payout";
+  }
   function earningsStatementBody(job) {
     const a = jobAmount(job);
     const isInspectionOnly = job.status === "inspection_completed";
     const isMaterialsDeclined = job.status === "materials_declined";
-    const statement = earningsStatements.find(s => s.jobId === job.id);
-    const row = (label, value, muted) => (
-      <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.bd}` }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: muted ? T.ts : T.tx, fontFamily: FONT }}>{label}</span>
-        <span style={{ fontSize: 13, fontWeight: 700, color: muted ? T.ts : T.tx, fontFamily: FONT }}>{value}</span>
+    const earnings = a.gross + a.tip;
+    const ref = stmtJobRef(job);
+    const proName = `${firstName || ""} ${lastName || ""}`.trim();
+    const label = { fontSize: 10, fontWeight: 700, color: STMT.tm, letterSpacing: 0.6, marginBottom: 6, fontFamily: FONT };
+    const line = (l, v) => (
+      <div key={l} style={{ display: "flex", justifyContent: "space-between", marginBottom: 9 }}>
+        <span style={{ fontSize: 13, color: STMT.ts, fontFamily: FONT }}>{l}</span>
+        <span style={{ fontSize: 13, color: STMT.tx, fontWeight: 600, fontFamily: FONT }}>{v}</span>
       </div>
     );
     return (
-      <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18 }}>
-        {statement && <div style={{ fontSize: 10.5, fontWeight: 700, color: T.tm, fontFamily: FONT, marginBottom: 8 }}>Statement {statement.id}</div>}
-        <div style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{iconFor(job.category)} {job.title}</div>
-        <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 2, marginBottom: 6 }}>{job.category} · {job.city}</div>
-        <div style={{ fontSize: 11.5, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 6 }}>Completed {formatShortDate(job.completedAt)}</div>
-        {job.actualDurationMin != null && (
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 14 }}>
-            ⏱ On the job {job.actualDurationMin} min (est. ~{job.durationMin} min)
+      <div style={{ background: STMT.paper, borderRadius: 18, padding: 20, boxShadow: "0 2px 12px rgba(28,43,58,.08)", color: STMT.tx, fontFamily: FONT }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 16, marginBottom: 18, borderBottom: `2px solid ${STMT.tx}` }}>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 900, letterSpacing: 3, color: STMT.tx }}>HAVEN</div>
+            <div style={{ fontSize: 10, color: STMT.ts, marginTop: 2 }}>Haven Pro · Earnings</div>
           </div>
-        )}
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: (isInspectionOnly || isMaterialsDeclined) ? T.dxTx : T.pgd, background: (isInspectionOnly || isMaterialsDeclined) ? T.dxBg : T.pgt, border: `1px solid ${(isInspectionOnly || isMaterialsDeclined) ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
-          {isInspectionOnly ? "Inspection Completed" : isMaterialsDeclined ? "Materials declined — job could not be completed" : "Full Repair"}
-        </span>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.5, color: STMT.tx }}>EARNINGS STATEMENT</div>
+            {ref && <div style={{ fontSize: 10.5, color: STMT.ts, marginTop: 3 }}>Job {ref}</div>}
+            <div style={{ fontSize: 11, color: STMT.ts, marginTop: 5 }}>{stmtDate(job.completedAt)}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 18 }}>
+          {proName ? (
+            <div>
+              <div style={label}>PRO</div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{proName}</div>
+              <div style={{ fontSize: 12, color: STMT.ts, marginTop: 2 }}>via Haven</div>
+            </div>
+          ) : <div aria-hidden="true" />}
+          <div>
+            <div style={label}>SERVICE LOCATION</div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>{job.city}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, background: STMT.tint, borderRadius: 14, padding: 14, marginBottom: 18 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 20, background: STMT.paper, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 20 }}>{iconFor(job.category)}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>{job.title}</div>
+            <div style={{ fontSize: 11, color: STMT.ts, marginTop: 1 }}>{job.category} · Completed {stmtDate(job.completedAt)} at {stmtTime(job.completedAt)}</div>
+            <span style={{ display: "inline-block", marginTop: 6, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.3, padding: "2px 9px", borderRadius: 8, color: (isInspectionOnly || isMaterialsDeclined) ? STMT.dx : STMT.ok, background: (isInspectionOnly || isMaterialsDeclined) ? STMT.dxBg : STMT.okBg }}>
+              {isInspectionOnly ? "Inspection completed" : isMaterialsDeclined ? "Not completed: materials declined" : "Full repair"}
+            </span>
+          </div>
+        </div>
 
         {job.jobNotes && (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 10.5, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>Job Notes</div>
-            <div style={{ fontSize: 12.5, fontWeight: 500, color: T.tx, fontFamily: FONT, lineHeight: 1.4 }}>{job.jobNotes}</div>
-          </div>
-        )}
-        {(job.beforePhoto || job.afterPhoto) && (
-          <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-            {job.beforePhoto && <img src={job.beforePhoto} alt="Before" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.bd}` }} />}
-            {job.afterPhoto && <img src={job.afterPhoto} alt="After" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.bd}` }} />}
+          <div style={{ marginBottom: 18 }}>
+            <div style={label}>JOB NOTES</div>
+            <div style={{ fontSize: 12, color: STMT.ts, lineHeight: 1.6 }}>{job.jobNotes}</div>
           </div>
         )}
 
-        <div style={{ marginTop: 18 }}>
-          {row(isInspectionOnly ? "Inspection Visit" : isMaterialsDeclined ? "Convenience Fee" : "Labor Payout", `$${a.gross}`)}
-          {a.tip > 0 && row("Tip (100% to you)", `+$${a.tip}`)}
-          {a.materials > 0 && row(`Materials Reimbursement${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
+        <div style={{ marginBottom: a.materials > 0 ? 18 : 6 }}>
+          <div style={label}>EARNINGS</div>
+          {line(stmtEarningLabel(job), stmtMoney(a.gross))}
+          {a.tip > 0 && line("Tip (100% yours)", stmtMoney(a.tip))}
+          <div style={{ borderTop: `2px solid ${STMT.tx}`, marginTop: 6, paddingTop: 12, display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 14, fontWeight: 800 }}>Total earnings</span>
+            <span style={{ fontSize: 20, fontWeight: 900 }}>{stmtMoney(earnings)}</span>
+          </div>
         </div>
-        {job.materialsReceiptPhoto && (
-          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
-            <img src={job.materialsReceiptPhoto} alt="Receipt" style={{ width: 44, height: 44, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.bd}` }} />
-            <span style={{ fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: FONT }}>Receipt attached</span>
+
+        {a.materials > 0 && (
+          <div style={{ background: STMT.tint, borderRadius: 14, padding: 14, marginBottom: 6 }}>
+            <div style={label}>MATERIALS REIMBURSEMENT</div>
+            {line(`Materials you bought${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, stmtMoney(a.materials))}
+            <div style={{ fontSize: 11, color: STMT.ts, lineHeight: 1.5 }}>Repays what you spent, in full. It isn't earnings.</div>
+            {job.materialsReceiptPhoto && <img src={job.materialsReceiptPhoto} alt="Materials receipt" style={{ width: 44, height: 44, borderRadius: 10, objectFit: "cover", border: `1px solid ${STMT.bd}`, marginTop: 10 }} />}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderTop: `1px solid ${STMT.bd}`, marginTop: 12, paddingTop: 10 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 700 }}>Earnings + reimbursement</span>
+              <span style={{ fontSize: 14, fontWeight: 800 }}>{stmtMoney(a.net)}</span>
+            </div>
           </div>
         )}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 14, marginTop: 4 }}>
-          <span style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT }}>TOTAL EARNINGS</span>
-          <span style={{ fontSize: 24, fontWeight: 900, color: T.pg, fontFamily: FONT }}>${a.net}</span>
+
+        <div style={{ borderTop: `1px solid ${STMT.bd}`, paddingTop: 14, marginTop: 14, textAlign: "center" }}>
+          <div style={{ fontSize: 10.5, color: STMT.tm, lineHeight: 1.6 }}>Recordkeeping document, not a tax form. Year-end tax documents will appear under Tax Documents once available.</div>
         </div>
       </div>
     );
   }
 
+  function statementShareText(job) {
+    const a = jobAmount(job);
+    const ref = stmtJobRef(job);
+    return [
+      "Haven Pro — Earnings Statement" + (ref ? ` · Job ${ref}` : ""),
+      `${job.title} · ${job.category} · ${job.city}`,
+      `Completed ${stmtDate(job.completedAt)}`,
+      "",
+      "EARNINGS",
+      `${stmtEarningLabel(job)}: ${stmtMoney(a.gross)}`,
+      a.tip ? `Tip (100% yours): ${stmtMoney(a.tip)}` : null,
+      `Total earnings: ${stmtMoney(a.gross + a.tip)}`,
+      a.materials ? "" : null,
+      a.materials ? "MATERIALS REIMBURSEMENT (repays what you spent; not earnings)" : null,
+      a.materials ? `Materials you bought: ${stmtMoney(a.materials)}` : null,
+      a.materials ? `Earnings + reimbursement: ${stmtMoney(a.net)}` : null,
+      "",
+      "Recordkeeping document, not a tax form.",
+    ].filter(x => x !== null).join("\n");
+  }
+  async function shareStatement(job) {
+    const text = statementShareText(job);
+    try {
+      if (typeof navigator !== "undefined" && navigator.share) { await navigator.share({ title: "Haven Pro earnings statement", text }); return; }
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) { await navigator.clipboard.writeText(text); showToast("Statement copied"); return; }
+    } catch (_) {}
+    showToast("Sharing isn't available on this device");
+  }
+  function printStatement() {
+    try { window.print(); } catch (_) {}
+  }
+
   function earningsStatementScreen(jobId) {
     const job = completedJobsHistory.find(j => j.id === jobId);
     if (!job) return monthlyBreakdownScreen();
-    const statement = earningsStatements.find(s => s.jobId === jobId);
     return (
       <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader("Job Earnings Statement", popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
-          {earningsStatementBody(job)}
-
-          {statement && (
-            <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginTop: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: T.tx, fontFamily: FONT }}>Emailed to you</span>
-                {statusPill(statement.emailStatus === "sent" ? "verified" : statement.emailStatus === "failed" ? "failed" : "pending")}
-              </div>
-              <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginBottom: 10 }}>
-                Subject: Haven — Earnings statement for {job.title} · {formatShortDate(job.completedAt)}
-              </div>
-              <button onClick={() => resendEarningsStatement(jobId)} style={{ fontSize: 11.5, fontWeight: 700, color: T.pg, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Email Again</button>
-            </div>
-          )}
-          <div style={{ fontSize: 10.5, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 14, lineHeight: 1.5 }}>
-            This is a recordkeeping document, not a tax form. Year-end tax documents (e.g. your 1099) will appear separately under Tax Documents once available.
+          <div data-print-statement>{earningsStatementBody(job)}</div>
+          <div className="hp-no-print" style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button onClick={() => shareStatement(job)} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>⬆️ Share</button>
+            <button onClick={printStatement} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>🖨️ Print</button>
           </div>
+
         </div>
       </div>
     );
@@ -4740,6 +4810,15 @@ export default function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
+    /* Printing an earnings statement prints only the statement card, in
+       black on white whichever theme is on. */
+    @media print {
+      html, body { background: #fff !important; }
+      body * { visibility: hidden !important; background: transparent !important; }
+      [data-print-statement], [data-print-statement] * { visibility: visible !important; color: #000 !important; background: #fff !important; border-color: #ccc !important; }
+      [data-print-statement] { position: absolute; left: 0; top: 0; width: 100%; }
+      .hp-no-print { display: none !important; }
+    }
     /* Vertical scrolling and pinch zoom stay with the browser; a sideways
        drag stays with the app, so the edge swipe isn't cancelled. */
     [data-swipe-host], [data-swipe-foreground], .hp-scroll { touch-action: pan-y; touch-action: pan-y pinch-zoom; }
