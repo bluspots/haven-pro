@@ -15,13 +15,61 @@
 <meta name="apple-mobile-web-app-title" content="Haven Pro">
 <link rel="apple-touch-icon" href="apple-touch-icon.png?v=20260919">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=20260919">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+<!-- Opening splash (same as Haven Customer, in Pro green): drawn by the
+     browser at once, before the app's scripts arrive. It is the loading
+     screen: it stays until the app has drawn its first real screen, then
+     cross-fades away. No minimum time. -->
+<style>
+#haven-splash{position:fixed;inset:0;z-index:9999;background:#0F6E4E;display:flex;flex-direction:column;align-items:center;justify-content:center;transition:opacity .3s ease}
+#haven-splash.hs-out{opacity:0;pointer-events:none}
+#haven-splash .hs-mark{color:#FFFFFF;font:800 22px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;letter-spacing:.42em;padding-left:.42em;opacity:0;animation:hsIn .7s ease .05s forwards}
+#haven-splash .hs-pro{color:#A7F3D0;font:800 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;letter-spacing:.5em;padding-left:.5em;margin-top:10px;opacity:0;animation:hsIn .7s ease .3s forwards}
+#haven-splash .hs-line{width:28px;height:3px;border-radius:2px;background:#6EE7B7;margin-top:12px;transform:scaleX(0);animation:hsLine .8s cubic-bezier(.2,.7,.2,1) .3s forwards}
+#haven-splash .hs-note{position:absolute;left:24px;right:24px;bottom:calc(48px + env(safe-area-inset-bottom));text-align:center;color:rgba(255,255,255,.78);font:500 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;line-height:1.5;opacity:0;transition:opacity .4s ease}
+#haven-splash .hs-note.hs-show{opacity:1}
+@keyframes hsIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@keyframes hsLine{to{transform:scaleX(1)}}
+@media (prefers-reduced-motion:reduce){#haven-splash .hs-mark,#haven-splash .hs-pro,#haven-splash .hs-line{animation:none;opacity:1;transform:none}#haven-splash{transition:none}}
+</style>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
 <!-- Supabase Auth (UMD). Job REST still uses the anon key; this client is session-only in slice 1. -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
 </head>
 <body style="margin:0;background:#0b1a16">
+<div id="haven-splash"><div class="hs-mark" aria-hidden="true">HAVEN</div><div class="hs-line" aria-hidden="true"></div><div class="hs-pro" aria-hidden="true">PRO</div><div class="hs-note" role="status" aria-live="polite"></div></div>
+<script>
+/* Hides the splash. Called by the app right after its first real screen is
+   drawn (and by its error screen). The app is usable at once: the splash
+   stops taking touches the moment the fade starts, and is removed after it.
+   Reduce Motion: no fade, it is removed at once. Holds through any slow
+   connection: there is no timeout that reveals a half-loaded app. */
+(function(){
+  var done=false;
+  function hide(){
+    var el=document.getElementById("haven-splash");
+    if(done||!el) return; done=true;
+    try{ performance.mark("haven-splash-hide"); }catch(e){}
+    var still=false; try{ still=window.matchMedia("(prefers-reduced-motion: reduce)").matches; }catch(e){}
+    el.classList.add("hs-out");
+    setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); try{ performance.mark("haven-splash-removed"); }catch(e){} }, still?0:320);
+  }
+  window.havenHideSplash=hide;
+  // The splash is the loading screen: nothing hides it except the app.
+  // A slow load gets a quiet note; files that fail to download get a clear
+  // message instead of an endless splash.
+  function note(text){
+    var el=document.getElementById("haven-splash"); if(done||!el) return;
+    var n=el.querySelector(".hs-note"); if(!n) return;
+    n.textContent=text; n.classList.add("hs-show");
+  }
+  setTimeout(function(){ note("Still loading\u2026"); },10000);
+  document.addEventListener("error",function(e){
+    var t=e&&e.target; if(t&&t.tagName==="SCRIPT") note("Haven Pro couldn't finish loading. Check your connection, then reopen the app.");
+  },true);
+})();
+</script>
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useRef, useEffect } = React;
@@ -1666,6 +1714,11 @@ function formatJobAge(postedAt, now) {
 
  
 
+// Opening splash: the HTML shell draws it and defines window.havenHideSplash
+// (named differently here so this global function never replaces it).
+function hideOpeningSplash() {
+  try { if (typeof window !== "undefined" && typeof window.havenHideSplash === "function") window.havenHideSplash(); } catch (_) {}
+}
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -1676,6 +1729,7 @@ class ErrorBoundary extends React.Component {
   }
   componentDidCatch(error, info) {
     console.error("Haven Pro render error:", error, info);
+    hideOpeningSplash();
   }
   render() {
     if (this.state.hasError) {
@@ -1957,6 +2011,14 @@ function HavenProApp() {
   // connecting (first boot) | retrying | error | ready. Nothing but the
   // connection screen renders until this is ready — there is no demo fallback.
   const [backendState, setBackendState] = useState("connecting");
+  // Opening splash = the loading screen. It stays up, however slow the
+  // connection, until the first real screen is drawn (the app, onboarding /
+  // sign-in, or the connection error with Retry), never the "Connecting"
+  // screen in between, then hides on the next frame. No minimum time.
+  useEffect(() => {
+    if (backendState === "connecting") return;
+    (typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout)(hideOpeningSplash);
+  }, [backendState]);
 
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {

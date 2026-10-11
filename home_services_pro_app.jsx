@@ -24,6 +24,11 @@ function formatJobAge(postedAt, now) {
 
  
 
+// Opening splash: the HTML shell draws it and defines window.havenHideSplash
+// (named differently here so this global function never replaces it).
+function hideOpeningSplash() {
+  try { if (typeof window !== "undefined" && typeof window.havenHideSplash === "function") window.havenHideSplash(); } catch (_) {}
+}
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -34,6 +39,7 @@ class ErrorBoundary extends React.Component {
   }
   componentDidCatch(error, info) {
     console.error("Haven Pro render error:", error, info);
+    hideOpeningSplash();
   }
   render() {
     if (this.state.hasError) {
@@ -315,6 +321,14 @@ export default function HavenProApp() {
   // connecting (first boot) | retrying | error | ready. Nothing but the
   // connection screen renders until this is ready — there is no demo fallback.
   const [backendState, setBackendState] = useState("connecting");
+  // Opening splash = the loading screen. It stays up, however slow the
+  // connection, until the first real screen is drawn (the app, onboarding /
+  // sign-in, or the connection error with Retry), never the "Connecting"
+  // screen in between, then hides on the next frame. No minimum time.
+  useEffect(() => {
+    if (backendState === "connecting") return;
+    (typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout)(hideOpeningSplash);
+  }, [backendState]);
 
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
