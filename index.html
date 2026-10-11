@@ -3727,6 +3727,8 @@ function HavenProApp() {
 
           <button
             className="hp-toggle"
+            role="switch"
+            aria-checked={online}
             onClick={() => setOnline(o => !o)}
             style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.online : T.soonBg, transition: "background .18s ease" }}
           >
@@ -4555,6 +4557,8 @@ function HavenProApp() {
                   <button
                     key={i}
                     onClick={() => clickBucket(b)}
+                    aria-label={`${(b.fullLabel || b.label).replace(/ Completed Jobs$/, "")}: ${b.total > 0 ? `$${b.total}` : "no earnings"}`}
+                    aria-pressed={!!isSelected}
                     style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%", background: "none", border: "none", cursor: b.total > 0 ? "pointer" : "default", padding: 0 }}
                   >
                     <div style={{ fontSize: 9.5, fontWeight: 700, color: T.ts, marginBottom: 3, height: 12 }}>{b.total > 0 ? `$${b.total}` : ""}</div>
@@ -4876,6 +4880,7 @@ function HavenProApp() {
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") onSend(); }}
           placeholder="Type a message…"
+          aria-label="Message"
           style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
         />
         <button onClick={onSend} style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: T.pgb, color: "#fff", fontSize: 16, cursor: "pointer", flexShrink: 0 }}>➤</button>
@@ -4985,6 +4990,7 @@ function HavenProApp() {
           value={value}
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
+          aria-label={label}
           inputMode={inputMode}
           type={type || "text"}
           style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
@@ -4995,10 +5001,10 @@ function HavenProApp() {
   function subScreenHeader(title, onCancel, onSave, saveLabel) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "28px 20px 16px" }}>
-        <button onClick={onCancel} style={{ border: "none", background: "none", color: T.ts, fontWeight: 700, fontSize: 14, fontFamily: FONT, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onCancel} style={{ border: "none", background: "none", color: T.ts, fontWeight: 700, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "12px 10px", margin: "-11px -4px" }}>Cancel</button>
         <div style={{ fontSize: 15.5, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{title}</div>
         {onSave ? (
-          <button onClick={onSave} style={{ border: "none", background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer" }}>{saveLabel || "Save"}</button>
+          <button onClick={onSave} style={{ border: "none", background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "12px 10px", margin: "-11px -4px" }}>{saveLabel || "Save"}</button>
         ) : <div style={{ width: 44 }} />}
       </div>
     );
@@ -5009,7 +5015,7 @@ function HavenProApp() {
   function backHeader(title, onBack) {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "28px 20px 16px" }}>
-        <button onClick={onBack} aria-label="Back" style={{ border: "none", background: "none", color: T.pg, fontSize: 22, fontWeight: 800, cursor: "pointer", padding: "0 4px 0 0", lineHeight: 1 }}>‹</button>
+        <button onClick={onBack} aria-label="Back" style={{ border: "none", background: "none", color: T.pg, fontSize: 22, fontWeight: 800, cursor: "pointer", padding: "11px 18px 11px 16px", margin: "-11px -14px -11px -16px", lineHeight: 1 }}>‹</button>
         <div style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{title}</div>
       </div>
     );
@@ -5488,6 +5494,7 @@ function HavenProApp() {
             value={value}
             onChange={e => onChange(e.target.value)}
             placeholder={placeholder}
+            aria-label={label}
             style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
           />
         </div>
@@ -5523,6 +5530,7 @@ function HavenProApp() {
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>About</div>
             <textarea
+              aria-label="About"
               value={d.about}
               onChange={e => set("about", e.target.value)}
               rows={4}
@@ -5555,7 +5563,7 @@ function HavenProApp() {
               <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 1 }}>{desc}</div>
             </div>
           </div>
-          <button className="hp-toggle" onClick={() => toggle(key)} style={{ width: 46, height: 27, borderRadius: 20, background: notifPrefs[key] ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer", flexShrink: 0 }}>
+          <button className="hp-toggle" role="switch" aria-checked={!!notifPrefs[key]} aria-label={label} onClick={() => toggle(key)} style={{ width: 46, height: 27, borderRadius: 20, background: notifPrefs[key] ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer", flexShrink: 0 }}>
             <div style={{ position: "absolute", top: 2.5, left: notifPrefs[key] ? 21 : 2.5, width: 22, height: 22, borderRadius: "50%", background: "#FFFFFF", boxShadow: "0 1px 3px rgba(0,0,0,.25)", transition: "left .18s ease" }} />
           </button>
         </div>
@@ -5685,6 +5693,9 @@ function HavenProApp() {
             </div>
             <button
               className="hp-toggle"
+              role="switch"
+              aria-checked={theme === "dark"}
+              aria-label="Dark mode"
               onClick={() => setTheme(t => (t === "dark" ? "light" : "dark"))}
               style={{ width: 46, height: 27, borderRadius: 20, background: theme === "dark" ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer" }}
             >
@@ -5756,7 +5767,7 @@ function HavenProApp() {
     return (
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px 20px 0" }}>
-          <button onClick={onboardingBack} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <button onClick={onboardingBack} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: "10px 16px", margin: "-10px -16px" }}>‹</button>
           <div style={{ flex: 1, height: 5, borderRadius: 3, background: T.bd, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${Math.min(100, Math.round((idx / total) * 100))}%`, background: T.pgb, borderRadius: 3, transition: "width .2s ease" }} />
           </div>
@@ -5916,7 +5927,7 @@ function HavenProApp() {
       return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", background: T.bg, padding: "28px 24px" }}>
           <div>
-            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0, marginBottom: 12 }}>‹</button>
+            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: "10px 16px", margin: "-10px -16px 2px" }}>‹</button>
             <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginBottom: 8 }}>Confirm your email</div>
             <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.5, marginBottom: 12 }}>
               We created the Pro login for {signInDraft.email || accountEmail}. Open the confirmation email, then sign in here. The message returns to https://bluspots.github.io/haven-pro/.
@@ -5932,7 +5943,7 @@ function HavenProApp() {
     return (
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
         <div style={{ padding: "28px 24px 0" }}>
-          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: "10px 16px", margin: "-10px -16px" }}>‹</button>
           <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 8 }}>Sign in</div>
           <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Claiming a job and later job updates use this login.</div>
         </div>
