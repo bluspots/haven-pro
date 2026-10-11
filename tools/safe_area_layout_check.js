@@ -13,7 +13,8 @@
  * Rules checked (jsdom has no layout engine, so this checks the styles that
  * produce the layout; the PR includes a headless-Chromium measurement with
  * simulated insets):
- * (1) Phone mode: outer container is exactly 100dvh tall, pads the top inset
+ * (1) Phone mode: outer container is one screen tall (100dvh, plus the one
+ *     spare pixel the status-bar tap needs), pads the top inset
  *     (status bar / Dynamic Island) and does NOT pad the bottom inset.
  * (2) The app frame fills the remaining space (flex: 1) instead of claiming
  *     its own 100dvh.
@@ -69,7 +70,7 @@ async function render(width) {
     const outer = w.document.querySelector(".haven-pro-frame-outer");
     ok(!!frame && !!outer, "outer container and app frame rendered");
     const os = outer.getAttribute("style") || "", fsx = frame.getAttribute("style") || "";
-    ok(/(^|;)\s*height:\s*100dvh/.test(os), "outer container is exactly 100dvh tall");
+    ok(/(^|;)\s*height:\s*calc\(100dvh \+ 1px\)/.test(os) || /height:\s*"calc\(100dvh \+ 1px\)"/.test(read("home_services_pro_app.jsx")), "outer container is one screen tall plus the 1px the status-bar tap needs (no more)");
     // jsdom drops env() values when serializing styles, so the inset rules
     // are read from the phone-mode style object in the source.
     const src = read("home_services_pro_app.jsx");
