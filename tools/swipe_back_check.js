@@ -122,7 +122,7 @@ const underlay = w => w.document.querySelector("[data-swipe-underlay]");
 // Title of the visible screen: the text next to its ‹ button ("" on a tab's root screen).
 function titleIn(el) {
   if (!el) return "";
-  const b = Array.from(el.querySelectorAll("button")).find(x => (x.textContent || "").trim() === "‹" && !x.hasAttribute("aria-label")); // not the chart's ‹ period button
+  const b = Array.from(el.querySelectorAll("button")).find(x => (x.textContent || "").trim() === "‹" && !/^(Previous|Next) /.test(x.getAttribute("aria-label") || "")); // the screen's Back, not the chart's ‹ period button
   return b && b.nextElementSibling ? b.nextElementSibling.textContent.trim() : "";
 }
 const title = w => titleIn(fg(w));
@@ -280,7 +280,7 @@ function injectRow(w, attrs, scrollWidth, tag) {
     console.log("(6) ‹ button still works");
     click(w, navButton(w, "Settings"));
     await waitFor(w, x => title(x) === "Settings", "Settings again");
-    click(w, Array.from(fg(w).querySelectorAll("button")).find(b => b.textContent.trim() === "‹" && !b.hasAttribute("aria-label")));
+    click(w, Array.from(fg(w).querySelectorAll("button")).find(b => b.textContent.trim() === "‹" && !/^(Previous|Next) /.test(b.getAttribute("aria-label") || "")));
     await waitFor(w, x => title(x) === "", "Profile via ‹");
     ok(fgScroller(w).scrollTop === 500, "‹ returns to the same scroll position too");
     w.close();
