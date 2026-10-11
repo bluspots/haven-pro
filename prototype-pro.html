@@ -4612,7 +4612,7 @@ function HavenProApp() {
                   <span style={{ fontSize: 12 }}>{iconFor(ledgerCategoryFilter)}</span>
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: T.pgd, fontFamily: FONT }}>{ledgerCategoryFilter}</span>
                 </button>
-                <button onClick={() => setLedgerCategoryFilter("all")} style={{ border: "none", background: "none", cursor: "pointer", color: T.ts, fontSize: 14, fontWeight: 800, padding: 0 }}>✕</button>
+                <button onClick={() => setLedgerCategoryFilter("all")} aria-label="Clear filter" style={{ border: "none", background: "none", cursor: "pointer", color: T.ts, fontSize: 14, fontWeight: 800, padding: 0 }}>✕</button>
               </div>
             ) : (
               <button onClick={() => setLedgerFilterOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, border: `1px solid ${T.bd}`, background: "transparent", borderRadius: 10, padding: "5px 10px", cursor: "pointer" }}>
@@ -4716,6 +4716,9 @@ function HavenProApp() {
                 <button
                   key={i}
                   onClick={() => hasJobs && pushEarnings({ view: "day", dateKey: `${year}-${month}-${day}` })}
+                  aria-label={`${new Date(year, month, day).toLocaleDateString(undefined, { month: "long", day: "numeric" })}, ${hasJobs ? `${info.count} job${info.count === 1 ? "" : "s"}, $${info.total}` : "no jobs"}`}
+                  aria-disabled={hasJobs ? undefined : "true"}
+                  tabIndex={hasJobs ? undefined : -1}
                   style={{
                     aspectRatio: "1", borderRadius: 10, border: `1px solid ${hasJobs ? T.pg : T.bd}`,
                     background: hasJobs ? T.pgt : T.w, cursor: hasJobs ? "pointer" : "default",
@@ -5006,7 +5009,7 @@ function HavenProApp() {
   function backHeader(title, onBack) {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "28px 20px 16px" }}>
-        <button onClick={onBack} style={{ border: "none", background: "none", color: T.pg, fontSize: 22, fontWeight: 800, cursor: "pointer", padding: "0 4px 0 0", lineHeight: 1 }}>‹</button>
+        <button onClick={onBack} aria-label="Back" style={{ border: "none", background: "none", color: T.pg, fontSize: 22, fontWeight: 800, cursor: "pointer", padding: "0 4px 0 0", lineHeight: 1 }}>‹</button>
         <div style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{title}</div>
       </div>
     );
@@ -5753,7 +5756,7 @@ function HavenProApp() {
     return (
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px 20px 0" }}>
-          <button onClick={onboardingBack} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <button onClick={onboardingBack} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
           <div style={{ flex: 1, height: 5, borderRadius: 3, background: T.bd, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${Math.min(100, Math.round((idx / total) * 100))}%`, background: T.pgb, borderRadius: 3, transition: "width .2s ease" }} />
           </div>
@@ -5913,7 +5916,7 @@ function HavenProApp() {
       return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", background: T.bg, padding: "28px 24px" }}>
           <div>
-            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0, marginBottom: 12 }}>‹</button>
+            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0, marginBottom: 12 }}>‹</button>
             <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginBottom: 8 }}>Confirm your email</div>
             <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.5, marginBottom: 12 }}>
               We created the Pro login for {signInDraft.email || accountEmail}. Open the confirmation email, then sign in here. The message returns to https://bluspots.github.io/haven-pro/.
@@ -5929,7 +5932,7 @@ function HavenProApp() {
     return (
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
         <div style={{ padding: "28px 24px 0" }}>
-          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
           <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 8 }}>Sign in</div>
           <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Claiming a job and later job updates use this login.</div>
         </div>
