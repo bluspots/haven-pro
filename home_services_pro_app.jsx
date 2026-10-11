@@ -2066,7 +2066,7 @@ export default function HavenProApp() {
           onClick={disabled ? undefined : () => acceptJob(job)}
           style={{
             width: "100%", padding: "10px 0", borderRadius: 12, border: "none", fontSize: 13.5, fontWeight: 800, fontFamily: FONT,
-            cursor: "pointer", color: disabled ? T.tm : "#FFFFFF", background: disabled ? T.soonBg : T.pgb,
+            cursor: "pointer", color: disabled ? T.tm : "#FFFFFF", background: disabled ? T.soonBg : T.cta,
           }}
         >
           {blockedLabel || (acceptingJobId === job.id ? "Accepting…" : "Accept Job")}
@@ -2188,7 +2188,7 @@ export default function HavenProApp() {
     const diagnosis = jobRequiresDiagnosis(job);
     const btnStyle = (primary) => ({
       flex: 1, padding: "12px 18px", borderRadius: 12, border: "none", fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer",
-      color: primary ? "#FFFFFF" : T.pg, background: primary ? T.pgb : T.pgt, textAlign: "center",
+      color: primary ? "#FFFFFF" : T.pg, background: primary ? T.cta : T.pgt, textAlign: "center",
     });
     if (job.status === "en_route") {
       if (isNearJob(job)) {
@@ -2306,7 +2306,7 @@ export default function HavenProApp() {
             Tap to expand ↗
           </div>
         </div>
-        <div style={{ display: "block", textAlign: "center", padding: "12px 0", background: T.pgb, color: "#fff", fontSize: 13.5, fontWeight: 800, fontFamily: FONT }}>
+        <div style={{ display: "block", textAlign: "center", padding: "12px 0", background: T.cta, color: "#fff", fontSize: 13.5, fontWeight: 800, fontFamily: FONT }}>
           🗺️ {hasOrigin ? "Get Directions" : "Open in Maps"}
         </div>
       </a>
@@ -2482,7 +2482,7 @@ export default function HavenProApp() {
             <span style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>Total</span>
             <span style={{ fontSize: 18, fontWeight: 900, color: T.pg, fontFamily: FONT }}>${total.toFixed(2).replace(/\.00$/, "")}</span>
           </div>
-          <button onClick={submitMaterialsRequest} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Request</button>
+          <button onClick={submitMaterialsRequest} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Request</button>
         </div>
       </div>
     );
@@ -2535,7 +2535,7 @@ export default function HavenProApp() {
               </label>
             )}
           </div>
-          <button onClick={submitReceipt} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Receipt</button>
+          <button onClick={submitReceipt} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Receipt</button>
         </div>
       </div>
     );
@@ -2561,7 +2561,7 @@ export default function HavenProApp() {
           {earningsStatementBody(job)}
           <button
             onClick={() => goTab("earnings")}
-            style={{ width: "100%", marginTop: 16, padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+            style={{ width: "100%", marginTop: 16, padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             See Earnings
           </button>
@@ -2621,7 +2621,7 @@ export default function HavenProApp() {
 
           <button
             onClick={() => completeJob(jobId)}
-            style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+            style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             Complete Job
           </button>
@@ -3223,7 +3223,7 @@ export default function HavenProApp() {
       return (
         <div key={i} style={{ display: "flex", justifyContent: fromPro ? "flex-end" : "flex-start", marginBottom: 8 }}>
           <div style={{
-            maxWidth: "75%", background: fromPro ? T.pgb : T.w, color: fromPro ? "#FFFFFF" : T.tx,
+            maxWidth: "75%", background: fromPro ? T.cta : T.w, color: fromPro ? "#FFFFFF" : T.tx,
             border: fromPro ? "none" : `1px solid ${T.bd}`, borderRadius: 14, padding: "10px 13px",
             fontSize: 13, fontWeight: 500, fontFamily: FONT, lineHeight: 1.4,
           }}>
@@ -3245,7 +3245,7 @@ export default function HavenProApp() {
           aria-label="Message"
           style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
         />
-        <button onClick={onSend} style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: T.pgb, color: "#fff", fontSize: 16, cursor: "pointer", flexShrink: 0 }}>➤</button>
+        <button onClick={onSend} style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: T.cta, color: "#fff", fontSize: 16, cursor: "pointer", flexShrink: 0 }}>➤</button>
       </div>
     );
   }
@@ -3562,7 +3562,7 @@ export default function HavenProApp() {
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
 
           {status === "not_started" && (
-            <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Start Identity Verification
             </button>
           )}
@@ -3576,7 +3576,7 @@ export default function HavenProApp() {
               <button onClick={() => setIdentityProgress(p => ({ ...p, selfieCaptured: true }))} style={{ width: "100%", marginBottom: 14, padding: "12px 0", borderRadius: 12, border: `1px solid ${identityProgress.selfieCaptured ? T.pg : T.bd}`, background: identityProgress.selfieCaptured ? T.pgt : T.w, color: identityProgress.selfieCaptured ? T.pgd : T.tx, fontSize: 13.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 {identityProgress.selfieCaptured ? "✓ " : ""}Selfie / Liveness Check (via Persona)
               </button>
-              <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>
+              <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>
                 Submit to Persona
               </button>
             </>
@@ -3597,7 +3597,7 @@ export default function HavenProApp() {
                 {status === "failed" && `Persona couldn't verify your identity${identityVerification.failureReasonCode ? ` (${identityVerification.failureReasonCode})` : ""}.`}
                 {status === "expired" && "Your identity verification has expired and needs to be redone."}
               </div>
-              <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
+              <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
             </>
           )}
 
@@ -3627,7 +3627,7 @@ export default function HavenProApp() {
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
 
           {status === "not_started" && (
-            <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Start Background Check
             </button>
           )}
@@ -3640,7 +3640,7 @@ export default function HavenProApp() {
                   I authorize Haven to invite me to a background check through Checkr, its screening provider.
                 </span>
               </label>
-              <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+              <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
                 Authorize Background Check
               </button>
             </div>
@@ -3715,7 +3715,7 @@ export default function HavenProApp() {
               <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginBottom: 12 }}>📎 Document/photo upload — coming soon</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setCredentialDraft(null)} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: "transparent", color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>Cancel</button>
-                <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.pgb, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
+                <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.cta, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
               </div>
             </div>
           ) : (
@@ -3738,7 +3738,7 @@ export default function HavenProApp() {
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
 
           {status === "not_started" && (
-            <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Set Up Payouts with Stripe
             </button>
           )}
@@ -3973,7 +3973,7 @@ export default function HavenProApp() {
             </div>
           ))}
           <div style={{ fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3, margin: "18px 0 10px" }}>Still Need Help?</div>
-          <a href="mailto:pro-support@havenpro.example?subject=Haven%20Pro%20Support" style={{ display: "block", textAlign: "center", padding: "13px 0", borderRadius: 14, background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, textDecoration: "none" }}>
+          <a href="mailto:pro-support@havenpro.example?subject=Haven%20Pro%20Support" style={{ display: "block", textAlign: "center", padding: "13px 0", borderRadius: 14, background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, textDecoration: "none" }}>
             ✉️ Email Support
           </a>
         </div>
@@ -4022,7 +4022,7 @@ export default function HavenProApp() {
             {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
             {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
             {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginBottom: 8 }}>{authNotice}</div>}
-            <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+            <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
               {authBusy ? "Signing in…" : "Sign in"}
             </button>
           </div>
@@ -4155,7 +4155,7 @@ export default function HavenProApp() {
             <button
               disabled={!continueProps.enabled}
               onClick={continueProps.onClick || onboardingNext}
-              style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: continueProps.enabled ? "pointer" : "default", opacity: continueProps.enabled ? 1 : 0.4 }}
+              style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: continueProps.enabled ? "pointer" : "default", opacity: continueProps.enabled ? 1 : 0.4 }}
             >
               {continueProps.label || "Continue"}
             </button>
@@ -4187,7 +4187,7 @@ export default function HavenProApp() {
           {authSession ? (
             <>
               {authAccountCard()}
-              <button onClick={continueSignedInSetup} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
+              <button onClick={continueSignedInSetup} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
                 Continue
               </button>
               <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", marginBottom: 10 }}>
@@ -4196,7 +4196,7 @@ export default function HavenProApp() {
             </>
           ) : (
             <>
-              <button onClick={() => { setAuthNotice(""); setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
+              <button onClick={() => { setAuthNotice(""); setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
                 Create Account
               </button>
               <button onClick={openEmailSignIn} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
@@ -4307,7 +4307,7 @@ export default function HavenProApp() {
             </div>
             {authNotice && <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, lineHeight: 1.45 }}>{authNotice}</div>}
           </div>
-          <button onClick={() => { setAuthNotice(""); setWelcomeAuthView("signIn"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+          <button onClick={() => { setAuthNotice(""); setWelcomeAuthView("signIn"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
             Sign in
           </button>
         </div>
@@ -4326,7 +4326,7 @@ export default function HavenProApp() {
           {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT }}>{authNotice}</div>}
         </div>
         <div style={{ padding: "10px 24px 22px" }}>
-          <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+          <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
             {authBusy ? "Signing in…" : "Sign in"}
           </button>
         </div>
@@ -4346,7 +4346,7 @@ export default function HavenProApp() {
           {statusPill(status === "verified" ? "verified" : "pending")}
         </div>
         {status !== "verified" && (
-          <button onClick={onVerify} style={{ width: "100%", padding: "11px 0", borderRadius: 12, border: "none", background: T.pgb, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+          <button onClick={onVerify} style={{ width: "100%", padding: "11px 0", borderRadius: 12, border: "none", background: T.cta, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
             Verify {label}
           </button>
         )}
@@ -4431,13 +4431,13 @@ export default function HavenProApp() {
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
         {status === "not_started" && (
-          <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Identity Verification</button>
+          <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Identity Verification</button>
         )}
         {status === "session_created" && (
           <>
             <button onClick={() => setIdentityProgress(p => ({ ...p, idCaptured: true }))} style={{ width: "100%", marginBottom: 8, padding: "12px 0", borderRadius: 12, border: `1px solid ${identityProgress.idCaptured ? T.pg : T.bd}`, background: identityProgress.idCaptured ? T.pgt : T.w, color: identityProgress.idCaptured ? T.pgd : T.tx, fontSize: 13.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>{identityProgress.idCaptured ? "✓ " : ""}Government-Issued ID (via Persona)</button>
             <button onClick={() => setIdentityProgress(p => ({ ...p, selfieCaptured: true }))} style={{ width: "100%", marginBottom: 14, padding: "12px 0", borderRadius: 12, border: `1px solid ${identityProgress.selfieCaptured ? T.pg : T.bd}`, background: identityProgress.selfieCaptured ? T.pgt : T.w, color: identityProgress.selfieCaptured ? T.pgd : T.tx, fontSize: 13.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>{identityProgress.selfieCaptured ? "✓ " : ""}Selfie / Liveness Check (via Persona)</button>
-            <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>Submit to Persona</button>
+            <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>Submit to Persona</button>
           </>
         )}
         {status === "pending" && <div style={{ background: T.dxBg, border: `1px solid ${T.dxBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.dxTx, textAlign: "center" }}>⏳ Persona is reviewing your submission.</div>}
@@ -4445,7 +4445,7 @@ export default function HavenProApp() {
         {["needs_review", "failed", "expired"].includes(status) && (
           <>
             <div style={{ background: T.emBg, border: `1px solid ${T.emBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.emTx, textAlign: "center", marginBottom: 14 }}>Persona flagged this one — you can try again.</div>
-            <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
+            <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
           </>
         )}
         {devTestPanel("Persona", [
@@ -4463,7 +4463,7 @@ export default function HavenProApp() {
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
         {status === "not_started" && (
-          <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Background Check</button>
+          <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Background Check</button>
         )}
         {status === "consent_required" && (
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 16 }}>
@@ -4471,7 +4471,7 @@ export default function HavenProApp() {
               <input type="checkbox" checked={backgroundConsent} onChange={e => setBackgroundConsent(e.target.checked)} style={{ marginTop: 2 }} />
               <span style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.4 }}>I authorize Haven to invite me to a background check through Checkr.</span>
             </label>
-            <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Authorize Background Check</button>
+            <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Authorize Background Check</button>
           </div>
         )}
         {["invited", "pending"].includes(status) && <div style={{ background: T.dxBg, border: `1px solid ${T.dxBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.dxTx, textAlign: "center" }}>⏳ Checkr is processing your report.</div>}
@@ -4491,7 +4491,7 @@ export default function HavenProApp() {
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
         {status === "not_started" && (
-          <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Set Up Payouts with Stripe</button>
+          <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Set Up Payouts with Stripe</button>
         )}
         {status === "pending" && <div style={{ background: T.dxBg, border: `1px solid ${T.dxBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.dxTx, textAlign: "center" }}>⏳ Stripe is verifying your account details.</div>}
         {status === "enabled" && (
@@ -4519,7 +4519,7 @@ export default function HavenProApp() {
         {taxProfile.status === "not_started" && (
           <button
             onClick={() => { if (!taxLegalName.trim()) { showToast("Enter your legal name"); return; } setTaxProfile(v => ({ ...v, status: "pending", providerReference: `tax_demo_${Math.floor(1000 + Math.random() * 8999)}` })); }}
-            style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+            style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             Submit
           </button>
@@ -4552,7 +4552,7 @@ export default function HavenProApp() {
             {formField("License / Certificate Number", credentialDraft.number, v => setCredentialDraft(p => ({ ...p, number: v })), "optional")}
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setCredentialDraft(null)} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: "transparent", color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>Cancel</button>
-              <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.pgb, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
+              <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.cta, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
             </div>
           </div>
         ) : (
@@ -4589,7 +4589,7 @@ export default function HavenProApp() {
         </div>
         <button
           onClick={() => { setOnboardingStatus("completed"); setOnboardingStep("done"); goTab("home"); }}
-          style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+          style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
         >
           {marketplaceReady ? "Find Work" : "Go to Job Board"}
         </button>
@@ -4639,7 +4639,7 @@ export default function HavenProApp() {
         </div>
         <div>
           {view !== "connecting" && (
-            <button onClick={retryHavenConnect} disabled={busy} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+            <button onClick={retryHavenConnect} disabled={busy} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
               {busy ? "Retrying…" : "Retry"}
             </button>
           )}
