@@ -97,6 +97,9 @@ function havenGuardedSignature(snapshot) {
   return JSON.stringify([g.identityVerification.status, g.backgroundCheck.status, g.payoutAccount.status, g.payoutAccount.payoutsEnabled, g.taxProfile.status]);
 }
 
+// HB-13: identity / background-check / payout / tax providers aren't connected yet.
+const HAVEN_PROVIDER_CHECKS_CONNECTED = false;
+
 export default function HavenProApp() {
   const [tab, setTab] = useState("home");
   const [theme, setTheme] = useState("light");
@@ -401,6 +404,15 @@ export default function HavenProApp() {
   // "auth" = signed_in came from Supabase Auth. "local" is only set by the Dev Testing
   // demo buttons (gated separately in A2); Create Account never sets it (Phase 1B A1).
   const accountSourceRef = useRef(null);
+  /* HB-13: no identity, background-check, payout or tax provider is connected.
+     For ordinary Pros these steps show "Not available yet" instead of
+     provider-looking "Pending" states with made-up provider ids. QA testers
+     (server-confirmed) keep the steps so the QA tools still work. Readiness
+     gating itself is unchanged. */
+  const qaSession = !!(qaTester && authSession && authSession.id && accountSourceRef.current === "auth");
+  const providerStepsOpen = HAVEN_PROVIDER_CHECKS_CONNECTED || qaSession;
+  const shownStatus = status => (providerStepsOpen ? status : "not_available");
+  const shownCredentialStatus = status => (providerStepsOpen || !["pending", "verification_available"].includes(status) ? status : "self_reported");
   const accountStatusRef = useRef("signed_out");
   const authUnsubscribeRef = useRef(null);
   const connectSeqRef = useRef(0);
@@ -1411,7 +1423,7 @@ export default function HavenProApp() {
       return;
     }
     if (!marketplaceReady) {
-      showToast("Complete your Haven Pro verification before accepting jobs.");
+      showToast(providerStepsOpen ? "Complete your Haven Pro verification before accepting jobs." : "Accepting jobs opens once verification and payouts are available.");
       setTab("profile");
       setProfileView("verificationCenter");
       return;
@@ -1828,7 +1840,7 @@ export default function HavenProApp() {
     setIdentityProgress({ idCaptured: false, selfieCaptured: false });
   }
   function submitIdentityVerification() {
-    setIdentityVerification(v => ({ ...v, status: "pending", providerVerificationId: `persona_demo_${Math.floor(100000 + Math.random() * 899999)}` }));
+    setIdentityVerification(v => ({ ...v, status: "pending", providerVerificationId: null }));
     // Waits here for a provider webhook — see the Dev Testing panel below.
   }
   function retryIdentityVerification() {
@@ -1885,7 +1897,7 @@ export default function HavenProApp() {
   }
   function authorizeBackgroundCheck() {
     if (!backgroundConsent) { showToast("Check the consent box to authorize your background check"); return; }
-    setBackgroundCheck(v => ({ ...v, status: "invited", providerReportId: `checkr_demo_${Math.floor(100000 + Math.random() * 899999)}` }));
+    setBackgroundCheck(v => ({ ...v, status: "invited", providerReportId: null }));
     setTimeout(() => setBackgroundCheck(v => (v.status === "invited" ? { ...v, status: "pending" } : v)), 800);
     // Then waits for the provider's report — see the Dev Testing panel below.
   }
@@ -1930,7 +1942,7 @@ export default function HavenProApp() {
      redirects to the provider's hosted onboarding; it comes back pending
      until the provider's webhook (simulated via Dev Testing) says enabled. ── */
   function startPayoutSetup() {
-    setPayoutAccount(v => ({ ...v, status: "pending", providerAccountId: `acct_demo_${Math.floor(10000 + Math.random() * 89999)}`, requirementsDue: ["identity_document", "bank_account"] }));
+    setPayoutAccount(v => ({ ...v, status: "pending", providerAccountId: null, requirementsDue: [] }));
   }
   function devSetPayoutStatus(status) {
     const v = payoutAccount || {};
@@ -1938,7 +1950,7 @@ export default function HavenProApp() {
       ...v, status,
       payoutsEnabled: status === "enabled",
       requirementsDue: status === "enabled" ? [] : v.requirementsDue,
-      last4: status === "enabled" ? String(Math.floor(1000 + Math.random() * 8999)) : v.last4,
+      last4: v.last4 || null, // never invent bank digits
     } }, "Payouts set to " + status + " (QA, saved)");
   }
 
@@ -1953,10 +1965,10 @@ export default function HavenProApp() {
     if (!taxDraft.legalName.trim()) { showToast("Enter your legal name"); return; }
     setTaxLegalName(taxDraft.legalName.trim());
     setTaxClassification(taxDraft.classification);
-    setTaxProfile(v => ({ ...v, status: "pending", providerReference: `tax_demo_${Math.floor(1000 + Math.random() * 8999)}` }));
+    if (providerStepsOpen) setTaxProfile(v => ({ ...v, status: "pending", providerReference: null }));
     setTaxDraft(null);
     setProfileView("main");
-    showToast("Submitted to tax provider for verification");
+    showToast(providerStepsOpen ? "Saved — waiting on tax verification" : "Saved on this device. Tax verification isn't available yet.");
   }
   function cancelTaxInfo() { setTaxDraft(null); setProfileView("main"); }
   function devSetTaxStatus(status) {
@@ -1972,7 +1984,7 @@ export default function HavenProApp() {
     return devCommitQaWorkspace({
       identityVerification: { ...(identityVerification || {}), status: "verified", verifiedAt: now, failureReasonCode: null },
       backgroundCheck: { ...(backgroundCheck || {}), status: "clear", clearedAt: now },
-      payoutAccount: { ...pa, status: "enabled", payoutsEnabled: true, requirementsDue: [], last4: pa.last4 || String(Math.floor(1000 + Math.random() * 8999)) },
+      payoutAccount: { ...pa, status: "enabled", payoutsEnabled: true, requirementsDue: [], last4: pa.last4 || null },
       taxProfile: { ...(taxProfile || {}), status: "verified" },
     }, "Marketplace Ready (QA, saved)");
   }
@@ -2077,7 +2089,7 @@ export default function HavenProApp() {
      and never hides the Inspection Visit line. ── */
   function tradeBoardCard(job) {
     const diagnosis = jobRequiresDiagnosis(job);
-    const blockedLabel = hasBlockingActiveJob(activeJobs) ? "Finish Current Job First" : !marketplaceReady ? "Complete Verification" : !online ? "Go Online to Accept" : null;
+    const blockedLabel = hasBlockingActiveJob(activeJobs) ? "Finish Current Job First" : !marketplaceReady ? (providerStepsOpen ? "Complete Verification" : "Verification Not Available Yet") : !online ? "Go Online to Accept" : null;
     const disabled = !!blockedLabel || acceptingJobId === job.id;
     return (
       <div key={job.id} style={{ background: T.w, borderRadius: 16, padding: 14, marginBottom: 8, border: `1px solid ${T.bd}` }}>
@@ -3570,16 +3582,16 @@ export default function HavenProApp() {
           {/* C. Verification */}
           <div style={{ marginBottom: 14 }}>
             {sectionLabel("Verification")}
-            {navRow("🪪", "Identity", statusLabelText(identityVerification.status), () => setProfileView("identity"))}
-            {navRow("✅", "Background Check", statusLabelText(backgroundCheck.status), () => setProfileView("backgroundCheck"))}
+            {navRow("🪪", "Identity", statusLabelText(shownStatus(identityVerification.status)), () => setProfileView("identity"))}
+            {navRow("✅", "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
             {navRow("📜", "Professional Credentials", `${credentials.filter(c => c.status === "verified").length} verified · ${credentials.length} total`, () => setProfileView("credentials"))}
           </div>
 
           {/* D. Payouts & Tax */}
           <div style={{ marginBottom: 14 }}>
             {sectionLabel("Payouts & Tax")}
-            {navRow("🏦", "Payout Method", statusLabelText(payoutAccount.status), () => setProfileView("payout"))}
-            {navRow("🧾", "Tax Information", statusLabelText(taxProfile.status), openTaxInfo)}
+            {navRow("🏦", "Payout Method", statusLabelText(shownStatus(payoutAccount.status)), () => setProfileView("payout"))}
+            {navRow("🧾", "Tax Information", statusLabelText(shownStatus(taxProfile.status)), openTaxInfo)}
           </div>
 
           {accountSection()}
@@ -3632,9 +3644,16 @@ export default function HavenProApp() {
       needs_review: "Needs Review", failed: "Failed", expired: "Expired",
       consent_required: "Consent Required", invited: "Invited", clear: "Clear", consider: "Consider", disputed: "Disputed", suspended: "Suspended",
       self_reported: "Self-Reported", verification_available: "Ready to Verify", unable_to_verify: "Unable to Verify", rejected: "Rejected",
-      restricted: "Restricted", enabled: "Enabled",
+      restricted: "Restricted", enabled: "Enabled", not_available: "Not available yet",
     };
     return map[status] || status;
+  }
+  function notAvailableNote() {
+    return (
+      <div role="status" style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 16, marginBottom: 14, fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5 }}>
+        This step isn't available yet. Haven will open it once its verification and payout partners are connected. Until then, accepting jobs stays locked.
+      </div>
+    );
   }
   function statusPill(status) {
     const positive = ["verified", "clear", "enabled"].includes(status);
@@ -3670,7 +3689,7 @@ export default function HavenProApp() {
 
   function identityScreen() {
     const bothCaptured = identityProgress.idCaptured && identityProgress.selfieCaptured;
-    const status = identityVerification.status;
+    const status = shownStatus(identityVerification.status);
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("verificationCenter"))}>
         {backHeader("Identity Verification", () => setProfileView("verificationCenter"))}
@@ -3680,6 +3699,7 @@ export default function HavenProApp() {
           </div>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 16 }}>Verified by Persona, Haven's identity partner — Haven never reviews your ID directly.</div>
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
 
           {status === "not_started" && (
             <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
@@ -3735,7 +3755,7 @@ export default function HavenProApp() {
   }
 
   function backgroundCheckScreen() {
-    const status = backgroundCheck.status;
+    const status = shownStatus(backgroundCheck.status);
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("verificationCenter"))}>
         {backHeader("Background Check", () => setProfileView("verificationCenter"))}
@@ -3745,6 +3765,7 @@ export default function HavenProApp() {
           </div>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 16 }}>Production launch requires legal review of FCRA disclosures, consent language, and pre-/post-adverse-action procedures — not built here.</div>
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
 
           {status === "not_started" && (
             <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
@@ -3813,11 +3834,11 @@ export default function HavenProApp() {
                   </div>
                   {c.status === "verified" && c.verificationSource && <div style={{ fontSize: 10.5, fontWeight: 600, color: T.pg, fontFamily: FONT, marginTop: 3 }}>via {c.verificationSource}</div>}
                 </div>
-                {statusPill(c.status)}
+                {statusPill(shownCredentialStatus(c.status))}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {["self_reported", "verification_available"].includes(c.status) && <button onClick={() => verifyProfessionalCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.pg, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Request Verification</button>}
-                {c.status === "pending" && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.tm }}>Verifying…</span>}
+                {providerStepsOpen && ["self_reported", "verification_available"].includes(c.status) && <button onClick={() => verifyProfessionalCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.pg, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Request Verification</button>}
+                {providerStepsOpen && c.status === "pending" && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.tm }}>Verifying…</span>}
                 <button onClick={() => removeCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, background: "none", border: "none", cursor: "pointer", padding: 0, marginLeft: "auto" }}>Remove</button>
               </div>
             </div>
@@ -3847,7 +3868,7 @@ export default function HavenProApp() {
   }
 
   function payoutScreen() {
-    const status = payoutAccount.status;
+    const status = shownStatus(payoutAccount.status);
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("main"))}>
         {backHeader("Payout Method", () => setProfileView("main"))}
@@ -3856,6 +3877,7 @@ export default function HavenProApp() {
             Haven partners with Stripe Connect to handle payouts — your bank details are entered on Stripe's hosted onboarding, never collected directly by Haven.
           </div>
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
 
           {status === "not_started" && (
             <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
@@ -3908,7 +3930,8 @@ export default function HavenProApp() {
             </div>
           </div>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 }}>Current Status</div>
-          <div style={{ marginBottom: 12 }}>{statusPill(taxProfile.status)}</div>
+          <div style={{ marginBottom: 12 }}>{statusPill(shownStatus(taxProfile.status))}</div>
+{shownStatus(taxProfile.status) === "not_available" && notAvailableNote()}
           {devTestPanel("Stripe Connect tax reporting", [
             { label: "Verified", onClick: () => devSetTaxStatus("verified") },
             { label: "Pending", onClick: () => devSetTaxStatus("pending") },
@@ -3924,7 +3947,7 @@ export default function HavenProApp() {
     const readinessRow = (label, ok) => (
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0" }}>
         <span style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT }}>{label}</span>
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : "Action Required"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : label !== "Profile" && !providerStepsOpen ? "Not available yet" : "Action Required"}</span>
       </div>
     );
     return (
@@ -3946,13 +3969,13 @@ export default function HavenProApp() {
             {readinessRow("Tax Information", taxComplete)}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.bd}` }}>
               <span style={{ fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: FONT }}>Marketplace Access</span>
-              <span style={{ fontSize: 12.5, fontWeight: 800, color: marketplaceReady ? T.pg : T.emTx, fontFamily: FONT }}>{marketplaceReady ? "Ready" : "Action Required"}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: marketplaceReady ? T.pg : T.emTx, fontFamily: FONT }}>{marketplaceReady ? "Ready" : providerStepsOpen ? "Action Required" : "Not available yet"}</span>
             </div>
           </div>
 
           {sectionLabel("Required")}
-          {navRow("🪪", "Identity Verification", statusLabelText(identityVerification.status), () => setProfileView("identity"))}
-          {navRow("✅", "Background Check", statusLabelText(backgroundCheck.status), () => setProfileView("backgroundCheck"))}
+          {navRow("🪪", "Identity Verification", statusLabelText(shownStatus(identityVerification.status)), () => setProfileView("identity"))}
+          {navRow("✅", "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
 
           <div style={{ marginTop: 18 }}>{sectionLabel("Optional / Trust Boosters")}</div>
           {navRow("📜", "Professional Credentials", `${credentials.filter(c => c.status === "verified").length} verified · ${credentials.length} total`, () => setProfileView("credentials"))}
@@ -4545,11 +4568,12 @@ export default function HavenProApp() {
   }
 
   function onboardingIdentityScreen() {
-    const status = identityVerification.status;
+    const status = shownStatus(identityVerification.status);
     const bothCaptured = identityProgress.idCaptured && identityProgress.selfieCaptured;
     return onboardingChrome("Verify Your Identity", "Customers trust Haven Pros inside their homes. Verified by Persona, Haven's identity partner.", (
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
         {status === "not_started" && (
           <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Identity Verification</button>
         )}
@@ -4574,14 +4598,15 @@ export default function HavenProApp() {
           { label: "Failed", onClick: () => devSetIdentityStatus("failed") },
         ])}
       </>
-    ), { enabled: status !== "not_started", label: status === "verified" ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: status !== "not_started", label: ["not_available", "verified"].includes(status) ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingBackgroundScreen() {
-    const status = backgroundCheck.status;
+    const status = shownStatus(backgroundCheck.status);
     return onboardingChrome("Background Check", "Checkr, Haven's screening partner, runs this independently of identity verification.", (
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
         {status === "not_started" && (
           <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Background Check</button>
         )}
@@ -4602,14 +4627,15 @@ export default function HavenProApp() {
           { label: "Consider", onClick: () => devSetBackgroundStatus("consider") },
         ])}
       </>
-    ), { enabled: status !== "not_started", label: status === "clear" ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: status !== "not_started", label: ["not_available", "clear"].includes(status) ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingPayoutScreen() {
-    const status = payoutAccount.status;
+    const status = shownStatus(payoutAccount.status);
     return onboardingChrome("Set Up Payouts", "Haven partners with Stripe Connect — your bank details go directly to Stripe, never to Haven.", (
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
         {status === "not_started" && (
           <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Set Up Payouts with Stripe</button>
         )}
@@ -4622,7 +4648,7 @@ export default function HavenProApp() {
         )}
         {devTestPanel("Stripe Connect", [{ label: "Enabled", onClick: () => devSetPayoutStatus("enabled") }])}
       </>
-    ), { enabled: status !== "not_started", label: status === "enabled" ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: status !== "not_started", label: ["not_available", "enabled"].includes(status) ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingTaxScreen() {
@@ -4635,10 +4661,11 @@ export default function HavenProApp() {
             {["Individual", "LLC", "Corporation"].map(t => pill(t, null, taxClassification === t, () => setTaxClassification(t), "onb-tc-" + t))}
           </div>
         </div>
-        <div style={{ marginBottom: 12 }}>{statusPill(taxProfile.status)}</div>
-        {taxProfile.status === "not_started" && (
+        <div style={{ marginBottom: 12 }}>{statusPill(shownStatus(taxProfile.status))}</div>
+{shownStatus(taxProfile.status) === "not_available" && notAvailableNote()}
+        {shownStatus(taxProfile.status) === "not_started" && (
           <button
-            onClick={() => { if (!taxLegalName.trim()) { showToast("Enter your legal name"); return; } setTaxProfile(v => ({ ...v, status: "pending", providerReference: `tax_demo_${Math.floor(1000 + Math.random() * 8999)}` })); }}
+            onClick={() => { if (!taxLegalName.trim()) { showToast("Enter your legal name"); return; } setTaxProfile(v => ({ ...v, status: "pending", providerReference: null })); }}
             style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             Submit
@@ -4646,7 +4673,7 @@ export default function HavenProApp() {
         )}
         {devTestPanel("Stripe Connect tax reporting", [{ label: "Verified", onClick: () => devSetTaxStatus("verified") }])}
       </>
-    ), { enabled: taxProfile.status !== "not_started", label: taxProfile.status === "verified" ? "Continue" : taxProfile.status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: shownStatus(taxProfile.status) !== "not_started", label: ["verified", "not_available"].includes(shownStatus(taxProfile.status)) ? "Continue" : taxProfile.status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingCredentialsScreen() {
@@ -4659,7 +4686,7 @@ export default function HavenProApp() {
               <div style={{ fontSize: 13.5, fontWeight: 700, color: T.tx, fontFamily: FONT }}>{c.name}</div>
               <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT }}>{c.type}</div>
             </div>
-            {statusPill(c.status)}
+            {statusPill(shownCredentialStatus(c.status))}
           </div>
         ))}
         {credentialDraft ? (
@@ -4686,7 +4713,7 @@ export default function HavenProApp() {
     const readinessRow = (label, ok) => (
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0" }}>
         <span style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT }}>{label}</span>
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : "Pending"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : label !== "Profile" && !providerStepsOpen ? "Not available yet" : "Pending"}</span>
       </div>
     );
     return (
@@ -4697,7 +4724,7 @@ export default function HavenProApp() {
             {marketplaceReady ? "You're ready to find work." : "One more step before you can accept jobs."}
           </div>
           <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, textAlign: "center", marginBottom: 24, lineHeight: 1.5 }}>
-            {marketplaceReady ? "Go online whenever you want, browse jobs, and accept what fits." : "You can still browse jobs on your board — you just can't accept one until everything below is complete."}
+            {marketplaceReady ? "Go online whenever you want, browse jobs, and accept what fits." : providerStepsOpen ? "You can still browse jobs on your board — you just can't accept one until everything below is complete." : "You can browse jobs on your board. Verification and payouts aren't available yet, so accepting jobs stays locked until they open."}
           </div>
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18 }}>
             {readinessRow("Profile", profileComplete)}
