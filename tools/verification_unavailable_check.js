@@ -9,7 +9,8 @@
  *     explanation, instead of provider-looking "Pending"/"Processing" states;
  *     credentials can't be sent for a verification that doesn't exist;
  * (3) QA testers (server-confirmed) keep the steps so the QA tools work;
- * (4) readiness gating is unchanged (still the five real conditions).
+ * (4) readiness gating is unchanged (still the five real conditions);
+ * (5) the Background Check rows show ✅ only when the check is clear (PRO-02).
  */
 const fs = require("fs");
 const path = require("path");
@@ -39,4 +40,7 @@ ok(/"Accepting jobs opens once verification and payouts are available\."/.test(j
 ok(/const qaSession = !!\(qaTester && authSession && authSession\.id && accountSourceRef\.current === "auth"\);/.test(jsx) && /const providerStepsOpen = HAVEN_PROVIDER_CHECKS_CONNECTED \|\| qaSession;/.test(jsx), "server-confirmed QA testers keep the steps");
 // (4)
 ok(/const mandatoryFlags = \[profileComplete, identityVerified, backgroundApproved, payoutEnabled, taxComplete\];/.test(jsx) && /const identityVerified = identityVerification\.status === "verified";/.test(jsx), "readiness gating is unchanged");
+// (5) PRO-02: the Background Check rows show a success mark only when the check is clear
+ok(!/navRow\("✅", "Background Check"/.test(jsx) && (jsx.match(/navRow\(backgroundCheckIcon\(\), "Background Check"/g) || []).length === 2, "Background Check rows no longer hard-code ✅");
+ok(/function backgroundCheckIcon\(\) \{\s*return shownStatus\(backgroundCheck\.status\) === "clear" \? "✅" : "🛡️";/.test(jsx), "✅ only when the shown status is clear; otherwise 🛡️");
 console.log(`OK: verification/payout availability checks passed (${pass} assertions).`);
