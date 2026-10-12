@@ -397,7 +397,8 @@ function checkSources() {
   assert.ok(!adapter.includes("posted_jobs_public"), "no anonymous public jobs view");
   assert.ok(adapter.includes('actor.ok && actor.mode === "session"'), "posted board requires a session");
   assert.ok(adapter.includes("session_identity_missing"));
-  assert.ok(jsx.includes("Verify Your Contact Info"));
+  // PRO-01: the tap-to-verify contact screen was removed (it only flipped a local status).
+  assert.ok(!jsx.includes("Verify Your Contact Info") && !jsx.includes("onboardingVerifyContactScreen"), "tap-to-verify contact screen is gone");
   assert.ok(jsx.includes('setOnboardingStep("createProfile")'));
   assert.ok(adapter.includes("loadHavenProWorkspace"));
   assert.ok(adapter.includes("saveHavenProWorkspace"));
