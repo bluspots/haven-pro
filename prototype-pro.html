@@ -4016,9 +4016,11 @@ function HavenProApp() {
     );
   }
 
-  /* ── Simulated map for en-route navigation — decorative route visual,
-     plus a real, working "Open in Maps" link (city-level only, since
-     that's all the job data carries pre-full-address). ── */
+  /* ── En-route navigation: a real, working "Open in Maps" / "Get
+     Directions" link. MAP-05a: the decorative drawn route (fake road path
+     and markers) was removed. It looked like a map but showed nothing
+     real. A real job-location map waits for HB-22 (server-enforced access
+     to customer locations). ── */
   function mapPanel(job) {
     const hasDestCoords = job.lat != null && job.lng != null;
     const destination = hasDestCoords ? `${job.lat},${job.lng}` : job.city;
@@ -4033,18 +4035,9 @@ function HavenProApp() {
         rel="noopener noreferrer"
         style={{ display: "block", borderRadius: 18, overflow: "hidden", marginBottom: 16, border: `1px solid ${T.bd}`, textDecoration: "none", cursor: "pointer" }}
       >
-        <div style={{ height: 140, position: "relative", background: "linear-gradient(135deg, #DCE6DF, #C9D6CC)" }}>
-          <svg width="100%" height="100%" viewBox="0 0 300 140" style={{ position: "absolute", inset: 0 }} preserveAspectRatio="none">
-            <path d="M 40 110 Q 130 40 260 50" stroke="#0F6E4E" strokeWidth="3" strokeDasharray="7 7" fill="none" opacity="0.65" />
-            <circle cx="40" cy="110" r="7" fill="#16211D" />
-            <circle cx="260" cy="50" r="9" fill="#16A34A" stroke="#fff" strokeWidth="3" />
-          </svg>
-          <div style={{ position: "absolute", top: 10, left: 10, background: "#fff", borderRadius: 10, padding: "6px 10px", fontSize: 11, fontWeight: 700, color: T.tx, boxShadow: "0 2px 8px rgba(0,0,0,.12)" }}>
-            📍 {hasOrigin ? `Directions to ${job.city}` : `Navigating to ${job.city}`}
-          </div>
-          <div style={{ position: "absolute", bottom: 10, right: 10, background: "rgba(255,255,255,.92)", borderRadius: 8, padding: "4px 9px", fontSize: 10, fontWeight: 700, color: T.pgd }}>
-            Tap to expand ↗
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: T.w }}>
+          <span aria-hidden="true" style={{ fontSize: 18 }}>📍</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>{hasOrigin ? `Directions to ${job.city}` : `Navigating to ${job.city}`}</span>
         </div>
         <div style={{ display: "block", textAlign: "center", padding: "12px 0", background: T.cta, color: "#fff", fontSize: 13.5, fontWeight: 800, fontFamily: FONT }}>
           🗺️ {hasOrigin ? "Get Directions" : "Open in Maps"}
