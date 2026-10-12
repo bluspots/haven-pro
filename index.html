@@ -1555,7 +1555,7 @@ function HavenProApp() {
   const [notifPrefs, setNotifPrefs] = useState({ newJobs: true, emergency: true, materials: true, earnings: true });
   const [openFaq, setOpenFaq] = useState(null);
   const [online, setOnline] = useState(true);
-  const [availableJobs, setAvailableJobs] = useState(SIM_JOBS);
+  const [availableJobs, setAvailableJobs] = useState([]);
   const [activeJobs, setActiveJobs] = useState([]);
   const [completedJobsHistory, setCompletedJobsHistory] = useState([]);
   const [toast, setToast] = useState(null);
@@ -2935,19 +2935,7 @@ function HavenProApp() {
       pendingMaterialsRequest: null
     };
   }
-  function sendCustomerMessage(jobId) {
-    const text = messageDraftText.trim();
-    if (!text) return;
-    setJobMessages((prev) => ({ ...prev, [jobId]: [...prev[jobId] || [], { from: "pro", text, at: Date.now() }] }));
-    setMessageDraftText("");
-    setTimeout(() => {
-      const stillActive = activeJobsRef.current.some((j) => j.id === jobId);
-      if (!stillActive) return;
-      const replies = ["Sounds good, thank you!", "Ok, see you soon!", "Got it, thanks for the update.", "Perfect, I'll be home.", "Thanks for letting me know!"];
-      const reply = replies[Math.floor(Math.random() * replies.length)];
-      setJobMessages((prev) => ({ ...prev, [jobId]: [...prev[jobId] || [], { from: "customer", text: reply, at: Date.now() }] }));
-    }, 1800);
-  }
+  const CUSTOMER_MESSAGING_CONNECTED = false;
   function sendSupportMessage() {
     const text = supportInput.trim();
     if (!text) return;
@@ -3012,7 +3000,7 @@ function HavenProApp() {
     }
   }
   async function finalizeJob(job, finalStatus) {
-    const tipAmount = finalStatus === "complete" && Math.random() < 0.7 ? Math.round(job.payout * (0.05 + Math.random() * 0.15)) : 0;
+    const tipAmount = 0;
     const actualDurationMs = job.workStartedAt ? Date.now() - job.workStartedAt : null;
     const record = {
       id: job.id,
@@ -4078,7 +4066,7 @@ function HavenProApp() {
     const job = activeJobs.find((j) => j.id === jobId);
     if (!job) return messagesListScreen();
     const thread = jobMessages[jobId] || [];
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column" }, ...swipeBackHandlers(popMessages) }, backHeader(job.customerName, popMessages), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, textAlign: "center", marginBottom: 6 } }, job.title, " · ", job.category), /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto", padding: "0 20px 12px" } }, thread.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 24 } }, "Say hello to ", job.customerName, " if you have any questions before you arrive.") : chatBubbles(thread)), chatInputBar(messageDraftText, setMessageDraftText, () => sendCustomerMessage(jobId)));
+    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column" }, ...swipeBackHandlers(popMessages) }, backHeader(job.customerName, popMessages), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, textAlign: "center", marginBottom: 6 } }, job.title, " · ", job.category), CUSTOMER_MESSAGING_CONNECTED ? null : /* @__PURE__ */ React.createElement("div", { role: "status", style: { margin: "6px 20px 4px", padding: "10px 14px", borderRadius: 12, background: T.w, border: `1px solid ${T.bd}`, fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5 } }, "Messaging customers isn't available yet, so messages can't be sent or received here."), /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto", padding: "0 20px 12px" } }, thread.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 24 } }, "Your conversation with ", job.customerName, " will appear here once messaging is available.") : chatBubbles(thread)));
   }
   function messagesListScreen() {
     if (activeJobs.length === 0) {
@@ -4095,7 +4083,7 @@ function HavenProApp() {
           style: { width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 12, background: T.w, border: `1px solid ${T.bd}`, borderRadius: 16, padding: 14, marginBottom: 10, cursor: "pointer", fontFamily: FONT }
         },
         /* @__PURE__ */ React.createElement("div", { style: { width: 42, height: 42, borderRadius: "50%", background: T.pgt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 } }, "👤"),
-        /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, fontWeight: 800, color: T.tx } }, job.customerName), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 500, color: T.ts, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, last ? last.text : `${job.title} · Say hello`))
+        /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, fontWeight: 800, color: T.tx } }, job.customerName), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 500, color: T.ts, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, last ? last.text : `${job.title} · Messaging not available yet`))
       );
     })));
   }

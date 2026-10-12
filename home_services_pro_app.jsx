@@ -106,7 +106,8 @@ export default function HavenProApp() {
   const [notifPrefs, setNotifPrefs] = useState({ newJobs: true, emergency: true, materials: true, earnings: true });
   const [openFaq, setOpenFaq] = useState(null);
   const [online, setOnline] = useState(true);
-  const [availableJobs, setAvailableJobs] = useState(SIM_JOBS);
+  // Starts empty: the board shows only real posted jobs from the backend.
+  const [availableJobs, setAvailableJobs] = useState([]);
   const [activeJobs, setActiveJobs] = useState([]); // jobs a pro has accepted, mid-lifecycle
   const [completedJobsHistory, setCompletedJobsHistory] = useState([]);
   const [toast, setToast] = useState(null);
@@ -1656,24 +1657,11 @@ export default function HavenProApp() {
     };
   }
 
-  /* ── Message the customer — a per-job simulated thread. Auto-replies are
-     canned, since there's no real customer or backend on the other end;
-     the delay-then-reply pattern mirrors the materials auto-resolve flow,
-     including reading the LATEST activeJobs via the ref so a reply doesn't
-     fire against a job that's already completed by the time it lands. ── */
-  function sendCustomerMessage(jobId) {
-    const text = messageDraftText.trim();
-    if (!text) return;
-    setJobMessages(prev => ({ ...prev, [jobId]: [...(prev[jobId] || []), { from: "pro", text, at: Date.now() }] }));
-    setMessageDraftText("");
-    setTimeout(() => {
-      const stillActive = activeJobsRef.current.some(j => j.id === jobId);
-      if (!stillActive) return;
-      const replies = ["Sounds good, thank you!", "Ok, see you soon!", "Got it, thanks for the update.", "Perfect, I'll be home.", "Thanks for letting me know!"];
-      const reply = replies[Math.floor(Math.random() * replies.length)];
-      setJobMessages(prev => ({ ...prev, [jobId]: [...(prev[jobId] || []), { from: "customer", text: reply, at: Date.now() }] }));
-    }, 1800);
-  }
+  /* ── Messaging customers isn't connected yet (HB-04): messages aren't
+     stored or delivered, so the thread can't send, and nothing ever appears
+     as if the customer wrote it. When job_messages is connected, sending
+     goes there and replies come only from the customer. ── */
+  const CUSTOMER_MESSAGING_CONNECTED = false;
 
   function sendSupportMessage() {
     const text = supportInput.trim();
@@ -1747,7 +1735,9 @@ export default function HavenProApp() {
   }
 
   async function finalizeJob(job, finalStatus) {
-    const tipAmount = finalStatus === "complete" && Math.random() < 0.7 ? Math.round(job.payout * (0.05 + Math.random() * 0.15)) : 0;
+    // No tip is invented (HB-02). A tip appears only once the backend records
+    // a real one; until tips are connected, completed jobs carry none.
+    const tipAmount = 0;
     const actualDurationMs = job.workStartedAt ? Date.now() - job.workStartedAt : null;
     const record = {
       id: job.id, category: job.category, title: job.title, city: job.city,
@@ -3390,12 +3380,16 @@ export default function HavenProApp() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }} {...swipeBackHandlers(popMessages)}>
         {backHeader(job.customerName, popMessages)}
         <div style={{ fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, textAlign: "center", marginBottom: 6 }}>{job.title} · {job.category}</div>
+        {CUSTOMER_MESSAGING_CONNECTED ? null : (
+          <div role="status" style={{ margin: "6px 20px 4px", padding: "10px 14px", borderRadius: 12, background: T.w, border: `1px solid ${T.bd}`, fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5 }}>
+            Messaging customers isn't available yet, so messages can't be sent or received here.
+          </div>
+        )}
         <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 20px 12px" }}>
           {thread.length === 0
-            ? <div style={{ textAlign: "center", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 24 }}>Say hello to {job.customerName} if you have any questions before you arrive.</div>
+            ? <div style={{ textAlign: "center", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 24 }}>Your conversation with {job.customerName} will appear here once messaging is available.</div>
             : chatBubbles(thread)}
         </div>
-        {chatInputBar(messageDraftText, setMessageDraftText, () => sendCustomerMessage(jobId))}
       </div>
     );
   }
@@ -3421,7 +3415,7 @@ export default function HavenProApp() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 800, color: T.tx }}>{job.customerName}</div>
                   <div style={{ fontSize: 12, fontWeight: 500, color: T.ts, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {last ? last.text : `${job.title} · Say hello`}
+                    {last ? last.text : `${job.title} · Messaging not available yet`}
                   </div>
                 </div>
               </button>
