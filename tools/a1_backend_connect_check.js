@@ -672,7 +672,8 @@ function checkSources() {
     assert.ok(html.includes(ERROR_TITLE) && html.includes(ERROR_DETAIL), built + ": error copy built in");
     assert.ok(html.includes("havenConnectBackend"), built + ": connect built in");
   }
-  assert.strictEqual(read("index.html"), read("prototype-pro.html"), "index.html matches prototype-pro.html");
+  // index.html is the production build of prototype-pro.html (tools/compile_html.js), not a copy.
+  if (!process.env.HAVEN_COMPILED_SUITE) assert.strictEqual(read("index.html"), require("./compile_html.js").compileHtml(read("prototype-pro.html")), "index.html is the compiled build of prototype-pro.html");
 }
 
 async function main() {

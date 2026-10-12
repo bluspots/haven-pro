@@ -35,6 +35,7 @@ cat _shell_post_pro.txt >> "$OUT"
 
 echo "Built $OUT ($(wc -l < "$OUT") lines)"
 
-# Also publish as index.html for GitHub Pages entrypoint
-cp "$OUT" "$OUT_INDEX"
-echo "Synced $OUT_INDEX"
+# Publish index.html (the GitHub Pages entrypoint) as the production page:
+# the same page with its JSX compiled ahead of time, no Babel, and production
+# React. See tools/compile_html.js. Needs `npm install` (esbuild).
+node tools/compile_html.js "$OUT" "$OUT_INDEX"
