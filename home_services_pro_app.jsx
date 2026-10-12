@@ -3582,7 +3582,7 @@ export default function HavenProApp() {
           <div style={{ marginBottom: 14 }}>
             {sectionLabel("Verification")}
             {navRow("🪪", "Identity", statusLabelText(shownStatus(identityVerification.status)), () => setProfileView("identity"))}
-            {navRow("✅", "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
+            {navRow(backgroundCheckIcon(), "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
             {navRow("📜", "Professional Credentials", `${credentials.filter(c => c.status === "verified").length} verified · ${credentials.length} total`, () => setProfileView("credentials"))}
           </div>
 
@@ -3653,6 +3653,11 @@ export default function HavenProApp() {
         This step isn't available yet. Haven will open it once its verification and payout partners are connected. Until then, accepting jobs stays locked.
       </div>
     );
+  }
+  // PRO-02: a green check only when the check is actually clear; otherwise the
+  // shield the setup card already uses for "not ready yet".
+  function backgroundCheckIcon() {
+    return shownStatus(backgroundCheck.status) === "clear" ? "✅" : "🛡️";
   }
   function statusPill(status) {
     const positive = ["verified", "clear", "enabled"].includes(status);
@@ -3974,7 +3979,7 @@ export default function HavenProApp() {
 
           {sectionLabel("Required")}
           {navRow("🪪", "Identity Verification", statusLabelText(shownStatus(identityVerification.status)), () => setProfileView("identity"))}
-          {navRow("✅", "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
+          {navRow(backgroundCheckIcon(), "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
 
           <div style={{ marginTop: 18 }}>{sectionLabel("Optional / Trust Boosters")}</div>
           {navRow("📜", "Professional Credentials", `${credentials.filter(c => c.status === "verified").length} verified · ${credentials.length} total`, () => setProfileView("credentials"))}
