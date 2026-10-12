@@ -492,7 +492,10 @@ async function checkStaleCacheRecovery() {
     assert.strictEqual(be.rows[PRO_ID].home_city, "Tampa, FL", "city reached the server");
     assert.strictEqual(wsStatus(be.rows[PRO_ID].pro_workspace, "identityVerification"), "not_started", "server never got the stale verified");
     await openProfileMain(window);
-    assert.ok(/Not Started/.test(identityRowStatus(window)), "local identity replaced with the server value: " + identityRowStatus(window));
+    // HB-13: for a non-QA Pro the row shows "Not available yet" (no provider is
+    // connected); the stale cached "Verified" must never show. The stored value
+    // is checked just below.
+    assert.ok(/Not available yet/.test(identityRowStatus(window)) && !/Verified/.test(identityRowStatus(window)), "local identity replaced with the server value: " + identityRowStatus(window));
     const cache = JSON.parse(window.localStorage.getItem("haven_pro_workspace_v1"));
     assert.strictEqual(cache.byUserId[PRO_ID].identityVerification.status, "not_started", "device cache replaced with the server value");
     assert.strictEqual(cache.byUserId[PRO_ID].firstName, "Grace", "device cache keeps the name");
@@ -545,7 +548,9 @@ async function checkSameTabSwitch() {
     assert.strictEqual(wsStatus(ws, "taxProfile"), "not_started");
     assert.strictEqual(be.count(e => e.type === "GET_WS"), 0, "no recovery was needed");
     await openProfileMain(window);
-    assert.ok(/Not Started/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
+    // HB-13: a non-tester sees "Not available yet" (stored value checked above),
+    // never the previous tester's "Verified".
+    assert.ok(/Not available yet/.test(identityRowStatus(window)) && !/Verified/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
   });
 }
 
