@@ -1682,7 +1682,7 @@ async function saveHavenProProfile(userId, changes, opts) {
     } else {
       const read = await havenReadProWorkspaceForWrite(cfg, headers, userId);
       // Without the server's current workspace a merge could drop keys: do not write.
-      if (!read.ok) return { ok: false, reason: read.reason || "read_failed" };
+      if (!read.ok) return { ok: false, reason: read.reason || "read_failed", readFailed: true };
       baseWs = read.workspace;
     }
   }
@@ -1921,7 +1921,12 @@ const HAVEN_GEOCODE_FAILED_COPY = "We couldn't find that location. Check the cit
 // written. Coordinates are never diffed: they are derived from the city and
 // only saved together with a city that resolved. A name change sends both
 // name parts so display_name stays whole.
-function havenProfileChanges(base, next) {
+// Phase 1B follow-up: the pre-save read of the server profile failed, so
+// nothing was saved. Shown with a Retry button; the form keeps the edits.
+const HAVEN_PROFILE_READ_FAILED_COPY = "We couldn't reach Haven to save your profile. Your changes are still here. Check your connection and tap Retry.";
+// Any other failed explicit save (also shown with Retry).
+const HAVEN_PROFILE_SAVE_FAILED_COPY = "Your profile wasn't saved. Your changes are still here. Tap Retry to try again.";
+function havenProfileChanges(base, next, opts) {
   const out = {};
   if (!next || typeof next !== "object") return out;
   const b = base && typeof base === "object" ? base : {};
@@ -1935,7 +1940,7 @@ function havenProfileChanges(base, next) {
   }
   // Create Your Profile binds the city field to state on every keystroke.
   // The city is saved when the step is left (checked by Continue), not while typing.
-  if (next.onboardingStep === "createProfile" && next.onboardingStatus !== "completed") delete out.homeCity;
+  if (!(opts && opts.includeCity) && next.onboardingStep === "createProfile" && next.onboardingStatus !== "completed") delete out.homeCity;
   return out;
 }
 // HB-13: identity / background-check / payout / tax providers aren't connected yet.
@@ -2102,6 +2107,10 @@ function HavenProApp() {
   // Profile sub-navigation + drafts (draft/commit pattern so typing never silently saves)
   const [profileView, setProfileView] = useState("main"); // main | edit | categories | settings
   const [editDraft, setEditDraft] = useState(null);
+  // Phase 1B follow-up: an explicit profile save (Edit Profile / Create Your
+  // Profile) that failed: { where: "edit" | "onboarding", message }.
+  const [profileSaveError, setProfileSaveError] = useState(null);
+  const [profileSaveBusy, setProfileSaveBusy] = useState(false);
   const [categoriesDraft, setCategoriesDraft] = useState(null);
 
   /* ── Verification / Payouts & Tax — production-shaped state model.
@@ -2891,6 +2900,7 @@ function HavenProApp() {
         setOperatingLng(w.operatingLng);
       }
     }
+    if (res && !res.ok && res.readFailed) showToast(HAVEN_PROFILE_READ_FAILED_COPY);
     if (res && res.geocodeFailed) {
       const latest = latestProfileSnapshotRef.current;
       // Put the previous city and point back, unless the user already typed another city.
@@ -2904,6 +2914,44 @@ function HavenProApp() {
       }
       showToast(HAVEN_GEOCODE_FAILED_COPY);
     }
+  }
+  // Phase 1B follow-up: save the given profile values now, through the same
+  // read-then-merge path, and report the result so the caller can keep its
+  // form open on failure. Signed-out / local accounts: nothing to save here.
+  async function saveProfileNow(overrides, opts) {
+    const userId = authSession && authSession.id;
+    if (!userId || accountSourceRef.current === "local" || profileHydratedForRef.current !== userId || !profileBaselineRef.current) {
+      return { ok: true, skipped: true };
+    }
+    let out = null;
+    const run = async function () {
+      if (profileHydrateUserRef.current !== userId || !profileBaselineRef.current) { out = { ok: false, reason: "not_ready" }; return; }
+      const next = Object.assign({}, latestProfileSnapshotRef.current || buildHavenProWorkspaceSnapshot(), overrides || {});
+      const changes = havenProfileChanges(profileBaselineRef.current, next, opts);
+      if (!Object.keys(changes).length) { out = { ok: true, written: {} }; return; }
+      let res = null;
+      try { res = await saveProProfileWithGuardRecovery(userId, changes); } catch (e) { res = null; }
+      out = res || { ok: false, reason: "exception" };
+      if (out.ok && out.written && profileBaselineRef.current) {
+        profileBaselineRef.current = Object.assign({}, profileBaselineRef.current, out.written);
+      }
+    };
+    const chain = profileWriteChainRef.current.then(run).catch(() => {});
+    profileWriteChainRef.current = chain;
+    await chain;
+    return out || { ok: false, reason: "exception" };
+  }
+  function profileSaveErrorFor(res) {
+    return res && res.readFailed ? HAVEN_PROFILE_READ_FAILED_COPY : HAVEN_PROFILE_SAVE_FAILED_COPY;
+  }
+  function profileSaveErrorBanner(where, onRetry) {
+    if (!profileSaveError || profileSaveError.where !== where) return null;
+    return (
+      <div role="alert" style={{ margin: "0 0 14px", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontWeight: 600, fontFamily: FONT }}>
+        <div style={{ marginBottom: 10 }}>{profileSaveError.message}</div>
+        <button onClick={onRetry} disabled={profileSaveBusy} style={{ border: `1px solid ${T.pg}`, background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "10px 16px", borderRadius: 10, minHeight: 44 }}>{profileSaveBusy ? "Retrying…" : "Retry"}</button>
+      </div>
+    );
   }
   function requestProfileSync(userId) {
     const chain = profileWriteChainRef.current.then(() => runProfileSync(userId)).catch(() => {});
@@ -3960,6 +4008,27 @@ function HavenProApp() {
         return;
       }
     }
+    // Phase 1B follow-up: save from the form, so a failed save keeps it open
+    // with the edits and a Retry (which reads the server again, then saves).
+    const draft = editDraft;
+    if (profileSaveBusy) return;
+    setProfileSaveBusy(true);
+    let res = null;
+    try {
+      res = await saveProfileNow({ firstName: draft.firstName, lastName: draft.lastName, about: draft.about, homeCity: draft.homeCity, avatarEmoji: draft.avatarEmoji });
+    } finally {
+      setProfileSaveBusy(false);
+    }
+    if (!res || !res.ok) {
+      if (res && res.geocodeFailed && !res.readFailed) { setProfileSaveError(null); showToast(HAVEN_GEOCODE_FAILED_COPY); return; }
+      setProfileSaveError({ where: "edit", message: profileSaveErrorFor(res) });
+      return;
+    }
+    setProfileSaveError(null);
+    if (res.written && Object.prototype.hasOwnProperty.call(res.written, "operatingLat")) {
+      setOperatingLat(res.written.operatingLat);
+      setOperatingLng(res.written.operatingLng);
+    }
     setFirstName(editDraft.firstName);
     setLastName(editDraft.lastName);
     setAbout(editDraft.about);
@@ -3971,6 +4040,7 @@ function HavenProApp() {
     showToast("Profile updated");
   }
   function cancelEditProfile() {
+    setProfileSaveError(null);
     setEditDraft(null);
     setProfileView("main");
   }
@@ -5979,6 +6049,7 @@ function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(cancelEditProfile)}>
         {subScreenHeader("Edit Profile", cancelEditProfile, saveEditProfile)}
         <div style={{ padding: "0 20px 32px" }}>
+          {profileSaveErrorBanner("edit", saveEditProfile)}
           <div style={{ marginBottom: 18 }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 }}>Profile Photo</div>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
@@ -6467,6 +6538,7 @@ function HavenProApp() {
     }
     return onboardingChrome("Create Your Profile", "Haven Pro represents you as an individual — no business info needed.", (
       <>
+        {profileSaveErrorBanner("onboarding", continueFromCreateProfile)}
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 20 }}>
           <label style={{ cursor: "pointer" }}>
             <input type="file" accept="image/*" onChange={handlePhotoUpload} style={{ display: "none" }} />
@@ -6502,6 +6574,22 @@ function HavenProApp() {
         showToast(HAVEN_GEOCODE_FAILED_COPY);
         return;
       }
+    }
+    // Phase 1B follow-up: save this step's city (and the rest of the step)
+    // before moving on. A failed save stays here with the values and a Retry.
+    if (profileSaveBusy) return;
+    setProfileSaveBusy(true);
+    let res = null;
+    try { res = await saveProfileNow({}, { includeCity: true }); } finally { setProfileSaveBusy(false); }
+    if (!res || !res.ok) {
+      if (res && res.geocodeFailed && !res.readFailed) { setProfileSaveError(null); showToast(HAVEN_GEOCODE_FAILED_COPY); return; }
+      setProfileSaveError({ where: "onboarding", message: profileSaveErrorFor(res) });
+      return;
+    }
+    setProfileSaveError(null);
+    if (res.written && Object.prototype.hasOwnProperty.call(res.written, "operatingLat")) {
+      setOperatingLat(res.written.operatingLat);
+      setOperatingLng(res.written.operatingLng);
     }
     onboardingNext();
   }

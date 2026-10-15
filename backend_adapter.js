@@ -1331,7 +1331,7 @@ async function saveHavenProProfile(userId, changes, opts) {
     } else {
       const read = await havenReadProWorkspaceForWrite(cfg, headers, userId);
       // Without the server's current workspace a merge could drop keys: do not write.
-      if (!read.ok) return { ok: false, reason: read.reason || "read_failed" };
+      if (!read.ok) return { ok: false, reason: read.reason || "read_failed", readFailed: true };
       baseWs = read.workspace;
     }
   }

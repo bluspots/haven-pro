@@ -34,6 +34,7 @@ const root = path.resolve(__dirname, "..");
 const PRO_ID = "cccccccc-dddd-4eee-8fff-0000000001b6";
 const DEMO_IDS = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
 const GEOCODE_COPY = "We couldn't find that location. Check the city and try again.";
+const READ_FAILED_COPY = "We couldn't reach Haven to save your profile. Your changes are still here. Check your connection and tap Retry.";
 const ORLANDO = { lat: 28.5421, lng: -81.379 };
 const SF = { lat: 37.7749, lng: -122.4194 };
 const TAMPA = { lat: 27.9506, lng: -82.4572 };
@@ -137,6 +138,11 @@ function backend(row) {
         if (!match) return json(200, []);
         st.row = Object.assign({}, st.row, clone(body));
         return json(200, [st.row]);
+      }
+      // The pre-save read (select=pro_workspace only) can be made to fail.
+      if (st.failWsRead && /[?&]select=pro_workspace$/.test(url)) {
+        st.events.push({ type: "GET_WS_FAILED", uid });
+        return json(503, { message: "Service Unavailable" });
       }
       st.events.push({ type: "GET", uid, url: url.replace(/^https:\/\/[^/]+/, "") });
       return json(200, uid === st.row.id ? [clone(st.row)] : []);
@@ -376,6 +382,94 @@ async function checkGeocodeFailureEdit() {
   }
 }
 
+function inputValue(window, placeholder) {
+  const el = Array.from(window.document.querySelectorAll("input")).find(e => e.placeholder === placeholder);
+  return el ? el.value : null;
+}
+function hasLeaf(window, label) {
+  return Array.from(window.document.querySelectorAll("#root *")).some(el => el.children.length === 0 && (el.textContent || "").trim() === label);
+}
+
+// ── Pre-save read fails on Edit Profile: error + Retry, edits kept ───────
+async function checkReadFailureEdit() {
+  const be = backend(serverRow());
+  const wsBefore = clone(be.row.pro_workspace);
+  const ref = { session: session() };
+  await withApp(be, ref, {}, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "read-fail signed-in app");
+    await settle(be);
+    await openProfileMain(window);
+    clickText(window, "Edit Profile");
+    await waitFor(window, t => t.includes("Home Operating City"), "Edit Profile");
+    setInput(window, "City, ST", "Tampa, FL");
+    setTextarea(window, "Now based in Tampa.");
+    await sleep(30);
+    be.failWsRead = true;
+    const before = be.events.length;
+    clickText(window, "Save");
+    await waitFor(window, t => t.includes(READ_FAILED_COPY), "read-failure message on Edit Profile");
+    await settle(be);
+    assert.ok(be.events.slice(before).some(e => e.type === "GET_WS_FAILED"), "read-fail: the pre-save read was attempted");
+    assert.strictEqual(be.events.slice(before).filter(e => e.type === "PATCH").length, 0, "read-fail: nothing written");
+    assert.ok(hasLeaf(window, "Retry"), "read-fail: Retry button shown");
+    assert.ok(rootText(window).includes("Home Operating City"), "read-fail: Edit Profile stays open");
+    assert.strictEqual(inputValue(window, "City, ST"), "Tampa, FL", "read-fail: city edit kept in the form");
+    assert.strictEqual(window.document.querySelector("#root textarea").value, "Now based in Tampa.", "read-fail: About edit kept in the form");
+    assert.strictEqual(be.row.home_city, "Orlando, FL", "read-fail: server unchanged");
+    assert.deepStrictEqual(be.row.pro_workspace, wsBefore, "read-fail: server workspace unchanged");
+    // Retry reads again, then saves only the changed fields.
+    be.failWsRead = false;
+    const beforeRetry = be.events.length;
+    clickText(window, "Retry");
+    await waitFor(window, () => serviceArea(window) === "Tampa, FL", "retry: back on Profile with Tampa");
+    await settle(be);
+    const ev = be.events.slice(beforeRetry);
+    assert.ok(ev.some(e => e.type === "GET" && /select=pro_workspace$/.test(e.url)), "retry: re-read the server workspace");
+    const patches = ev.filter(e => e.type === "PATCH");
+    assert.strictEqual(patches.length, 1, "retry: one save: " + JSON.stringify(patches.map(p => p.body)));
+    assert.deepStrictEqual(Object.keys(patches[0].body).sort(), ["home_city", "operating_lat", "operating_lng", "pro_workspace"], "retry: only the changed columns");
+    assert.strictEqual(patches[0].body.home_city, "Tampa, FL");
+    assert.strictEqual(patches[0].body.operating_lat, TAMPA.lat);
+    assert.deepStrictEqual(patches[0].body.pro_workspace, Object.assign(clone(wsBefore), { homeCity: "Tampa, FL", about: "Now based in Tampa.", operatingLat: TAMPA.lat, operatingLng: TAMPA.lng }), "retry: only city/about/point merged into the server workspace");
+    assert.ok(!rootText(window).includes(READ_FAILED_COPY), "retry: error cleared");
+  });
+  assertNoDemoIds(be);
+}
+
+// ── Pre-save read fails on Create Your Profile: error + Retry ────────────
+async function checkReadFailureOnboarding() {
+  const blank = { id: PRO_ID, role: "pro", display_name: null, email: "qa@example.com", first_name: null, last_name: null, home_city: null, work_categories: [], operating_lat: null, operating_lng: null, pro_workspace: {} };
+  const be = backend(blank);
+  const ref = { session: session() };
+  await withApp(be, ref, {}, async (window) => {
+    await waitFor(window, t => t.includes("Continue"), "welcome with a session");
+    clickText(window, "Continue");
+    await waitFor(window, t => t.includes("Create Your Profile"), "Create Your Profile");
+    setInput(window, "e.g. Orlando, FL", "Tampa, FL");
+    await settle(be);
+    be.failWsRead = true;
+    const before = be.events.length;
+    clickText(window, "Continue");
+    await waitFor(window, t => t.includes(READ_FAILED_COPY), "read-failure message on Create Your Profile");
+    await settle(be);
+    assert.ok(hasLeaf(window, "Retry"), "onboarding read-fail: Retry shown");
+    assert.ok(rootText(window).includes("Create Your Profile"), "onboarding read-fail: stays on the step");
+    assert.strictEqual(inputValue(window, "e.g. Orlando, FL"), "Tampa, FL", "onboarding read-fail: city kept");
+    assert.ok(!be.events.slice(before).some(e => e.type === "PATCH" && "home_city" in e.body), "onboarding read-fail: city not written");
+    assert.strictEqual(be.row.home_city, null);
+    be.failWsRead = false;
+    const beforeRetry = be.events.length;
+    clickText(window, "Retry");
+    await waitFor(window, t => t.includes("What kind of work"), "retry: categories step");
+    await settle(be);
+    const cityPatch = be.events.slice(beforeRetry).filter(e => e.type === "PATCH" && "home_city" in e.body);
+    assert.strictEqual(cityPatch.length, 1, "onboarding retry: city saved once");
+    assert.strictEqual(be.row.home_city, "Tampa, FL");
+    assert.strictEqual(be.row.operating_lat, TAMPA.lat, "onboarding retry: saved with its point");
+  });
+  assertNoDemoIds(be);
+}
+
 // ── Geocode failure on Create Your Profile (onboarding) ──────────────────
 async function checkGeocodeFailureOnboarding() {
   const blank = { id: PRO_ID, role: "pro", display_name: null, email: "qa@example.com", first_name: null, last_name: null, home_city: null, work_categories: [], operating_lat: null, operating_lng: null, pro_workspace: {} };
@@ -498,11 +592,13 @@ async function main() {
     await checkGeocodeFailureEdit();
     await checkGeocodeFailureOnboarding();
     await checkNormalEdit();
+    await checkReadFailureEdit();
+    await checkReadFailureOnboarding();
     await checkAdapterSavePath();
   } finally {
     console.warn = origWarn;
   }
-  console.log("OK: Phase 1B profile no-overwrite checks passed (S3, S4, S6, load backfill, geocode failure x3, normal edit).");
+  console.log("OK: Phase 1B profile no-overwrite checks passed (S3, S4, S6, load backfill, geocode failure x3, normal edit, pre-save read failure + Retry x2).");
 }
 
 main().catch(err => {

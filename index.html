@@ -1452,7 +1452,7 @@ async function saveHavenProProfile(userId, changes, opts) {
       baseWs = o.serverWorkspace;
     } else {
       const read = await havenReadProWorkspaceForWrite(cfg, headers, userId);
-      if (!read.ok) return { ok: false, reason: read.reason || "read_failed" };
+      if (!read.ok) return { ok: false, reason: read.reason || "read_failed", readFailed: true };
       baseWs = read.workspace;
     }
   }
@@ -1658,7 +1658,9 @@ function havenGuardedSignature(snapshot) {
   return JSON.stringify([g.identityVerification.status, g.backgroundCheck.status, g.payoutAccount.status, g.payoutAccount.payoutsEnabled, g.taxProfile.status]);
 }
 const HAVEN_GEOCODE_FAILED_COPY = "We couldn't find that location. Check the city and try again.";
-function havenProfileChanges(base, next) {
+const HAVEN_PROFILE_READ_FAILED_COPY = "We couldn't reach Haven to save your profile. Your changes are still here. Check your connection and tap Retry.";
+const HAVEN_PROFILE_SAVE_FAILED_COPY = "Your profile wasn't saved. Your changes are still here. Tap Retry to try again.";
+function havenProfileChanges(base, next, opts) {
   const out = {};
   if (!next || typeof next !== "object") return out;
   const b = base && typeof base === "object" ? base : {};
@@ -1670,7 +1672,7 @@ function havenProfileChanges(base, next) {
     out.firstName = next.firstName;
     out.lastName = next.lastName;
   }
-  if (next.onboardingStep === "createProfile" && next.onboardingStatus !== "completed") delete out.homeCity;
+  if (!(opts && opts.includeCity) && next.onboardingStep === "createProfile" && next.onboardingStatus !== "completed") delete out.homeCity;
   return out;
 }
 const HAVEN_PROVIDER_CHECKS_CONNECTED = false;
@@ -1805,6 +1807,8 @@ function HavenProApp() {
   }, [activeJobs]);
   const [profileView, setProfileView] = useState("main");
   const [editDraft, setEditDraft] = useState(null);
+  const [profileSaveError, setProfileSaveError] = useState(null);
+  const [profileSaveBusy, setProfileSaveBusy] = useState(false);
   const [categoriesDraft, setCategoriesDraft] = useState(null);
   const [identityVerification, setIdentityVerification] = useState(havenDefaultIdentityVerification);
   const [identityProgress, setIdentityProgress] = useState({ idCaptured: false, selfieCaptured: false });
@@ -2488,6 +2492,7 @@ function HavenProApp() {
         setOperatingLng(w.operatingLng);
       }
     }
+    if (res && !res.ok && res.readFailed) showToast(HAVEN_PROFILE_READ_FAILED_COPY);
     if (res && res.geocodeFailed) {
       const latest = latestProfileSnapshotRef.current;
       if (latest && latest.homeCity === changes.homeCity && profileBaselineRef.current) {
@@ -2500,6 +2505,47 @@ function HavenProApp() {
       }
       showToast(HAVEN_GEOCODE_FAILED_COPY);
     }
+  }
+  async function saveProfileNow(overrides, opts) {
+    const userId = authSession && authSession.id;
+    if (!userId || accountSourceRef.current === "local" || profileHydratedForRef.current !== userId || !profileBaselineRef.current) {
+      return { ok: true, skipped: true };
+    }
+    let out = null;
+    const run = async function() {
+      if (profileHydrateUserRef.current !== userId || !profileBaselineRef.current) {
+        out = { ok: false, reason: "not_ready" };
+        return;
+      }
+      const next = Object.assign({}, latestProfileSnapshotRef.current || buildHavenProWorkspaceSnapshot(), overrides || {});
+      const changes = havenProfileChanges(profileBaselineRef.current, next, opts);
+      if (!Object.keys(changes).length) {
+        out = { ok: true, written: {} };
+        return;
+      }
+      let res = null;
+      try {
+        res = await saveProProfileWithGuardRecovery(userId, changes);
+      } catch (e) {
+        res = null;
+      }
+      out = res || { ok: false, reason: "exception" };
+      if (out.ok && out.written && profileBaselineRef.current) {
+        profileBaselineRef.current = Object.assign({}, profileBaselineRef.current, out.written);
+      }
+    };
+    const chain = profileWriteChainRef.current.then(run).catch(() => {
+    });
+    profileWriteChainRef.current = chain;
+    await chain;
+    return out || { ok: false, reason: "exception" };
+  }
+  function profileSaveErrorFor(res) {
+    return res && res.readFailed ? HAVEN_PROFILE_READ_FAILED_COPY : HAVEN_PROFILE_SAVE_FAILED_COPY;
+  }
+  function profileSaveErrorBanner(where, onRetry) {
+    if (!profileSaveError || profileSaveError.where !== where) return null;
+    return /* @__PURE__ */ React.createElement("div", { role: "alert", style: { margin: "0 0 14px", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontWeight: 600, fontFamily: FONT } }, /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 10 } }, profileSaveError.message), /* @__PURE__ */ React.createElement("button", { onClick: onRetry, disabled: profileSaveBusy, style: { border: `1px solid ${T.pg}`, background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "10px 16px", borderRadius: 10, minHeight: 44 } }, profileSaveBusy ? "Retrying…" : "Retry"));
   }
   function requestProfileSync(userId) {
     const chain = profileWriteChainRef.current.then(() => runProfileSync(userId)).catch(() => {
@@ -3461,6 +3507,29 @@ function HavenProApp() {
         return;
       }
     }
+    const draft = editDraft;
+    if (profileSaveBusy) return;
+    setProfileSaveBusy(true);
+    let res = null;
+    try {
+      res = await saveProfileNow({ firstName: draft.firstName, lastName: draft.lastName, about: draft.about, homeCity: draft.homeCity, avatarEmoji: draft.avatarEmoji });
+    } finally {
+      setProfileSaveBusy(false);
+    }
+    if (!res || !res.ok) {
+      if (res && res.geocodeFailed && !res.readFailed) {
+        setProfileSaveError(null);
+        showToast(HAVEN_GEOCODE_FAILED_COPY);
+        return;
+      }
+      setProfileSaveError({ where: "edit", message: profileSaveErrorFor(res) });
+      return;
+    }
+    setProfileSaveError(null);
+    if (res.written && Object.prototype.hasOwnProperty.call(res.written, "operatingLat")) {
+      setOperatingLat(res.written.operatingLat);
+      setOperatingLng(res.written.operatingLng);
+    }
     setFirstName(editDraft.firstName);
     setLastName(editDraft.lastName);
     setAbout(editDraft.about);
@@ -3472,6 +3541,7 @@ function HavenProApp() {
     showToast("Profile updated");
   }
   function cancelEditProfile() {
+    setProfileSaveError(null);
     setEditDraft(null);
     setProfileView("main");
   }
@@ -4524,7 +4594,7 @@ function HavenProApp() {
         }
       ));
     }
-    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelEditProfile) }, subScreenHeader("Edit Profile", cancelEditProfile, saveEditProfile), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 } }, "Profile Photo"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 56, height: 56, borderRadius: "50%", background: T.pgt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, overflow: "hidden", flexShrink: 0 } }, d.avatarPhoto ? /* @__PURE__ */ React.createElement("img", { src: d.avatarPhoto, alt: "Profile", style: { width: "100%", height: "100%", objectFit: "cover" } }) : d.avatarEmoji), /* @__PURE__ */ React.createElement("label", { style: { display: "inline-block", padding: "9px 14px", borderRadius: 10, border: `1px solid ${T.pg}`, color: T.pg, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Upload Photo", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handlePhotoUpload, style: { display: "none" } })), d.avatarPhoto && /* @__PURE__ */ React.createElement("button", { onClick: () => set("avatarPhoto", null), style: { border: "none", background: "none", color: T.ts, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Remove")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginBottom: 10 } }, "Or pick an icon instead:"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, AVATAR_OPTIONS.map((a) => /* @__PURE__ */ React.createElement("button", { key: a, onClick: () => {
+    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelEditProfile) }, subScreenHeader("Edit Profile", cancelEditProfile, saveEditProfile), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, profileSaveErrorBanner("edit", saveEditProfile), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 } }, "Profile Photo"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 56, height: 56, borderRadius: "50%", background: T.pgt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, overflow: "hidden", flexShrink: 0 } }, d.avatarPhoto ? /* @__PURE__ */ React.createElement("img", { src: d.avatarPhoto, alt: "Profile", style: { width: "100%", height: "100%", objectFit: "cover" } }) : d.avatarEmoji), /* @__PURE__ */ React.createElement("label", { style: { display: "inline-block", padding: "9px 14px", borderRadius: 10, border: `1px solid ${T.pg}`, color: T.pg, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Upload Photo", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handlePhotoUpload, style: { display: "none" } })), d.avatarPhoto && /* @__PURE__ */ React.createElement("button", { onClick: () => set("avatarPhoto", null), style: { border: "none", background: "none", color: T.ts, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Remove")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginBottom: 10 } }, "Or pick an icon instead:"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, AVATAR_OPTIONS.map((a) => /* @__PURE__ */ React.createElement("button", { key: a, onClick: () => {
       set("avatarEmoji", a);
       set("avatarPhoto", null);
     }, className: "hp-chip", style: { width: 46, height: 46, borderRadius: "50%", border: `2px solid ${!d.avatarPhoto && d.avatarEmoji === a ? T.pg : T.bd}`, background: !d.avatarPhoto && d.avatarEmoji === a ? T.pgt : T.w, fontSize: 20, cursor: "pointer" } }, a)))), field("First Name", d.firstName, (v) => set("firstName", v)), field("Last Name", d.lastName, (v) => set("lastName", v)), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 14 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "About"), /* @__PURE__ */ React.createElement(
@@ -4750,7 +4820,7 @@ function HavenProApp() {
       reader.onload = (ev) => setAvatarPhoto(ev.target.result);
       reader.readAsDataURL(file);
     }
-    return onboardingChrome("Create Your Profile", "Haven Pro represents you as an individual — no business info needed.", /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "center", marginBottom: 20 } }, /* @__PURE__ */ React.createElement("label", { style: { cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handlePhotoUpload, style: { display: "none" } }), /* @__PURE__ */ React.createElement("div", { style: { width: 84, height: 84, borderRadius: "50%", background: T.pgt, border: `2px dashed ${T.pg}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, overflow: "hidden" } }, avatarPhoto ? /* @__PURE__ */ React.createElement("img", { src: avatarPhoto, alt: "", style: { width: "100%", height: "100%", objectFit: "cover" } }) : avatarEmoji), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", fontSize: 11, fontWeight: 700, color: T.pg, fontFamily: FONT, marginTop: 6 } }, "Add Photo (Optional)"))), formField("Home Operating City", homeCity, setHomeCity, "e.g. Orlando, FL"), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 14 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "About (Optional)"), /* @__PURE__ */ React.createElement(
+    return onboardingChrome("Create Your Profile", "Haven Pro represents you as an individual — no business info needed.", /* @__PURE__ */ React.createElement(React.Fragment, null, profileSaveErrorBanner("onboarding", continueFromCreateProfile), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "center", marginBottom: 20 } }, /* @__PURE__ */ React.createElement("label", { style: { cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handlePhotoUpload, style: { display: "none" } }), /* @__PURE__ */ React.createElement("div", { style: { width: 84, height: 84, borderRadius: "50%", background: T.pgt, border: `2px dashed ${T.pg}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, overflow: "hidden" } }, avatarPhoto ? /* @__PURE__ */ React.createElement("img", { src: avatarPhoto, alt: "", style: { width: "100%", height: "100%", objectFit: "cover" } }) : avatarEmoji), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", fontSize: 11, fontWeight: 700, color: T.pg, fontFamily: FONT, marginTop: 6 } }, "Add Photo (Optional)"))), formField("Home Operating City", homeCity, setHomeCity, "e.g. Orlando, FL"), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 14 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "About (Optional)"), /* @__PURE__ */ React.createElement(
       "textarea",
       {
         value: about,
@@ -4775,6 +4845,28 @@ function HavenProApp() {
         showToast(HAVEN_GEOCODE_FAILED_COPY);
         return;
       }
+    }
+    if (profileSaveBusy) return;
+    setProfileSaveBusy(true);
+    let res = null;
+    try {
+      res = await saveProfileNow({}, { includeCity: true });
+    } finally {
+      setProfileSaveBusy(false);
+    }
+    if (!res || !res.ok) {
+      if (res && res.geocodeFailed && !res.readFailed) {
+        setProfileSaveError(null);
+        showToast(HAVEN_GEOCODE_FAILED_COPY);
+        return;
+      }
+      setProfileSaveError({ where: "onboarding", message: profileSaveErrorFor(res) });
+      return;
+    }
+    setProfileSaveError(null);
+    if (res.written && Object.prototype.hasOwnProperty.call(res.written, "operatingLat")) {
+      setOperatingLat(res.written.operatingLat);
+      setOperatingLng(res.written.operatingLng);
     }
     onboardingNext();
   }
