@@ -116,6 +116,7 @@ function backend(row) {
     if (url.includes("api.mapbox.com")) {
       const q = decodeURIComponent((url.match(/q=([^&]+)/) || [])[1] || "");
       st.geocodeCalls.push(q);
+      if (typeof st.onGeocode === "function") st.onGeocode(q);
       if (st.mapbox === "403") return json(403, { message: "Forbidden" });
       const pt = /orlando/i.test(q) ? ORLANDO : /san francisco/i.test(q) ? SF : /tampa/i.test(q) ? TAMPA : null;
       return json(200, { features: pt ? [{ geometry: { coordinates: [pt.lng, pt.lat] } }] : [] });
@@ -126,6 +127,10 @@ function backend(row) {
     if (url.includes("/rest/v1/profiles")) {
       const idm = url.match(/[?&]id=eq\.([^&]+)/);
       const uid = idm ? decodeURIComponent(idm[1]) : "";
+      if (method === "POST" || method === "PUT") {
+        st.events.push({ type: "INSERT", uid, url: url.replace(/^https:\/\/[^/]+/, ""), body: init.body || "" });
+        return json(201, []);
+      }
       if (method === "PATCH") {
         const body = JSON.parse(init.body || "{}");
         const ev = { type: "PATCH", uid, url: url.replace(/^https:\/\/[^/]+/, ""), body };
@@ -150,6 +155,7 @@ function backend(row) {
     return json(200, []);
   };
   st.patches = () => st.events.filter(e => e.type === "PATCH");
+  st.writes = () => st.events.filter(e => e.type === "PATCH" || e.type === "INSERT");
   return st;
 }
 
@@ -345,6 +351,119 @@ async function checkLoadBackfill() {
     assert.strictEqual(be.row.operating_lat, ORLANDO.lat);
     assert.deepStrictEqual(be.row.pro_workspace, wsBefore, "backfill: workspace untouched");
   });
+}
+
+// ── L5: empty server row + full device cache: load writes nothing ────────
+// The device cache (San Francisco) is never uploaded or shown over an empty
+// server row: the Pro sees Create Your Profile and nothing is written on
+// load, SIGNED_IN / TOKEN_REFRESHED / INITIAL_SESSION, focus, visibility or
+// remount. Only a tap on Save writes.
+function cacheStorage(snap) {
+  return { haven_pro_workspace_v1: JSON.stringify({ __v: 1, byUserId: { [PRO_ID]: snap } }) };
+}
+function emptyServerRow() {
+  return serverRow({ display_name: null, first_name: null, last_name: null, home_city: null, work_categories: null, operating_lat: null, operating_lng: null, pro_workspace: {} });
+}
+async function checkL5EmptyServerFullCache() {
+  const cached = verifiedWs({ firstName: "Cached", lastName: "Device", homeCity: "San Francisco, CA", operatingLat: SF.lat, operatingLng: SF.lng, workCategories: ["Roofing"], about: "cached about" });
+  const be = backend(emptyServerRow());
+  const rowBefore = clone(be.row);
+  const ref = { session: session() };
+  const storage = cacheStorage(cached);
+  await withApp(be, ref, storage, async (window) => {
+    await waitFor(window, t => t.includes("Continue"), "L5: welcome with a session (server state)");
+    await settle(be);
+    assert.strictEqual(be.writes().length, 0, "L5: nothing written on load");
+    clickText(window, "Continue");
+    await waitFor(window, t => t.includes("Create Your Profile"), "L5: Create Your Profile (server state)");
+    await settle(be);
+    assert.strictEqual(inputValue(window, "e.g. Orlando, FL"), "", "L5: city field shows the empty server value, not the cache");
+    assert.ok(!rootText(window).includes("San Francisco"), "L5: cached city is not shown over the empty server row");
+    assert.ok(!rootText(window).includes("Cached"), "L5: cached name is not shown");
+    ["SIGNED_IN", "TOKEN_REFRESHED", "INITIAL_SESSION"].forEach(evt => {
+      ref.session = session("mock-token-" + evt);
+      (ref.listeners || []).forEach(cb => cb(evt, ref.session));
+    });
+    await settle(be);
+    window.dispatchEvent(new window.Event("focus"));
+    window.document.dispatchEvent(new window.Event("visibilitychange"));
+    window.dispatchEvent(new window.Event("pageshow"));
+    await settle(be);
+  });
+  // Remount with the same device cache.
+  await withApp(be, ref, storage, async (window) => {
+    await waitFor(window, t => t.includes("Continue"), "L5: remount shows the server state");
+    await settle(be);
+  });
+  const writes = be.writes();
+  assert.strictEqual(writes.length, 0, "L5: no PATCH or insert on load/auth events/focus/visibility/remount: " + JSON.stringify(writes.map(w => ({ url: w.url, body: w.body }))));
+  assert.deepStrictEqual(be.row, rowBefore, "L5: server row unchanged");
+  assert.ok(!be.geocodeCalls.some(q => /san francisco/i.test(q)), "L5: the cached city is never geocoded on load");
+  // Only the Pro's own tap saves: entering Tampa and tapping Continue writes.
+  await withApp(be, ref, storage, async (window) => {
+    await waitFor(window, t => t.includes("Continue"), "L5: welcome before save");
+    clickText(window, "Continue");
+    await waitFor(window, t => t.includes("Create Your Profile"), "L5: Create Your Profile before save");
+    setInput(window, "e.g. Orlando, FL", "Tampa, FL");
+    await settle(be);
+    // The first Continue tap records onboarding progress only (a user tap).
+    be.writes().forEach(w => assert.deepStrictEqual(Object.keys(w.body), ["pro_workspace"], "L5: before Save only the tapped onboarding step is recorded: " + JSON.stringify(w.body)));
+    be.writes().forEach(w => assert.ok(!("homeCity" in w.body.pro_workspace), "L5: typing the city alone saves nothing"));
+    clickText(window, "Continue");
+    await settle(be);
+  });
+  const saved = be.writes();
+  assert.ok(saved.length >= 1, "L5: tapping Save/Continue writes");
+  assert.strictEqual(be.row.home_city, "Tampa, FL", "L5: the saved city is the one the Pro entered");
+  saved.forEach(w => assert.ok(!JSON.stringify(w.body).includes("San Francisco") && !JSON.stringify(w.body).includes("cached about"), "L5: no cached value rides along with the Save"));
+  assertNoDemoIds(be);
+}
+
+// ── L4: backfill geocodes the server's city and is server-conditional ────
+async function checkL4BackfillServerCity() {
+  // Server: Orlando with no point. Device cache: San Francisco with SF point.
+  const cached = verifiedWs({ homeCity: "San Francisco, CA", operatingLat: SF.lat, operatingLng: SF.lng });
+  const be = backend(serverRow({ operating_lat: null, operating_lng: null, pro_workspace: verifiedWs({ operatingLat: null, operatingLng: null }) }));
+  const wsBefore = clone(be.row.pro_workspace);
+  const ref = { session: session() };
+  await withApp(be, ref, cacheStorage(cached), async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "L4 signed-in app");
+    await settle(be);
+  });
+  const patches = be.patches();
+  assert.strictEqual(patches.length, 1, "L4: one coordinate backfill on load");
+  const p = patches[0];
+  assert.deepStrictEqual(Object.keys(p.body).sort(), ["operating_lat", "operating_lng"], "L4: body is only operating_lat/operating_lng: " + JSON.stringify(p.body));
+  assert.ok(/[?&]operating_lat=is\.null(&|$)/.test(p.url), "L4: filtered on operating_lat is null: " + p.url);
+  assert.ok(p.url.includes("&home_city=eq." + encodeURIComponent("Orlando, FL")), "L4: filtered on the server's own city: " + p.url);
+  assert.deepStrictEqual({ lat: p.body.operating_lat, lng: p.body.operating_lng }, ORLANDO, "L4: geocodes the server city, not the cached one");
+  assert.ok(!be.geocodeCalls.some(q => /san francisco/i.test(q)), "L4: the cached city is never geocoded");
+  assert.strictEqual(be.row.home_city, "Orlando, FL");
+  assert.deepStrictEqual(be.row.pro_workspace, wsBefore, "L4: workspace untouched");
+
+  // Another device saves Tampa (with its point) between the read and the
+  // backfill PATCH: the server-side filter must leave Tampa alone.
+  const be2 = backend(serverRow({ operating_lat: null, operating_lng: null, pro_workspace: verifiedWs({ operatingLat: null, operatingLng: null }) }));
+  be2.onGeocode = () => {
+    if (be2.row.home_city === "Orlando, FL") be2.row = Object.assign({}, be2.row, { home_city: "Tampa, FL", operating_lat: TAMPA.lat, operating_lng: TAMPA.lng });
+  };
+  await withApp(be2, { session: session() }, {}, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "L4 race signed-in app");
+    await settle(be2);
+  });
+  assert.ok(be2.patches().every(e => !e.applied), "L4: a stale backfill does not apply once the server city changed");
+  assert.strictEqual(be2.row.home_city, "Tampa, FL", "L4: server keeps Tampa");
+  assert.deepStrictEqual({ lat: be2.row.operating_lat, lng: be2.row.operating_lng }, TAMPA, "L4: server keeps the Tampa point");
+
+  // Same city, but a point was saved elsewhere meanwhile: no overwrite.
+  const be3 = backend(serverRow({ operating_lat: null, operating_lng: null, pro_workspace: verifiedWs({ operatingLat: null, operatingLng: null }) }));
+  const other = { lat: 28.6, lng: -81.2 };
+  be3.onGeocode = () => { if (be3.row.operating_lat == null) be3.row = Object.assign({}, be3.row, { operating_lat: other.lat, operating_lng: other.lng }); };
+  await withApp(be3, { session: session() }, {}, async (window) => {
+    await waitFor(window, t => t.includes("My Jobs"), "L4 point race signed-in app");
+    await settle(be3);
+  });
+  assert.deepStrictEqual({ lat: be3.row.operating_lat, lng: be3.row.operating_lng }, other, "L4: a point saved elsewhere is not overwritten");
 }
 
 // ── Geocode failure on Edit Profile ──────────────────────────────────────
@@ -589,6 +708,8 @@ async function main() {
     await checkS4();
     await checkS6();
     await checkLoadBackfill();
+    await checkL4BackfillServerCity();
+    await checkL5EmptyServerFullCache();
     await checkGeocodeFailureEdit();
     await checkGeocodeFailureOnboarding();
     await checkNormalEdit();
@@ -598,7 +719,7 @@ async function main() {
   } finally {
     console.warn = origWarn;
   }
-  console.log("OK: Phase 1B profile no-overwrite checks passed (S3, S4, S6, load backfill, geocode failure x3, normal edit, pre-save read failure + Retry x2).");
+  console.log("OK: Phase 1B profile no-overwrite checks passed (S3, S4, S6, load backfill, L4 server-city conditional backfill, L5 empty server + cache no write, geocode failure x3, normal edit, pre-save read failure + Retry x2).");
 }
 
 main().catch(err => {

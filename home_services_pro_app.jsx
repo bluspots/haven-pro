@@ -466,12 +466,9 @@ export default function HavenProApp() {
   // (re)hydrate waits for them and blocks new ones until it is done.
   const profileHydrateInflightRef = useRef(false);
   const profileBaselineRef = useRef(null);
-  const profileBaselineModeRef = useRef("local");
   const latestProfileSnapshotRef = useRef(null);
   const profileWriteChainRef = useRef(Promise.resolve());
-  const initialProfileSnapshotRef = useRef(null);
   const [profileSyncEpoch, setProfileSyncEpoch] = useState(0);
-  if (!initialProfileSnapshotRef.current) initialProfileSnapshotRef.current = buildHavenProWorkspaceSnapshot();
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
 
@@ -720,10 +717,6 @@ export default function HavenProApp() {
         if (profileHydrateUserRef.current !== userId) return false;
         if (accountSourceRef.current === "local") return false;
         let applied = false;
-        // "local": the applied state is what the server holds; nothing to write.
-        // "defaults": the row has no saved profile yet (new account); values
-        // the user entered that differ from the blank defaults get saved.
-        let baselineMode = "local";
         if (remote && remote.saved && remote.snapshot) {
           const snap = Object.assign({}, remote.snapshot);
           // Saved city with no point: fill in the point only (never the city,
@@ -741,31 +734,26 @@ export default function HavenProApp() {
           applied = applyHavenProWorkspace(snap);
           if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, snap);
         } else {
-          if (remote && remote.ok) baselineMode = "defaults";
-          const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
+          // Phase 1B L5: a row with no saved profile shows the server state
+          // (Create Your Profile). The device cache is never applied over it
+          // and never uploaded; nothing is written until the Pro taps Save.
+          // Only when the server could not be read is the cache shown (no write).
+          const serverEmpty = !!(remote && remote.ok);
+          const snap = !serverEmpty && typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
           if (remote && remote.nameOnly) {
             const parsed = splitHavenDisplayName(remote.nameOnly);
-            if (snap) {
-              if (parsed.first) snap.firstName = parsed.first;
-              if (parsed.last) snap.lastName = parsed.last;
-            } else if (parsed.first) {
+            if (parsed.first) {
               setFirstName(parsed.first);
               if (parsed.last) setLastName(parsed.last);
               applied = true;
             }
           }
           if (snap) applied = applyHavenProWorkspace(snap) || applied;
-          if (remote && remote.writable && snap && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snap) && typeof saveHavenProProfile === "function") {
-            // Device cache for a row with no saved profile: fill in only what
-            // the server does not have. Never replaces a server value.
-            try { await saveProProfileWithGuardRecovery(userId, snap, { fillOnly: true }); } catch (e) { /* cache remains until the row accepts the write */ }
-          }
         }
         if (profileHydrateUserRef.current === userId) {
           profileHydratedForRef.current = userId;
           profileHydrateResultRef.current = !!applied;
           profileBaselineRef.current = null;
-          profileBaselineModeRef.current = baselineMode;
           // Re-render so the persist effect records the applied state as the baseline.
           setProfileSyncEpoch(n => n + 1);
         }
@@ -1154,11 +1142,8 @@ export default function HavenProApp() {
     latestProfileSnapshotRef.current = snapshot;
     if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(authSession.id, snapshot);
     if (!profileBaselineRef.current) {
-      if (profileBaselineModeRef.current !== "defaults") {
-        profileBaselineRef.current = snapshot;
-        return;
-      }
-      profileBaselineRef.current = initialProfileSnapshotRef.current || {};
+      profileBaselineRef.current = snapshot;
+      return;
     }
     requestProfileSync(authSession.id);
   }, [

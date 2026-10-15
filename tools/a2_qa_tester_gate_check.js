@@ -478,41 +478,21 @@ async function settle(be, ms) {
 }
 
 async function checkStaleCacheRecovery() {
-  // No server profile + cached verified -> rejected, refetched, reset, retried once.
+  // Phase 1B L5: no server profile + a cached verified status. The device
+  // cache is never uploaded on load, so the stale verified can never reach
+  // the server; the Pro sees the server state (Create Your Profile).
   const be = multiBackend({ rows: { [PRO_ID]: emptyRow(PRO_ID) }, mode: "guard" });
   await withApp({
     backend: be,
     sessionRef: { session: sessionFor(PRO_ID, "pro@example.com") },
     storage: { haven_pro_workspace_v1: cachedWorkspace(PRO_ID) },
   }, async (window) => {
-    await waitFor(window, t => t.includes("My Jobs"), "signed-in app from the device cache");
+    await waitFor(window, t => t.includes("Signed in") && t.includes("Continue"), "signed-in app shows the server state");
     await settle(be);
-    const ev = be.events;
-    const firstPatch = ev.findIndex(e => e.type === "PATCH");
-    assert.ok(firstPatch >= 0, "cached profile is pushed to the empty server row");
-    assert.strictEqual(ev[firstPatch].status, 403, "cached verified status is rejected by the guard");
-    assert.strictEqual(ev[firstPatch].body.pro_workspace.identityVerification.status, "verified");
-    assert.strictEqual(ev[firstPatch + 1] && ev[firstPatch + 1].type, "GET_WS", "guard rejection refetches the server profile");
-    const retry = ev[firstPatch + 2];
-    assert.ok(retry && retry.type === "PATCH", "then retries the save");
-    assert.strictEqual(retry.status, 200, "retry is accepted");
-    assert.strictEqual(retry.body.pro_workspace.identityVerification.status, "not_started", "retry sends the server value (missing -> not_started)");
-    assert.strictEqual(retry.body.pro_workspace.payoutAccount.payoutsEnabled, false, "missing payoutsEnabled -> off");
-    assert.strictEqual(retry.body.first_name, "Grace", "retry keeps the user's name");
-    assert.strictEqual(retry.body.home_city, "Tampa, FL", "retry keeps the user's city");
-    assert.strictEqual(be.count(e => e.type === "GET_WS"), 1, "one refetch");
-    assert.strictEqual(be.count(e => e.type === "PATCH" && e.status === 403), 1, "only the stale save was rejected");
-    assert.strictEqual(be.rows[PRO_ID].first_name, "Grace", "name reached the server");
-    assert.strictEqual(be.rows[PRO_ID].home_city, "Tampa, FL", "city reached the server");
-    assert.strictEqual(wsStatus(be.rows[PRO_ID].pro_workspace, "identityVerification"), "not_started", "server never got the stale verified");
-    await openProfileMain(window);
-    // HB-13: for a non-QA Pro the row shows "Not available yet" (no provider is
-    // connected); the stale cached "Verified" must never show. The stored value
-    // is checked just below.
-    assert.ok(/Not available yet/.test(identityRowStatus(window)) && !/Verified/.test(identityRowStatus(window)), "local identity replaced with the server value: " + identityRowStatus(window));
-    const cache = JSON.parse(window.localStorage.getItem("haven_pro_workspace_v1"));
-    assert.strictEqual(cache.byUserId[PRO_ID].identityVerification.status, "not_started", "device cache replaced with the server value");
-    assert.strictEqual(cache.byUserId[PRO_ID].firstName, "Grace", "device cache keeps the name");
+    assert.strictEqual(be.count(e => e.type === "PATCH"), 0, "the cached profile is not pushed to the empty server row");
+    assert.strictEqual(be.count(e => e.type === "GET_WS"), 0, "no recovery needed");
+    assert.ok(!rootText(window).includes("Tampa"), "the cached city is not shown over the server state");
+    assert.deepStrictEqual(be.rows[PRO_ID], emptyRow(PRO_ID), "server row unchanged");
   });
 }
 
@@ -579,8 +559,15 @@ async function checkSameTabSwitch() {
   });
 }
 
+// A saved, non-verified profile; the guard rejects the Pro's own edit.
+async function editRadius(window) {
+  await openProfileMain(window);
+  const r10 = Array.from(window.document.querySelectorAll("#root *")).filter(el => el.children.length === 0 && (el.textContent || "").trim() === "10 mi").pop();
+  assert.ok(r10, "radius pill");
+  r10.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+}
 async function checkRetryAtMostOnce() {
-  const be = multiBackend({ rows: { [PRO_ID]: emptyRow(PRO_ID) }, mode: "alwaysGuard" });
+  const be = multiBackend({ rows: { [PRO_ID]: profileRow() }, mode: "alwaysGuard" });
   await withApp({
     backend: be,
     sessionRef: { session: sessionFor(PRO_ID, "pro@example.com") },
@@ -588,18 +575,19 @@ async function checkRetryAtMostOnce() {
   }, async (window) => {
     await waitFor(window, t => t.includes("My Jobs"), "signed-in app");
     await settle(be, 80);
+    assert.strictEqual(be.count(e => e.type === "PATCH"), 0, "nothing written on load");
+    await editRadius(window);
+    await settle(be, 80);
     const patches = be.count(e => e.type === "PATCH");
-    const refetchThenRetry = be.events.filter((e, i) => e.type === "GET_WS" && be.events[i + 1] && be.events[i + 1].type === "PATCH").length;
-    assert.strictEqual(refetchThenRetry, 1, "exactly one retry after a refetch");
-    assert.ok(patches <= 3, "no save loop (" + patches + " PATCHes)");
+    assert.ok(patches >= 1 && patches <= 2, "no save loop (" + patches + " PATCHes)");
     assert.ok(be.count(e => e.type === "GET_WS") <= 2, "no refetch loop");
     await sleep(800);
-    assert.strictEqual(be.count(e => e.type === "PATCH"), patches, "no further saves after the single retry");
+    assert.strictEqual(be.count(e => e.type === "PATCH"), patches, "no further saves after the rejection");
   });
 }
 
 async function checkNonGuardRejection() {
-  const be = multiBackend({ rows: { [PRO_ID]: emptyRow(PRO_ID) }, mode: "nonGuard403" });
+  const be = multiBackend({ rows: { [PRO_ID]: profileRow() }, mode: "nonGuard403" });
   await withApp({
     backend: be,
     sessionRef: { session: sessionFor(PRO_ID, "pro@example.com") },
@@ -607,16 +595,13 @@ async function checkNonGuardRejection() {
   }, async (window) => {
     await waitFor(window, t => t.includes("My Jobs"), "signed-in app");
     await settle(be, 80);
-    assert.ok(be.count(e => e.type === "PATCH") >= 1, "save attempted");
+    assert.strictEqual(be.count(e => e.type === "PATCH"), 0, "nothing written on load");
+    await editRadius(window);
+    await settle(be, 80);
+    assert.strictEqual(be.count(e => e.type === "PATCH"), 1, "the edit is sent once and a non-guard rejection is not retried");
     assert.strictEqual(be.count(e => e.type === "GET_WS"), 0, "a non-guard 42501 does not refetch");
-    // Hydrate save (no email) is sent once; the later PATCH is the normal autosave, not a retry.
-    assert.strictEqual(be.count(e => e.type === "PATCH" && !("email" in e.body)), 1, "a non-guard rejection is not retried");
-    const n = be.count(e => e.type === "PATCH");
-    assert.ok(n <= 2, "no save loop (" + n + " PATCHes)");
     await sleep(800);
-    assert.strictEqual(be.count(e => e.type === "PATCH"), n, "no further saves");
-    const cache = JSON.parse(window.localStorage.getItem("haven_pro_workspace_v1"));
-    assert.strictEqual(cache.byUserId[PRO_ID].identityVerification.status, "verified", "existing handling: the cache is left as is");
+    assert.strictEqual(be.count(e => e.type === "PATCH"), 1, "no further saves");
   });
 }
 

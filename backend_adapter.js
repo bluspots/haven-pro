@@ -1291,15 +1291,6 @@ async function havenReadProWorkspaceForWrite(cfg, headers, userId) {
   }
 }
 
-function havenWorkspaceHasValue(ws, key) {
-  if (!ws || typeof ws !== "object" || !Object.prototype.hasOwnProperty.call(ws, key)) return false;
-  const v = ws[key];
-  if (v == null) return false;
-  if (typeof v === "string") return !!v.trim();
-  if (Array.isArray(v)) return v.length > 0;
-  return true;
-}
-
 // Update the signed-in Pro's own profiles row with only the changed fields.
 // `changes` is a partial workspace. Coordinates are never taken from local
 // state: they are written only together with a city that resolved to a point.
@@ -1307,8 +1298,6 @@ function havenWorkspaceHasValue(ws, key) {
 // city and point) and the result says geocodeFailed.
 // opts.serverWorkspace: a workspace just read from the server (guard retry),
 //   used as the merge base instead of reading again.
-// opts.fillOnly: only fill keys the server does not have yet (device-cache
-//   upload to an empty row). Never replaces a server value.
 async function saveHavenProProfile(userId, changes, opts) {
   if (!userId || !changes || typeof changes !== "object") return { ok: false, reason: "no_user" };
   const o = opts || {};
@@ -1339,9 +1328,6 @@ async function saveHavenProProfile(userId, changes, opts) {
   const toWrite = Object.assign({}, changes);
   delete toWrite.operatingLat;
   delete toWrite.operatingLng;
-  if (o.fillOnly && baseWs) {
-    Object.keys(toWrite).forEach(function (k) { if (havenWorkspaceHasValue(baseWs, k)) delete toWrite[k]; });
-  }
   let geocodeFailed = false;
   if (used !== "legacy" && Object.prototype.hasOwnProperty.call(toWrite, "homeCity")) {
     const city = toWrite.homeCity == null ? "" : String(toWrite.homeCity).trim();

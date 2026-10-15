@@ -1423,14 +1423,6 @@ async function havenReadProWorkspaceForWrite(cfg, headers, userId) {
     return { ok: false, reason: "network_error" };
   }
 }
-function havenWorkspaceHasValue(ws, key) {
-  if (!ws || typeof ws !== "object" || !Object.prototype.hasOwnProperty.call(ws, key)) return false;
-  const v = ws[key];
-  if (v == null) return false;
-  if (typeof v === "string") return !!v.trim();
-  if (Array.isArray(v)) return v.length > 0;
-  return true;
-}
 async function saveHavenProProfile(userId, changes, opts) {
   if (!userId || !changes || typeof changes !== "object") return { ok: false, reason: "no_user" };
   const o = opts || {};
@@ -1460,11 +1452,6 @@ async function saveHavenProProfile(userId, changes, opts) {
   const toWrite = Object.assign({}, changes);
   delete toWrite.operatingLat;
   delete toWrite.operatingLng;
-  if (o.fillOnly && baseWs) {
-    Object.keys(toWrite).forEach(function(k) {
-      if (havenWorkspaceHasValue(baseWs, k)) delete toWrite[k];
-    });
-  }
   let geocodeFailed = false;
   if (used !== "legacy" && Object.prototype.hasOwnProperty.call(toWrite, "homeCity")) {
     const city = toWrite.homeCity == null ? "" : String(toWrite.homeCity).trim();
@@ -1918,12 +1905,9 @@ function HavenProApp() {
   const operatingCityRef = useRef(null);
   const profileHydrateInflightRef = useRef(false);
   const profileBaselineRef = useRef(null);
-  const profileBaselineModeRef = useRef("local");
   const latestProfileSnapshotRef = useRef(null);
   const profileWriteChainRef = useRef(Promise.resolve());
-  const initialProfileSnapshotRef = useRef(null);
   const [profileSyncEpoch, setProfileSyncEpoch] = useState(0);
-  if (!initialProfileSnapshotRef.current) initialProfileSnapshotRef.current = buildHavenProWorkspaceSnapshot();
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
   const T = theme === "dark" ? DARK : LIGHT;
@@ -2148,7 +2132,6 @@ function HavenProApp() {
         if (profileHydrateUserRef.current !== userId) return false;
         if (accountSourceRef.current === "local") return false;
         let applied = false;
-        let baselineMode = "local";
         if (remote && remote.saved && remote.snapshot) {
           const snap = Object.assign({}, remote.snapshot);
           const city = snap.homeCity ? String(snap.homeCity).trim() : "";
@@ -2168,32 +2151,22 @@ function HavenProApp() {
           applied = applyHavenProWorkspace(snap);
           if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, snap);
         } else {
-          if (remote && remote.ok) baselineMode = "defaults";
-          const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
+          const serverEmpty = !!(remote && remote.ok);
+          const snap = !serverEmpty && typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
           if (remote && remote.nameOnly) {
             const parsed = splitHavenDisplayName(remote.nameOnly);
-            if (snap) {
-              if (parsed.first) snap.firstName = parsed.first;
-              if (parsed.last) snap.lastName = parsed.last;
-            } else if (parsed.first) {
+            if (parsed.first) {
               setFirstName(parsed.first);
               if (parsed.last) setLastName(parsed.last);
               applied = true;
             }
           }
           if (snap) applied = applyHavenProWorkspace(snap) || applied;
-          if (remote && remote.writable && snap && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snap) && typeof saveHavenProProfile === "function") {
-            try {
-              await saveProProfileWithGuardRecovery(userId, snap, { fillOnly: true });
-            } catch (e) {
-            }
-          }
         }
         if (profileHydrateUserRef.current === userId) {
           profileHydratedForRef.current = userId;
           profileHydrateResultRef.current = !!applied;
           profileBaselineRef.current = null;
-          profileBaselineModeRef.current = baselineMode;
           setProfileSyncEpoch((n) => n + 1);
         }
         return applied;
@@ -2561,11 +2534,8 @@ function HavenProApp() {
     latestProfileSnapshotRef.current = snapshot;
     if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(authSession.id, snapshot);
     if (!profileBaselineRef.current) {
-      if (profileBaselineModeRef.current !== "defaults") {
-        profileBaselineRef.current = snapshot;
-        return;
-      }
-      profileBaselineRef.current = initialProfileSnapshotRef.current || {};
+      profileBaselineRef.current = snapshot;
+      return;
     }
     requestProfileSync(authSession.id);
   }, [
