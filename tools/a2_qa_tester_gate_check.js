@@ -243,7 +243,15 @@ async function checkTester() {
     assert.strictEqual(qaPatch.pro_workspace.payoutAccount.status, "enabled");
     assert.strictEqual(qaPatch.pro_workspace.payoutAccount.payoutsEnabled, true);
     assert.strictEqual(qaPatch.pro_workspace.taxProfile.status, "verified");
-    assert.strictEqual(qaPatch.first_name, "Ada", "QA write keeps the real profile name (no demo identity)");
+    // Phase 1B profile fix: the QA write sends only the four provider sections,
+    // merged into the server's workspace. Name/city/categories are not sent,
+    // so the real profile (no demo identity) is kept as the server has it.
+    ["first_name", "last_name", "display_name", "home_city", "work_categories", "operating_lat", "operating_lng"].forEach(k => {
+      assert.ok(!(k in qaPatch), "QA write does not send " + k);
+    });
+    assert.strictEqual(qaPatch.pro_workspace.firstName, "Ada", "QA write keeps the real profile name (no demo identity)");
+    assert.strictEqual(qaPatch.pro_workspace.homeCity, "Orlando, FL", "QA write keeps the server's other workspace keys");
+    assert.strictEqual(be.row.first_name, "Ada", "server name unchanged");
     assert.ok(!("is_qa_tester" in qaPatch), "client never writes is_qa_tester");
     await openProfileMain(window);
     assert.ok(/Verified/.test(identityRowStatus(window)), "identity shows the server-accepted Verified status: " + identityRowStatus(window));
@@ -413,6 +421,12 @@ function multiBackend(opts) {
     const method = (init && init.method) || "GET";
     const m = url.match(/id=eq\.([^&]+)/);
     const uid = m ? decodeURIComponent(m[1]) : "";
+    if (url.includes("api.mapbox.com")) {
+      // Mocked geocoder (no network). A city with no point is no longer saved.
+      const q = decodeURIComponent((url.match(/q=([^&]+)/) || [])[1] || "");
+      const pt = /tampa/i.test(q) ? [-82.4572, 27.9506] : /miami/i.test(q) ? [-80.1918, 25.7617] : /orlando/i.test(q) ? [-81.379, 28.5421] : null;
+      return json(200, { features: pt ? [{ geometry: { coordinates: pt } }] : [] });
+    }
     if (url.includes("/rest/v1/rpc/is_qa_tester")) {
       const auth = (init.headers && init.headers.Authorization) || "";
       const who = auth.endsWith(OTHER_ID) ? OTHER_ID : PRO_ID;
@@ -529,19 +543,31 @@ async function checkSameTabSwitch() {
     (sessionRef.listeners || []).forEach(cb => cb("SIGNED_IN", sessionRef.session));
     await waitFor(window, t => t.includes("My Jobs"), "non-tester signed in");
     await settle(be);
-    const otherPatches = be.events.slice(before).filter(e => e.type === "PATCH" && e.uid === OTHER_ID);
-    assert.ok(otherPatches.length >= 1, "non-tester profile saves after sign-in");
-    assert.strictEqual(otherPatches[0].status, 200, "first save for the next user passes (no carried-over statuses)");
-    assert.ok(otherPatches.every(e => e.status === 200), "no guard rejection for the next user");
+    // Phase 1B profile fix: loading the next user's saved profile writes
+    // nothing (no defaults written into their incomplete workspace), so the
+    // tester's statuses cannot be carried over.
+    const loadPatches = be.events.slice(before).filter(e => e.type === "PATCH" && e.uid === OTHER_ID);
+    assert.strictEqual(loadPatches.length, 0, "no profile write on the next user's sign-in");
+    assert.ok(!("identityVerification" in be.rows[OTHER_ID].pro_workspace), "next user's workspace untouched");
+    await openProfileMain(window);
+    assert.ok(/Not Started/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
+    // The next user's own edit saves, without any carried-over status.
+    const beforeEdit = be.events.length;
+    const r10 = Array.from(window.document.querySelectorAll("#root *")).filter(el => el.children.length === 0 && (el.textContent || "").trim() === "10 mi").pop();
+    assert.ok(r10, "radius pill");
+    r10.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await settle(be);
+    const otherPatches = be.events.slice(beforeEdit).filter(e => e.type === "PATCH" && e.uid === OTHER_ID);
+    assert.strictEqual(otherPatches.length, 1, "one save for the edit");
+    assert.strictEqual(otherPatches[0].status, 200, "save for the next user passes (no carried-over statuses)");
     const ws = otherPatches[0].body.pro_workspace;
+    assert.strictEqual(ws.travelRadius, 10, "the edit is saved");
     assert.strictEqual(wsStatus(ws, "identityVerification"), "not_started");
     assert.strictEqual(wsStatus(ws, "backgroundCheck"), "not_started");
     assert.strictEqual(wsStatus(ws, "payoutAccount"), "not_started");
-    assert.strictEqual(ws.payoutAccount.payoutsEnabled, false, "payoutsEnabled reset to off");
+    assert.ok(!(ws.payoutAccount && ws.payoutAccount.payoutsEnabled), "payoutsEnabled not carried over");
     assert.strictEqual(wsStatus(ws, "taxProfile"), "not_started");
     assert.strictEqual(be.count(e => e.type === "GET_WS"), 0, "no recovery was needed");
-    await openProfileMain(window);
-    assert.ok(/Not Started/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
   });
 }
 
