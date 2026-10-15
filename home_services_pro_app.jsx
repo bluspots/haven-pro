@@ -24,6 +24,11 @@ function formatJobAge(postedAt, now) {
 
  
 
+// Opening splash: the HTML shell draws it and defines window.havenHideSplash
+// (named differently here so this global function never replaces it).
+function hideOpeningSplash() {
+  try { if (typeof window !== "undefined" && typeof window.havenHideSplash === "function") window.havenHideSplash(); } catch (_) {}
+}
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -34,6 +39,7 @@ class ErrorBoundary extends React.Component {
   }
   componentDidCatch(error, info) {
     console.error("Haven Pro render error:", error, info);
+    hideOpeningSplash();
   }
   render() {
     if (this.state.hasError) {
@@ -116,6 +122,8 @@ function havenProfileChanges(base, next) {
   if (next.onboardingStep === "createProfile" && next.onboardingStatus !== "completed") delete out.homeCity;
   return out;
 }
+// HB-13: identity / background-check / payout / tax providers aren't connected yet.
+const HAVEN_PROVIDER_CHECKS_CONNECTED = false;
 
 export default function HavenProApp() {
   const [tab, setTab] = useState("home");
@@ -123,7 +131,8 @@ export default function HavenProApp() {
   const [notifPrefs, setNotifPrefs] = useState({ newJobs: true, emergency: true, materials: true, earnings: true });
   const [openFaq, setOpenFaq] = useState(null);
   const [online, setOnline] = useState(true);
-  const [availableJobs, setAvailableJobs] = useState(SIM_JOBS);
+  // Starts empty: the board shows only real posted jobs from the backend.
+  const [availableJobs, setAvailableJobs] = useState([]);
   const [activeJobs, setActiveJobs] = useState([]); // jobs a pro has accepted, mid-lifecycle
   const [completedJobsHistory, setCompletedJobsHistory] = useState([]);
   const [toast, setToast] = useState(null);
@@ -166,7 +175,11 @@ export default function HavenProApp() {
   const [supportInput, setSupportInput] = useState("");
   const [materialsDraft, setMaterialsDraft] = useState(null); // { jobId, items:[{name,cost}] } while filling out a request
   const [receiptDraft, setReceiptDraft] = useState(null); // { jobId, cost, photo } while submitting a post-purchase receipt
-  const [earningsPeriod, setEarningsPeriod] = useState("week"); // week | month | year — swipeable on the chart panel
+  const [earningsPeriod, setEarningsPeriod] = useState("week"); // week | month | year — picked with the toggle under the chart
+  // Which week/month/year the chart shows: null = the current one (follows
+  // the clock), otherwise any timestamp inside the period being viewed.
+  // Swiping the chart moves it one period at a time.
+  const [earningsAnchor, setEarningsAnchor] = useState(null);
   const [selectedBucket, setSelectedBucket] = useState(null); // { start, end, fullLabel } — inline swap on the main screen's chart, any period
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("all");
   const [ledgerFilterOpen, setLedgerFilterOpen] = useState(false);
@@ -215,7 +228,7 @@ export default function HavenProApp() {
         const backendStatus = row.status;
         if (backendStatus === "materials_approved" && currentJob.status === "materials_requested") {
           updateActiveJob(job.id, { status: "materials_approved" });
-          showToast(`Customer approved materials for ${currentJob.title} — go ahead and purchase, then submit your receipt`);
+          showToast(`Materials approved for ${currentJob.title}. Buy them, then add your receipt to be reimbursed.`);
         } else if (backendStatus === "inspection_completed" && currentJob.status !== "inspection_completed") {
           const cents = typeof row.inspection_fee_cents === "number" ? row.inspection_fee_cents : Math.round(((currentJob.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
           const fee = Math.round(cents / 100);
@@ -230,7 +243,7 @@ export default function HavenProApp() {
           const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
           if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
-          showToast(`Materials declined — job could not be completed — Convenience Fee $${conv}`);
+          showToast(`Customer declined materials, so the job couldn't be finished. You're paid a $${conv} convenience fee.`);
           setMyJobsStack([{ view: "list" }]);
         } else if (
           (backendStatus === "in_progress" || backendStatus === "complete") &&
@@ -316,6 +329,9 @@ export default function HavenProApp() {
   const [accountPasswordDraft, setAccountPasswordDraft] = useState({ password: "", confirm: "" }); // never persisted past account creation
   const [emailVerifyStatus, setEmailVerifyStatus] = useState("not_sent"); // not_sent | pending | verified
   const [phoneVerifyStatus, setPhoneVerifyStatus] = useState("not_sent"); // not_sent | pending | verified
+  // PRO-01: older builds could save onboarding at the removed tap-to-verify
+  // step; continue from Create Your Profile instead.
+  useEffect(() => { if (onboardingStep === "verifyContact") setOnboardingStep("createProfile"); }, [onboardingStep]);
   const [signUpDraft, setSignUpDraft] = useState({ firstName: "", lastName: "", email: "", phone: "", password: "", confirm: "" });
   const [accountCreatedAt, setAccountCreatedAt] = useState(null);
   // Real Supabase session. The app is not usable without one (no local/demo account).
@@ -326,6 +342,9 @@ export default function HavenProApp() {
   const [qaBusy, setQaBusy] = useState(false);
   const qaSeqRef = useRef(0);
   const [authBusy, setAuthBusy] = useState(false);
+  // Sign Out asks first (Settings and the signed-in onboarding card).
+  const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
+  const signOutInFlight = useRef(false);
   const [authNotice, setAuthNotice] = useState("");
   const [welcomeAuthView, setWelcomeAuthView] = useState("home"); // home | signIn | confirmEmail
   const [signInDraft, setSignInDraft] = useState({ email: "", password: "" });
@@ -334,6 +353,14 @@ export default function HavenProApp() {
   // connecting (first boot) | retrying | error | ready. Nothing but the
   // connection screen renders until this is ready — there is no demo fallback.
   const [backendState, setBackendState] = useState("connecting");
+  // Opening splash = the loading screen. It stays up, however slow the
+  // connection, until the first real screen is drawn (the app, onboarding /
+  // sign-in, or the connection error with Retry), never the "Connecting"
+  // screen in between, then hides on the next frame. No minimum time.
+  useEffect(() => {
+    if (backendState === "connecting") return;
+    (typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout)(hideOpeningSplash);
+  }, [backendState]);
 
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
   useEffect(() => {
@@ -391,7 +418,6 @@ export default function HavenProApp() {
   }
 
   const toastTimer = useRef(null);
-  const swipeStartX = useRef(null);
   const materialsTimers = useRef({});
   useEffect(() => () => { Object.values(materialsTimers.current).forEach(clearTimeout); }, []);
   // Timers fire well after the render that scheduled them, so they can't
@@ -407,6 +433,15 @@ export default function HavenProApp() {
   // "auth" = signed_in came from Supabase Auth. "local" is only set by the Dev Testing
   // demo buttons (gated separately in A2); Create Account never sets it (Phase 1B A1).
   const accountSourceRef = useRef(null);
+  /* HB-13: no identity, background-check, payout or tax provider is connected.
+     For ordinary Pros these steps show "Not available yet" instead of
+     provider-looking "Pending" states with made-up provider ids. QA testers
+     (server-confirmed) keep the steps so the QA tools still work. Readiness
+     gating itself is unchanged. */
+  const qaSession = !!(qaTester && authSession && authSession.id && accountSourceRef.current === "auth");
+  const providerStepsOpen = HAVEN_PROVIDER_CHECKS_CONNECTED || qaSession;
+  const shownStatus = status => (providerStepsOpen ? status : "not_available");
+  const shownCredentialStatus = status => (providerStepsOpen || !["pending", "verification_available"].includes(status) ? status : "self_reported");
   const accountStatusRef = useRef("signed_out");
   const authUnsubscribeRef = useRef(null);
   const connectSeqRef = useRef(0);
@@ -448,12 +483,15 @@ export default function HavenProApp() {
   function goTab(t) {
     setTab(t);
     setEarningsStack([{ view: "main" }]);
+    scrollMemory.current = {};
+    setTabResetTick(n => n + 1);
     setMyJobsStack([{ view: "list" }]);
     setMessagesStack([{ view: "list" }]);
     setMaterialsDraft(null);
     setReceiptDraft(null);
     setSelectedBucket(null);
     setEarningsPeriod("week");
+    setEarningsAnchor(null);
     setProfileView("main");
     setEditDraft(null);
     setCategoriesDraft(null);
@@ -500,6 +538,7 @@ export default function HavenProApp() {
     setCategoriesDraft(null);
     setSelectedBucket(null);
     setEarningsPeriod("week");
+    setEarningsAnchor(null);
     setLedgerCategoryFilter("all");
     setMaterialsDraft(null);
     setReceiptDraft(null);
@@ -520,6 +559,8 @@ export default function HavenProApp() {
       id: user.id || null,
       email: user.email || "",
       role: meta.role || null,
+      // PRO-01: email confirmation comes only from Supabase Auth.
+      emailConfirmed: !!user.email_confirmed_at,
     };
   }
   function buildHavenProWorkspaceSnapshot() {
@@ -772,7 +813,19 @@ export default function HavenProApp() {
     setOnboardingStep("welcome");
     setWelcomeAuthView("home");
   }
+  // Both Sign Out buttons call this. It only opens the confirmation;
+  // performProSignOut runs the existing sign-out flow.
   async function signOutHavenAccount() {
+    if (authBusy || !authSession) return;
+    setShowSignOutConfirm(true);
+  }
+  function cancelProSignOut() {
+    if (signOutInFlight.current) return;
+    setShowSignOutConfirm(false);
+  }
+  async function performProSignOut() {
+    if (signOutInFlight.current || authBusy || !authSession) return;
+    signOutInFlight.current = true;
     setAuthBusy(true);
     let result;
     try {
@@ -781,6 +834,8 @@ export default function HavenProApp() {
       result = { ok: false, reason: (e && e.message) || "signout_failed" };
     }
     setAuthBusy(false);
+    setShowSignOutConfirm(false);
+    signOutInFlight.current = false;
     if (!result.ok) {
       console.warn("Haven Pro sign-out failed:", result.reason);
       const msg = "Couldn't sign out. Please try again.";
@@ -860,7 +915,7 @@ export default function HavenProApp() {
       if (next && next.email) setAccountEmail(next.email);
       setAccountStatus("signed_in");
       setAccountCreatedAt(function (prev) { return prev || Date.now(); });
-      setEmailVerifyStatus("verified");
+      setEmailVerifyStatus(next && next.emailConfirmed ? "verified" : "pending");
       let restored = false;
       if (next && next.id) {
         workspaceAppliedForRef.current = next.id;
@@ -1124,18 +1179,217 @@ export default function HavenProApp() {
   const currentMessagesView = messagesStack[messagesStack.length - 1];
 
 
-  /* ── Swipe-right-to-go-back — same gesture as the Customer App. Only
-     meaningful on a screen that has somewhere to go back to. ── */
-  function swipeBackHandlers(onBack) {
-    return {
-      onTouchStart: e => { swipeStartX.current = e.touches[0].clientX; },
-      onTouchEnd: e => {
-        if (swipeStartX.current == null) return;
-        const dx = e.changedTouches[0].clientX - swipeStartX.current;
-        if (dx > 60) onBack();
-        swipeStartX.current = null;
-      },
+  /* ── Scroll memory — every screen remembers where it was scrolled.
+     Opening a screen starts at the top; Back (button or swipe) returns to
+     the same spot. Tapping a tab starts that tab fresh. ── */
+  const PROFILE_PARENT = {
+    settings: "main", notifications: "settings", helpSupport: "settings", supportChat: "helpSupport",
+    verificationCenter: "main", identity: "verificationCenter", backgroundCheck: "verificationCenter",
+    credentials: "verificationCenter", payout: "main", taxInfo: "main", edit: "main", categories: "main",
+  };
+  function profileDepth(v) { let d = 0; for (let p = v; PROFILE_PARENT[p]; p = PROFILE_PARENT[p]) d++; return d; }
+  function stackFor(t) { return t === "earnings" ? earningsStack : t === "jobs" ? myJobsStack : t === "messages" ? messagesStack : null; }
+  const screenDepth = tab === "profile" ? profileDepth(profileView) : (stackFor(tab) ? stackFor(tab).length - 1 : 0);
+  const screenKey = tab === "profile" ? "profile:" + profileView : tab + ":" + screenDepth;
+  const scrollMemory = useRef({});
+  const [tabResetTick, setTabResetTick] = useState(0);
+  const screenRef = useRef({ key: screenKey, tab, depth: screenDepth });
+  const swipeLayerRef = useRef(null);
+  const underlayRef = useRef(null);
+  // The scrolling area of a screen: its .hp-scroll, or the first element
+  // that scrolls vertically (the message thread).
+  function scrollerIn(root) {
+    if (!root) return null;
+    const el = root.querySelector(".hp-scroll");
+    if (el) return el;
+    if (typeof window === "undefined" || !window.getComputedStyle) return null;
+    for (const c of root.querySelectorAll("div")) {
+      const oy = window.getComputedStyle(c).overflowY;
+      if (oy === "auto" || oy === "scroll") return c;
+    }
+    return null;
+  }
+  function rememberScroll() {
+    const el = scrollerIn(swipeLayerRef.current);
+    if (el) scrollMemory.current[screenRef.current.key] = el.scrollTop;
+  }
+  // Every navigation starts from a tap, key press or swipe, so recording on
+  // those (capture phase, before the app's own handlers run) always saves
+  // the position of the screen being left.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const evs = ["pointerdown", "touchstart", "mousedown", "click", "keydown"];
+    evs.forEach(ev => document.addEventListener(ev, rememberScroll, true));
+    document.addEventListener("scroll", rememberScroll, true);
+    return () => {
+      evs.forEach(ev => document.removeEventListener(ev, rememberScroll, true));
+      document.removeEventListener("scroll", rememberScroll, true);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Before paint, so nothing visibly jumps. Screens share scroll container
+  // elements, so React can reuse one between screens; a new screen has to
+  // be reset to the top explicitly.
+  React.useLayoutEffect(() => {
+    const prev = screenRef.current;
+    screenRef.current = { key: screenKey, tab, depth: screenDepth };
+    const isBack = prev.tab === tab && screenDepth < prev.depth;
+    const el = scrollerIn(swipeLayerRef.current);
+    if (!el) return;
+    el.scrollTop = isBack ? (scrollMemory.current[screenKey] || 0) : 0;
+  }, [screenKey, tabResetTick]);
+
+  /* ── Interactive swipe-back — the same gesture as the Customer app.
+     Drag right from the left edge: the screen follows the finger and the
+     previous screen shows underneath (slight parallax and dim, like iOS).
+     Pause to peek, drag back to cover it again. Release past ~35% of the
+     width (or with a quick flick) to finish; otherwise it slides back.
+     Finishing calls the screen's own Back action, the same one its ‹ button
+     uses, exactly once. ── */
+  const EDGE_ZONE_PX = 24;
+  const EDGE_COMMIT_PROGRESS = 0.35;  // past ~35% of the width
+  const EDGE_COMMIT_VELOCITY = 0.55;  // px/ms: a quick flick finishes even if short
+  const EDGE_SETTLE_MS = 280;
+  const IDLE_EDGE = { phase: "idle", dragX: 0, width: 390, settleTo: 0, dest: null, destKey: null };
+  const [edgeBack, setEdgeBack] = useState(IDLE_EDGE);
+  const edgeRef = useRef({ phase: "idle" });
+  const edgeTimer = useRef(null);
+  // The visible screen registers its Back action while it renders (see
+  // swipeBackHandlers); the previous screen drawn underneath does not.
+  const backActionRef = useRef(null);
+  const renderingUnderlay = useRef(false);
+  const backDestRef = useRef(null);
+  function backDestination() {
+    if (tab === "profile") {
+      const p = PROFILE_PARENT[profileView];
+      return p ? { view: p, key: "profile:" + p } : null;
+    }
+    const s = stackFor(tab);
+    return s && s.length > 1 ? { view: s[s.length - 2], key: tab + ":" + (s.length - 2) } : null;
+  }
+  function renderTabView(view) {
+    if (tab === "earnings") return earningsScreen(view);
+    if (tab === "jobs") return jobsScreen(view);
+    if (tab === "messages") return messagesScreen(view);
+    if (tab === "profile") return profileScreen(view);
+    return null;
+  }
+  function prefersReducedMotion() {
+    try { return typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; }
+  }
+  function edgeNow() { return typeof performance !== "undefined" ? performance.now() : Date.now(); }
+  function settleEdgeBack(to) {
+    const g = edgeRef.current;
+    if (g.phase !== "tracking" && g.phase !== "dragging") return;
+    if (g.phase === "tracking") { edgeRef.current = { phase: "idle" }; setEdgeBack(IDLE_EDGE); return; }
+    edgeRef.current = { ...g, phase: "settling" };
+    setEdgeBack(e => ({ ...e, phase: "settling", settleTo: to }));
+    clearTimeout(edgeTimer.current);
+    edgeTimer.current = setTimeout(() => {
+      const onBack = to === 1 ? g.onBack : null;
+      edgeRef.current = { phase: "idle" };
+      setEdgeBack(IDLE_EDGE);
+      if (onBack) onBack();
+    }, prefersReducedMotion() ? 0 : EDGE_SETTLE_MS);
+  }
+  useEffect(() => () => clearTimeout(edgeTimer.current), []);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onDown = e => {
+      const g = edgeRef.current;
+      // A second finger (pinch) cancels a swipe in progress.
+      if (!e.isPrimary || (g.phase !== "idle" && e.pointerId !== g.pointerId)) { settleEdgeBack(0); return; }
+      if (g.phase !== "idle") return; // still finishing the last swipe
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      const layer = swipeLayerRef.current;
+      const onBack = backActionRef.current, dest = backDestRef.current;
+      if (!layer || !onBack || !dest || !layer.contains(e.target)) return;
+      const r = layer.getBoundingClientRect();
+      if (e.clientX - r.left > EDGE_ZONE_PX || e.clientX < r.left) return;
+      if (swipeBackBlocked(e.target)) return;
+      edgeRef.current = { phase: "tracking", pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastT: edgeNow(), vx: 0, dragX: 0, width: r.width || 390, onBack };
+      setEdgeBack({ phase: "tracking", dragX: 0, width: r.width || 390, settleTo: 0, dest: dest.view, destKey: dest.key });
+    };
+    const onMove = e => {
+      const g = edgeRef.current;
+      if ((g.phase !== "tracking" && g.phase !== "dragging") || e.pointerId !== g.pointerId) return;
+      const dx = e.clientX - g.startX, dy = e.clientY - g.startY, t = edgeNow();
+      if (g.phase === "tracking") {
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+          // Direction locked on this move: measure speed from here, not from
+          // the touch-down point, or the first reading is inflated.
+          const dragX = Math.max(0, Math.min(g.width, dx));
+          edgeRef.current = { ...g, phase: "dragging", lastX: e.clientX, lastT: t, dragX };
+          setEdgeBack(s => ({ ...s, phase: "dragging", dragX }));
+        } else if (Math.abs(dy) > 10) {
+          // Mostly vertical: it's a scroll. Hand it to the page.
+          edgeRef.current = { phase: "idle" };
+          setEdgeBack(IDLE_EDGE);
+        }
+        return;
+      }
+      if (e.cancelable) e.preventDefault();
+      const vx = (e.clientX - g.lastX) / Math.max(1, t - g.lastT);
+      const dragX = Math.max(0, Math.min(g.width, dx));
+      edgeRef.current = { ...g, lastX: e.clientX, lastT: t, vx, dragX };
+      setEdgeBack(s => ({ ...s, dragX }));
+    };
+    const onUp = e => {
+      const g = edgeRef.current;
+      if ((g.phase !== "tracking" && g.phase !== "dragging") || e.pointerId !== g.pointerId) return;
+      if (g.phase === "tracking") { settleEdgeBack(0); return; }
+      const progress = g.dragX / g.width;
+      // Moving back toward the edge on release means "never mind".
+      const commit = (progress >= EDGE_COMMIT_PROGRESS && g.vx > -0.3) || g.vx >= EDGE_COMMIT_VELOCITY;
+      settleEdgeBack(commit ? 1 : 0);
+    };
+    // The browser took the touch over (scroll or pinch): slide back, never go back.
+    const onCancel = e => { const g = edgeRef.current; if (e.pointerId === g.pointerId) settleEdgeBack(0); };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("pointermove", onMove, { passive: false });
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onCancel);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onCancel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // The previous screen underneath shows where it was scrolled.
+  React.useLayoutEffect(() => {
+    if (!edgeBack.destKey) return;
+    const el = scrollerIn(underlayRef.current);
+    if (el) el.scrollTop = scrollMemory.current[edgeBack.destKey] || 0;
+  }, [edgeBack.destKey]);
+
+  // A swipe never starts in a text field, in anything that scrolls
+  // sideways, in the Earnings chart (it has its own swipe), in an element
+  // that handles its own touches (touch-action: none), or in an element
+  // marked data-no-swipe-back.
+  function swipeBackBlocked(target) {
+    for (let el = target; el && el.nodeType === 1; el = el.parentElement) {
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (el.hasAttribute && (el.hasAttribute("data-no-swipe-back") || el.hasAttribute("data-earnings-chart"))) return true;
+      if ((el.style && el.style.touchAction === "none") || /touch-action:\s*none/.test(el.getAttribute("style") || "")) return true;
+      if (el.scrollWidth > el.clientWidth + 1 && typeof window !== "undefined" && window.getComputedStyle) {
+        // Only rows that scroll sideways (not the vertical page scroller,
+        // whose overflow-x also computes to "auto").
+        const cs = window.getComputedStyle(el);
+        const scrollsX = cs.overflowX === "auto" || cs.overflowX === "scroll";
+        const scrollsY = cs.overflowY === "auto" || cs.overflowY === "scroll";
+        if (scrollsX && !scrollsY) return true;
+      }
+    }
+    return false;
+  }
+  // A screen with a Back action calls this while rendering, passing the same
+  // function its ‹ button uses; the edge swipe above calls it on release.
+  function swipeBackHandlers(onBack) {
+    if (!renderingUnderlay.current) backActionRef.current = onBack;
+    return { "data-swipe-back": "" };
   }
 
   function showToast(msg) {
@@ -1169,6 +1423,42 @@ export default function HavenProApp() {
     );
     return () => navigator.geolocation.clearWatch(watchId);
   }, [activeJobs]);
+
+  // Tap the status bar to scroll to the top (same as Haven Customer). iOS
+  // scrolls the page, not the app's inner scroll areas, when the status bar
+  // is tapped. The page is one pixel taller than the screen and kept
+  // scrolled down by that pixel; when it lands at 0 (the tap), the visible
+  // screen scrolls to the top and the pixel is re-armed. Never while typing
+  // (iOS also scrolls the page to show the keyboard).
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    let armed = false, timer = null;
+    const se = () => document.scrollingElement || document.documentElement;
+    const arm = () => {
+      const canScroll = se().scrollHeight > window.innerHeight;
+      if (canScroll && window.scrollY < 1) window.scrollTo(0, 1);
+      armed = canScroll && window.scrollY >= 1;
+    };
+    const typing = () => { const a = document.activeElement; return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT"); };
+    const onScroll = () => {
+      if (armed && window.scrollY <= 0) {
+        armed = false;
+        if (!typing()) {
+          document.querySelectorAll("[data-swipe-foreground] .hp-scroll").forEach(el => {
+            if (el.scrollTop > 0) {
+              try { el.scrollTo({ top: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" }); } catch (e) { el.scrollTop = 0; }
+            }
+          });
+        }
+        clearTimeout(timer); timer = setTimeout(arm, 400);
+      }
+    };
+    const t0 = setTimeout(arm, 600);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", arm);
+    return () => { clearTimeout(t0); clearTimeout(timer); window.removeEventListener("scroll", onScroll); window.removeEventListener("resize", arm); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function isNearJob(job) {
     if (!proLiveLocation || job.lat == null || job.lng == null) return false;
@@ -1280,7 +1570,7 @@ export default function HavenProApp() {
       return;
     }
     if (!marketplaceReady) {
-      showToast("Complete your Haven Pro verification before accepting jobs.");
+      showToast(providerStepsOpen ? "Complete your Haven Pro verification before accepting jobs." : "Accepting jobs opens once verification and payouts are available.");
       setTab("profile");
       setProfileView("verificationCenter");
       return;
@@ -1497,7 +1787,7 @@ export default function HavenProApp() {
       updateActiveJob(jobId, localUpdates);
       setReceiptDraft(null);
       popMyJobs();
-      showToast("Receipt submitted — reimbursement added, job continues");
+      showToast("Receipt added. Your materials will be reimbursed in full. You can keep working on the job.");
     } finally {
       submittingReceiptRef.current = false;
     }
@@ -1513,24 +1803,11 @@ export default function HavenProApp() {
     };
   }
 
-  /* ── Message the customer — a per-job simulated thread. Auto-replies are
-     canned, since there's no real customer or backend on the other end;
-     the delay-then-reply pattern mirrors the materials auto-resolve flow,
-     including reading the LATEST activeJobs via the ref so a reply doesn't
-     fire against a job that's already completed by the time it lands. ── */
-  function sendCustomerMessage(jobId) {
-    const text = messageDraftText.trim();
-    if (!text) return;
-    setJobMessages(prev => ({ ...prev, [jobId]: [...(prev[jobId] || []), { from: "pro", text, at: Date.now() }] }));
-    setMessageDraftText("");
-    setTimeout(() => {
-      const stillActive = activeJobsRef.current.some(j => j.id === jobId);
-      if (!stillActive) return;
-      const replies = ["Sounds good, thank you!", "Ok, see you soon!", "Got it, thanks for the update.", "Perfect, I'll be home.", "Thanks for letting me know!"];
-      const reply = replies[Math.floor(Math.random() * replies.length)];
-      setJobMessages(prev => ({ ...prev, [jobId]: [...(prev[jobId] || []), { from: "customer", text: reply, at: Date.now() }] }));
-    }, 1800);
-  }
+  /* ── Messaging customers isn't connected yet (HB-04): messages aren't
+     stored or delivered, so the thread can't send, and nothing ever appears
+     as if the customer wrote it. When job_messages is connected, sending
+     goes there and replies come only from the customer. ── */
+  const CUSTOMER_MESSAGING_CONNECTED = false;
 
   function sendSupportMessage() {
     const text = supportInput.trim();
@@ -1540,8 +1817,8 @@ export default function HavenProApp() {
     setTimeout(() => {
       const lower = text.toLowerCase();
       let reply = "Thanks for reaching out! This is a demo of Haven Support chat — a real team member will follow up here once this is connected to live support.";
-      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept — it's exactly what you receive, no fee deducted. Materials and tips are 100% yours too.";
-      else if (lower.includes("material")) reply = "Once a customer approves your materials request, buy it, then submit the actual cost and a receipt photo in the app — you're reimbursed 100%.";
+      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.";
+      else if (lower.includes("material")) reply = "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed in full.";
       else if (lower.includes("categor")) reply = "You can update your Work Categories anytime from Profile — only jobs in your enabled categories show up on your board.";
       setSupportMessages(prev => [...prev, { from: "support", text: reply, at: Date.now() }]);
     }, 1400);
@@ -1604,7 +1881,9 @@ export default function HavenProApp() {
   }
 
   async function finalizeJob(job, finalStatus) {
-    const tipAmount = finalStatus === "complete" && Math.random() < 0.7 ? Math.round(job.payout * (0.05 + Math.random() * 0.15)) : 0;
+    // No tip is invented (HB-02). A tip appears only once the backend records
+    // a real one; until tips are connected, completed jobs carry none.
+    const tipAmount = 0;
     const actualDurationMs = job.workStartedAt ? Date.now() - job.workStartedAt : null;
     const record = {
       id: job.id, category: job.category, title: job.title, city: job.city,
@@ -1697,7 +1976,7 @@ export default function HavenProApp() {
     setIdentityProgress({ idCaptured: false, selfieCaptured: false });
   }
   function submitIdentityVerification() {
-    setIdentityVerification(v => ({ ...v, status: "pending", providerVerificationId: `persona_demo_${Math.floor(100000 + Math.random() * 899999)}` }));
+    setIdentityVerification(v => ({ ...v, status: "pending", providerVerificationId: null }));
     // Waits here for a provider webhook — see the Dev Testing panel below.
   }
   function retryIdentityVerification() {
@@ -1755,7 +2034,7 @@ export default function HavenProApp() {
   }
   function authorizeBackgroundCheck() {
     if (!backgroundConsent) { showToast("Check the consent box to authorize your background check"); return; }
-    setBackgroundCheck(v => ({ ...v, status: "invited", providerReportId: `checkr_demo_${Math.floor(100000 + Math.random() * 899999)}` }));
+    setBackgroundCheck(v => ({ ...v, status: "invited", providerReportId: null }));
     setTimeout(() => setBackgroundCheck(v => (v.status === "invited" ? { ...v, status: "pending" } : v)), 800);
     // Then waits for the provider's report — see the Dev Testing panel below.
   }
@@ -1800,7 +2079,7 @@ export default function HavenProApp() {
      redirects to the provider's hosted onboarding; it comes back pending
      until the provider's webhook (simulated via Dev Testing) says enabled. ── */
   function startPayoutSetup() {
-    setPayoutAccount(v => ({ ...v, status: "pending", providerAccountId: `acct_demo_${Math.floor(10000 + Math.random() * 89999)}`, requirementsDue: ["identity_document", "bank_account"] }));
+    setPayoutAccount(v => ({ ...v, status: "pending", providerAccountId: null, requirementsDue: [] }));
   }
   function devSetPayoutStatus(status) {
     const v = payoutAccount || {};
@@ -1808,7 +2087,7 @@ export default function HavenProApp() {
       ...v, status,
       payoutsEnabled: status === "enabled",
       requirementsDue: status === "enabled" ? [] : v.requirementsDue,
-      last4: status === "enabled" ? String(Math.floor(1000 + Math.random() * 8999)) : v.last4,
+      last4: v.last4 || null, // never invent bank digits
     } }, "Payouts set to " + status + " (QA, saved)");
   }
 
@@ -1823,10 +2102,10 @@ export default function HavenProApp() {
     if (!taxDraft.legalName.trim()) { showToast("Enter your legal name"); return; }
     setTaxLegalName(taxDraft.legalName.trim());
     setTaxClassification(taxDraft.classification);
-    setTaxProfile(v => ({ ...v, status: "pending", providerReference: `tax_demo_${Math.floor(1000 + Math.random() * 8999)}` }));
+    if (providerStepsOpen) setTaxProfile(v => ({ ...v, status: "pending", providerReference: null }));
     setTaxDraft(null);
     setProfileView("main");
-    showToast("Submitted to tax provider for verification");
+    showToast(providerStepsOpen ? "Saved — waiting on tax verification" : "Saved on this device. Tax verification isn't available yet.");
   }
   function cancelTaxInfo() { setTaxDraft(null); setProfileView("main"); }
   function devSetTaxStatus(status) {
@@ -1842,7 +2121,7 @@ export default function HavenProApp() {
     return devCommitQaWorkspace({
       identityVerification: { ...(identityVerification || {}), status: "verified", verifiedAt: now, failureReasonCode: null },
       backgroundCheck: { ...(backgroundCheck || {}), status: "clear", clearedAt: now },
-      payoutAccount: { ...pa, status: "enabled", payoutsEnabled: true, requirementsDue: [], last4: pa.last4 || String(Math.floor(1000 + Math.random() * 8999)) },
+      payoutAccount: { ...pa, status: "enabled", payoutsEnabled: true, requirementsDue: [], last4: pa.last4 || null },
       taxProfile: { ...(taxProfile || {}), status: "verified" },
     }, "Marketplace Ready (QA, saved)");
   }
@@ -1901,8 +2180,10 @@ export default function HavenProApp() {
           display: "flex",
           borderTop: `1px solid ${T.bd}`,
           background: T.w,
-          // Respect iOS home-indicator safe area
-          padding: "8px 4px calc(10px + env(safe-area-inset-bottom))",
+          // Sits low like native iOS tab bars (e.g. Instagram): icons ~52pt
+          // above the screen edge on Face ID iPhones, labels still clear of
+          // the home indicator. 6px minimum on phones without an inset.
+          padding: "6px 4px max(6px, calc(env(safe-area-inset-bottom) - 12px))",
         }}
       >
         {items.map(it => {
@@ -1912,7 +2193,7 @@ export default function HavenProApp() {
               key={it.key}
               className="hp-tab-btn"
               onClick={() => goTab(it.key)}
-              style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "6px 0" }}
+              style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "5px 0" }}
             >
               <span style={{ fontSize: 20, opacity: active ? 1 : 0.55, filter: active ? "none" : "grayscale(35%)" }}>{it.icon}</span>
               <span style={{ fontSize: 11, fontWeight: active ? 700 : 500, color: active ? T.pg : T.tm, fontFamily: FONT }}>{it.label}</span>
@@ -1958,7 +2239,7 @@ export default function HavenProApp() {
      and never hides the Inspection Visit line. ── */
   function tradeBoardCard(job) {
     const diagnosis = jobRequiresDiagnosis(job);
-    const blockedLabel = hasBlockingActiveJob(activeJobs) ? "Finish Current Job First" : !marketplaceReady ? "Complete Verification" : !online ? "Go Online to Accept" : null;
+    const blockedLabel = hasBlockingActiveJob(activeJobs) ? "Finish Current Job First" : !marketplaceReady ? (providerStepsOpen ? "Complete Verification" : "Verification Not Available Yet") : !online ? "Go Online to Accept" : null;
     const disabled = !!blockedLabel || acceptingJobId === job.id;
     return (
       <div key={job.id} style={{ background: T.w, borderRadius: 16, padding: 14, marginBottom: 8, border: `1px solid ${T.bd}` }}>
@@ -1997,7 +2278,7 @@ export default function HavenProApp() {
           onClick={disabled ? undefined : () => acceptJob(job)}
           style={{
             width: "100%", padding: "10px 0", borderRadius: 12, border: "none", fontSize: 13.5, fontWeight: 800, fontFamily: FONT,
-            cursor: "pointer", color: disabled ? T.tm : "#FFFFFF", background: disabled ? T.soonBg : T.pgb,
+            cursor: "pointer", color: disabled ? T.tm : "#FFFFFF", background: disabled ? T.soonBg : T.cta,
           }}
         >
           {blockedLabel || (acceptingJobId === job.id ? "Accepting…" : "Accept Job")}
@@ -2020,8 +2301,10 @@ export default function HavenProApp() {
 
           <button
             className="hp-toggle"
+            role="switch"
+            aria-checked={online}
             onClick={() => setOnline(o => !o)}
-            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.pg : T.soonBg, transition: "background .18s ease" }}
+            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", border: "none", cursor: "pointer", borderRadius: 18, padding: "16px 18px", marginBottom: 14, background: online ? T.online : T.soonBg, transition: "background .18s ease" }}
           >
             <div style={{ textAlign: "left" }}>
               <div style={{ fontSize: 15, fontWeight: 800, color: online ? "#FFFFFF" : T.tx, fontFamily: FONT }}>{online ? "You're Online" : "You're Offline"}</div>
@@ -2117,7 +2400,7 @@ export default function HavenProApp() {
     const diagnosis = jobRequiresDiagnosis(job);
     const btnStyle = (primary) => ({
       flex: 1, padding: "12px 18px", borderRadius: 12, border: "none", fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer",
-      color: primary ? "#FFFFFF" : T.pg, background: primary ? T.pgb : T.pgt, textAlign: "center",
+      color: primary ? "#FFFFFF" : T.pg, background: primary ? T.cta : T.pgt, textAlign: "center",
     });
     if (job.status === "en_route") {
       if (isNearJob(job)) {
@@ -2160,7 +2443,7 @@ export default function HavenProApp() {
     if (job.status === "materials_approved") {
       return (
         <div>
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 8, textAlign: "center" }}>Approved to purchase — go buy it, then submit your receipt to get reimbursed.</div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 8, textAlign: "center" }}>Approved. Buy the materials, then add your receipt to be reimbursed.</div>
           <button style={{ ...btnStyle(true), width: "100%" }} onClick={() => openReceiptForm(job.id)}>Submit Receipt</button>
         </div>
       );
@@ -2205,9 +2488,11 @@ export default function HavenProApp() {
     );
   }
 
-  /* ── Simulated map for en-route navigation — decorative route visual,
-     plus a real, working "Open in Maps" link (city-level only, since
-     that's all the job data carries pre-full-address). ── */
+  /* ── En-route navigation: a real, working "Open in Maps" / "Get
+     Directions" link. MAP-05a: the decorative drawn route (fake road path
+     and markers) was removed. It looked like a map but showed nothing
+     real. A real job-location map waits for HB-22 (server-enforced access
+     to customer locations). ── */
   function mapPanel(job) {
     const hasDestCoords = job.lat != null && job.lng != null;
     const destination = hasDestCoords ? `${job.lat},${job.lng}` : job.city;
@@ -2222,20 +2507,11 @@ export default function HavenProApp() {
         rel="noopener noreferrer"
         style={{ display: "block", borderRadius: 18, overflow: "hidden", marginBottom: 16, border: `1px solid ${T.bd}`, textDecoration: "none", cursor: "pointer" }}
       >
-        <div style={{ height: 140, position: "relative", background: "linear-gradient(135deg, #DCE6DF, #C9D6CC)" }}>
-          <svg width="100%" height="100%" viewBox="0 0 300 140" style={{ position: "absolute", inset: 0 }} preserveAspectRatio="none">
-            <path d="M 40 110 Q 130 40 260 50" stroke="#0F6E4E" strokeWidth="3" strokeDasharray="7 7" fill="none" opacity="0.65" />
-            <circle cx="40" cy="110" r="7" fill="#16211D" />
-            <circle cx="260" cy="50" r="9" fill="#16A34A" stroke="#fff" strokeWidth="3" />
-          </svg>
-          <div style={{ position: "absolute", top: 10, left: 10, background: "#fff", borderRadius: 10, padding: "6px 10px", fontSize: 11, fontWeight: 700, color: T.tx, boxShadow: "0 2px 8px rgba(0,0,0,.12)" }}>
-            📍 {hasOrigin ? `Directions to ${job.city}` : `Navigating to ${job.city}`}
-          </div>
-          <div style={{ position: "absolute", bottom: 10, right: 10, background: "rgba(255,255,255,.92)", borderRadius: 8, padding: "4px 9px", fontSize: 10, fontWeight: 700, color: T.pgd }}>
-            Tap to expand ↗
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: T.w }}>
+          <span aria-hidden="true" style={{ fontSize: 18 }}>📍</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>{hasOrigin ? `Directions to ${job.city}` : `Navigating to ${job.city}`}</span>
         </div>
-        <div style={{ display: "block", textAlign: "center", padding: "12px 0", background: T.pgb, color: "#fff", fontSize: 13.5, fontWeight: 800, fontFamily: FONT }}>
+        <div style={{ display: "block", textAlign: "center", padding: "12px 0", background: T.cta, color: "#fff", fontSize: 13.5, fontWeight: 800, fontFamily: FONT }}>
           🗺️ {hasOrigin ? "Get Directions" : "Open in Maps"}
         </div>
       </a>
@@ -2332,7 +2608,7 @@ export default function HavenProApp() {
                 onChange={e => updateActiveJob(job.id, { jobNotes: e.target.value })}
                 placeholder="e.g. Replaced worn fill valve. Customer asked me to leave old part in garage."
                 rows={2}
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 13, fontFamily: FONT, outline: "none", resize: "none", marginBottom: 14 }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", resize: "none", marginBottom: 14 }}
               />
               <div style={{ fontSize: 12, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 10 }}>Photos (Optional)</div>
               <div style={{ display: "flex", gap: 10 }}>
@@ -2384,7 +2660,7 @@ export default function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(cancelMaterialsForm)}>
         {backHeader("Request Materials", cancelMaterialsForm)}
         <div style={{ padding: "0 20px 32px" }}>
-          {job && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 }}>For {job.title} — the customer reviews and approves this before you buy anything. 100% of approved cost is reimbursed to you.</div>}
+          {job && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 }}>For {job.title} — the customer approves this before you buy anything. You're reimbursed in full for what you buy.</div>}
           {materialsDraft.items.map((it, i) => (
             <div key={i} style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -2395,14 +2671,14 @@ export default function HavenProApp() {
                 value={it.name}
                 onChange={e => updateItem(i, "name", e.target.value)}
                 placeholder="Material name"
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none", marginBottom: 8 }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", marginBottom: 8 }}
               />
               <input
                 value={it.cost}
                 onChange={e => updateItem(i, "cost", e.target.value.replace(/[^0-9.]/g, ""))}
                 placeholder="Cost ($)"
                 inputMode="decimal"
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none" }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.bd}`, background: T.bg, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
               />
             </div>
           ))}
@@ -2411,7 +2687,7 @@ export default function HavenProApp() {
             <span style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>Total</span>
             <span style={{ fontSize: 18, fontWeight: 900, color: T.pg, fontFamily: FONT }}>${total.toFixed(2).replace(/\.00$/, "")}</span>
           </div>
-          <button onClick={submitMaterialsRequest} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Request</button>
+          <button onClick={submitMaterialsRequest} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Request</button>
         </div>
       </div>
     );
@@ -2434,7 +2710,7 @@ export default function HavenProApp() {
         <div style={{ padding: "0 20px 32px" }}>
           {job && (
             <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 }}>
-              For {job.title}. Enter what you actually paid — it can differ from the estimate — and attach a photo of the receipt. The customer covers this cost; it's reimbursed to you 100%, no platform fee.
+              For {job.title}. Enter what you actually paid (it can differ from the estimate) and add a photo of the receipt. The customer covers this cost, and you're reimbursed in full with no fee taken out.
             </div>
           )}
           <div style={{ marginBottom: 16 }}>
@@ -2444,7 +2720,7 @@ export default function HavenProApp() {
               onChange={e => set("cost", e.target.value.replace(/[^0-9.]/g, ""))}
               placeholder="$"
               inputMode="decimal"
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
             />
           </div>
           <div style={{ marginBottom: 18 }}>
@@ -2464,7 +2740,7 @@ export default function HavenProApp() {
               </label>
             )}
           </div>
-          <button onClick={submitReceipt} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Receipt</button>
+          <button onClick={submitReceipt} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Receipt</button>
         </div>
       </div>
     );
@@ -2490,7 +2766,7 @@ export default function HavenProApp() {
           {earningsStatementBody(job)}
           <button
             onClick={() => goTab("earnings")}
-            style={{ width: "100%", marginTop: 16, padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+            style={{ width: "100%", marginTop: 16, padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             See Earnings
           </button>
@@ -2550,7 +2826,7 @@ export default function HavenProApp() {
 
           <button
             onClick={() => completeJob(jobId)}
-            style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+            style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             Complete Job
           </button>
@@ -2559,8 +2835,7 @@ export default function HavenProApp() {
     );
   }
 
-  function jobsScreen() {
-    const v = currentMyJobsView;
+  function jobsScreen(v = currentMyJobsView) {
     if (v.view === "detail") return activeJobDetailScreen(v.jobId);
     if (v.view === "materials") return materialsFormScreen();
     if (v.view === "receipt") return receiptFormScreen();
@@ -2635,19 +2910,109 @@ export default function HavenProApp() {
     return computeWeekBuckets(ts);
   }
 
-  const periodSwipeStartX = useRef(null);
-  function periodSwipeHandlers() {
-    const order = ["week", "month", "year"];
+  // ── Earnings time navigation ──
+  // The chart shows one week, month or year. Swipe left for the next
+  // (newer) period, right for the previous (older) one, or use the ‹ ›
+  // buttons. It stops at the current period and at the period of the first
+  // completed job. The totals come from the same bucket functions as
+  // before; only the date they're anchored to changes.
+  function periodStart(period, ts) {
+    const d = new Date(ts);
+    if (period === "year") return new Date(d.getFullYear(), 0, 1).getTime();
+    if (period === "month") return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    return startOfWeek(ts);
+  }
+  function shiftPeriod(period, ts, dir) {
+    const d = new Date(ts);
+    if (period === "week") { d.setDate(d.getDate() + 7 * dir); return d.getTime(); }
+    const y = d.getFullYear() + (period === "year" ? dir : 0);
+    const m = d.getMonth() + (period === "month" ? dir : 0);
+    const last = new Date(y, m + 1, 0).getDate();
+    return new Date(y, m, Math.min(d.getDate(), last), d.getHours(), d.getMinutes()).getTime();
+  }
+  function earningsNav() {
+    const anchor = earningsAnchor == null ? now : earningsAnchor;
+    const start = periodStart(earningsPeriod, anchor);
+    const currentStart = periodStart(earningsPeriod, now);
+    const firstJobAt = completedJobsHistory.length ? Math.min(...completedJobsHistory.map(j => j.completedAt)) : now;
+    const earliestStart = periodStart(earningsPeriod, Math.min(firstJobAt, now));
+    const lastStart = periodStart(earningsPeriod, shiftPeriod(earningsPeriod, now, -1));
     return {
-      onTouchStart: e => { periodSwipeStartX.current = e.touches[0].clientX; },
-      onTouchEnd: e => {
-        if (periodSwipeStartX.current == null) return;
-        const dx = e.changedTouches[0].clientX - periodSwipeStartX.current;
-        const idx = order.indexOf(earningsPeriod);
-        if (dx < -50 && idx < order.length - 1) setEarningsPeriod(order[idx + 1]); // swipe left -> next (coarser)
-        else if (dx > 50 && idx > 0) setEarningsPeriod(order[idx - 1]); // swipe right -> previous (finer)
-        periodSwipeStartX.current = null;
+      anchor,
+      isCurrent: start >= currentStart,
+      isLast: start === lastStart,
+      canPrev: start > earliestStart,
+      canNext: start < currentStart,
+    };
+  }
+  function goEarningsPeriod(dir) {
+    const nav = earningsNav();
+    if (dir < 0 ? !nav.canPrev : !nav.canNext) return false;
+    const next = shiftPeriod(earningsPeriod, nav.anchor, dir);
+    setEarningsAnchor(periodStart(earningsPeriod, next) >= periodStart(earningsPeriod, now) ? null : next);
+    return true;
+  }
+  function selectEarningsPeriod(p) {
+    if (p === earningsPeriod) return;
+    // Keep the date being viewed: last week -> the month that week is in.
+    if (earningsAnchor != null && periodStart(p, earningsAnchor) >= periodStart(p, now)) setEarningsAnchor(null);
+    setEarningsPeriod(p);
+  }
+
+  // A swipe only counts when it's clearly horizontal (at least 50px across
+  // and twice as far across as up/down), so scrolling the page never moves
+  // the chart by accident. The card follows the finger once the gesture is
+  // clearly sideways (touch-action: pan-y leaves vertical scrolling to the
+  // browser), then slides to the next period or springs back.
+  const periodSwipeStart = useRef(null);
+  const periodSlideRef = useRef(null);
+  function isHorizontalSwipe(dx, dy) { return Math.abs(dx) >= 50 && Math.abs(dx) >= 2 * Math.abs(dy); }
+  function reducedMotion() {
+    try { return typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; }
+  }
+  function slideTo(x, ms) {
+    const el = periodSlideRef.current;
+    if (!el) return;
+    el.style.transition = ms ? `transform ${ms}ms ease-out` : "none";
+    el.style.transform = x ? `translateX(${x}px)` : "";
+  }
+  function periodSwipeHandlers() {
+    return {
+      onTouchStart: e => {
+        const t = e.touches[0];
+        periodSwipeStart.current = e.touches.length === 1 ? { x: t.clientX, y: t.clientY, lock: null } : null;
       },
+      onTouchMove: e => {
+        const st = periodSwipeStart.current;
+        if (!st) return;
+        const t = e.touches[0];
+        const dx = t.clientX - st.x, dy = t.clientY - st.y;
+        if (!st.lock && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) st.lock = Math.abs(dx) > Math.abs(dy) * 1.2 ? "h" : "v";
+        if (st.lock !== "h" || reducedMotion()) return;
+        const nav = earningsNav();
+        const blocked = dx < 0 ? !nav.canNext : !nav.canPrev;
+        slideTo(blocked ? dx * 0.25 : dx, 0); // resist at the ends
+      },
+      onTouchEnd: e => {
+        const st = periodSwipeStart.current;
+        periodSwipeStart.current = null;
+        if (!st) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - st.x, dy = t.clientY - st.y;
+        const dir = dx < 0 ? 1 : -1; // swipe left -> newer, right -> older
+        const nav = earningsNav();
+        const allowed = dir > 0 ? nav.canNext : nav.canPrev;
+        if (!isHorizontalSwipe(dx, dy) || !allowed) { slideTo(0, 180); return; }
+        if (reducedMotion() || !periodSlideRef.current) { goEarningsPeriod(dir); slideTo(0, 0); return; }
+        const w = periodSlideRef.current.offsetWidth || 320;
+        slideTo(dir > 0 ? -w : w, 140);
+        setTimeout(() => {
+          goEarningsPeriod(dir);
+          slideTo(dir > 0 ? w * 0.35 : -w * 0.35, 0);
+          setTimeout(() => slideTo(0, 160), 16);
+        }, 140);
+      },
+      onTouchCancel: () => { periodSwipeStart.current = null; slideTo(0, 180); },
     };
   }
   function clickBucket(bucket) {
@@ -2714,10 +3079,14 @@ export default function HavenProApp() {
       return (<div style={{ flex: 1, display: "flex", flexDirection: "column" }}>{screenHeader("Earnings")}{emptyState("💵", "No completed payouts yet", "Every job you complete — payout, materials, and tips — will show up here, job by job.")}</div>);
     }
 
-    const { buckets, rangeLabel, highlightIndex } = periodData(earningsPeriod, now);
+    const nav = earningsNav();
+    const { buckets, rangeLabel } = periodData(earningsPeriod, nav.anchor);
+    // "Today" is only highlighted when the chart shows the current period.
+    const highlightIndex = buckets.findIndex(b => now >= b.start && now < b.end);
     const periodTotal = buckets.reduce((a, b) => a + b.total, 0);
     const maxBucket = Math.max(1, ...buckets.map(b => b.total));
-    const periodTitle = { week: "This Week", month: "This Month", year: "This Year" }[earningsPeriod];
+    const periodName = { week: "Week", month: "Month", year: "Year" }[earningsPeriod];
+    const periodTitle = nav.isCurrent ? `This ${periodName}` : nav.isLast ? `Last ${periodName}` : periodName;
     const lifetimeTotal = completedJobsHistory.reduce((sum, j) => sum + jobAmount(j).net, 0);
     const totalDurationHrs = completedJobsHistory.reduce((sum, j) => sum + j.durationMin, 0) / 60;
     const avgPerHour = totalDurationHrs > 0 ? Math.round(lifetimeTotal / totalDurationHrs) : 0;
@@ -2733,14 +3102,19 @@ export default function HavenProApp() {
     const sortedJobs = [...categoryFilteredJobs].sort((a, b) => b.completedAt - a.completedAt); // most-recent-first for the general ledger
 
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", position: "relative" }}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto", position: "relative" }}>
         {screenHeader("Earnings")}
         <div style={{ padding: "0 20px 32px" }}>
-          {/* Swipeable period chart — swipe right for coarser (Week -> Month -> Year), left to go back */}
-          <div {...periodSwipeHandlers()} style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+          {/* Period chart — swipe left/right (or ‹ ›) to move through time; the toggle below picks Week / Month / Year */}
+          <div {...periodSwipeHandlers()} data-earnings-chart style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 14, overflow: "hidden", touchAction: "pan-y" }}>
+            <div ref={periodSlideRef}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
               <div style={{ fontSize: 12, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3 }}>{periodTitle}</div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: T.tm, fontFamily: FONT }}>{rangeLabel}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <button onClick={() => goEarningsPeriod(-1)} disabled={!nav.canPrev} aria-label={`Previous ${periodName.toLowerCase()}`} className="hp-nav-btn" style={{ width: 26, height: 26, border: "none", background: "none", color: T.tm, fontSize: 18, lineHeight: 1, cursor: nav.canPrev ? "pointer" : "default", opacity: nav.canPrev ? 1 : 0.3, padding: 0 }}>‹</button>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.tm, fontFamily: FONT, fontVariantNumeric: "tabular-nums" }}>{rangeLabel}</div>
+                <button onClick={() => goEarningsPeriod(1)} disabled={!nav.canNext} aria-label={`Next ${periodName.toLowerCase()}`} className="hp-nav-btn" style={{ width: 26, height: 26, border: "none", background: "none", color: T.tm, fontSize: 18, lineHeight: 1, cursor: nav.canNext ? "pointer" : "default", opacity: nav.canNext ? 1 : 0.3, padding: 0 }}>›</button>
+              </div>
             </div>
             <div style={{ fontSize: 30, fontWeight: 900, color: T.pg, fontFamily: FONT, marginBottom: 16 }}>${periodTotal}</div>
             <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 90, marginBottom: 6 }}>
@@ -2750,6 +3124,8 @@ export default function HavenProApp() {
                   <button
                     key={i}
                     onClick={() => clickBucket(b)}
+                    aria-label={`${(b.fullLabel || b.label).replace(/ Completed Jobs$/, "")}: ${b.total > 0 ? `$${b.total}` : "no earnings"}`}
+                    aria-pressed={!!isSelected}
                     style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%", background: "none", border: "none", cursor: b.total > 0 ? "pointer" : "default", padding: 0 }}
                   >
                     <div style={{ fontSize: 9.5, fontWeight: 700, color: T.ts, marginBottom: 3, height: 12 }}>{b.total > 0 ? `$${b.total}` : ""}</div>
@@ -2770,10 +3146,14 @@ export default function HavenProApp() {
                 <div key={i} style={{ flex: 1, textAlign: "center", fontSize: 10.5, fontWeight: i === highlightIndex ? 800 : 600, color: i === highlightIndex ? T.pg : T.tm }}>{b.label}</div>
               ))}
             </div>
-            <div style={{ display: "flex", justifyContent: "center", gap: 6 }}>
-              {["week", "month", "year"].map(p => (
-                <div key={p} style={{ width: 6, height: 6, borderRadius: 3, background: earningsPeriod === p ? T.pg : T.bd }} />
-              ))}
+            </div>
+            <div role="tablist" aria-label="Earnings period" style={{ display: "flex", gap: 3, background: T.bg, border: `1px solid ${T.bd}`, borderRadius: 10, padding: 3 }}>
+              {[["week", "Week"], ["month", "Month"], ["year", "Year"]].map(([p, label]) => {
+                const on = earningsPeriod === p;
+                return (
+                  <button key={p} role="tab" aria-selected={on} onClick={() => selectEarningsPeriod(p)} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", background: on ? T.w : "transparent", boxShadow: on ? "0 1px 2px rgba(15,26,23,.12)" : "none", color: on ? T.pg : T.ts, fontSize: 12, fontWeight: on ? 800 : 600, fontFamily: FONT, cursor: "pointer" }}>{label}</button>
+                );
+              })}
             </div>
           </div>
 
@@ -2803,7 +3183,7 @@ export default function HavenProApp() {
                   <span style={{ fontSize: 12 }}>{iconFor(ledgerCategoryFilter)}</span>
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: T.pgd, fontFamily: FONT }}>{ledgerCategoryFilter}</span>
                 </button>
-                <button onClick={() => setLedgerCategoryFilter("all")} style={{ border: "none", background: "none", cursor: "pointer", color: T.ts, fontSize: 14, fontWeight: 800, padding: 0 }}>✕</button>
+                <button onClick={() => setLedgerCategoryFilter("all")} aria-label="Clear filter" style={{ border: "none", background: "none", cursor: "pointer", color: T.ts, fontSize: 14, fontWeight: 800, padding: 0 }}>✕</button>
               </div>
             ) : (
               <button onClick={() => setLedgerFilterOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, border: `1px solid ${T.bd}`, background: "transparent", borderRadius: 10, padding: "5px 10px", cursor: "pointer" }}>
@@ -2827,7 +3207,7 @@ export default function HavenProApp() {
           )}
 
           <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 4, lineHeight: 1.5 }}>
-            The payout shown before you accept is exactly what you receive — no fee deducted. Materials and tips are 100% yours too.
+            The payout shown before you accept is exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.
           </div>
         </div>
         {ledgerFilterSheet()}
@@ -2846,7 +3226,7 @@ export default function HavenProApp() {
     });
     const months = Object.values(byMonth).sort((a, b) => b.sortTs - a.sortTs);
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader("Monthly Breakdown", popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           {months.map((m, i) => (
@@ -2890,7 +3270,7 @@ export default function HavenProApp() {
     for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader(monthLabel(firstOfMonth.getTime()), popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, marginBottom: 8 }}>
@@ -2907,6 +3287,9 @@ export default function HavenProApp() {
                 <button
                   key={i}
                   onClick={() => hasJobs && pushEarnings({ view: "day", dateKey: `${year}-${month}-${day}` })}
+                  aria-label={`${new Date(year, month, day).toLocaleDateString(undefined, { month: "long", day: "numeric" })}, ${hasJobs ? `${info.count} job${info.count === 1 ? "" : "s"}, $${info.total}` : "no jobs"}`}
+                  aria-disabled={hasJobs ? undefined : "true"}
+                  tabIndex={hasJobs ? undefined : -1}
                   style={{
                     aspectRatio: "1", borderRadius: 10, border: `1px solid ${hasJobs ? T.pg : T.bd}`,
                     background: hasJobs ? T.pgt : T.w, cursor: hasJobs ? "pointer" : "default",
@@ -2931,7 +3314,7 @@ export default function HavenProApp() {
       .sort((a, b) => a.completedAt - b.completedAt); // order completed
     const label = new Date(year, month, day).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader(label, popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
           {dayJobs.length === 0
@@ -2942,96 +3325,165 @@ export default function HavenProApp() {
     );
   }
 
+  /* ── Job Earnings Statement document. Same document system as Haven
+     Customer receipts (always light, HAVEN wordmark, small-caps sections,
+     a heavy rule above the total) so both read as Haven paperwork.
+     Earnings (labor or fee, plus tip) and materials reimbursement are kept
+     apart: reimbursement repays what the Pro spent; it is not earnings.
+     Amounts come from jobAmount(); nothing here recalculates pay. No
+     statement number or payment status is shown: none exists yet. ── */
+  const STMT = { paper: "#FFFFFF", tint: "#F5F2ED", tx: "#1C2B3A", ts: "#5A6B78", tm: "#66727C", bd: "#E5DED4", ok: "#047857", okBg: "#ECFDF5", dx: "#43536B", dxBg: "#EEF1F5" };
+  const stmtMoney = n => "$" + (Math.round((Number(n) || 0) * 100) / 100).toFixed(2);
+  const stmtDate = ts => new Date(ts).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const stmtTime = ts => new Date(ts).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  // A job reference only when the job has a real backend id (UUID).
+  const stmtJobRef = job => (typeof job.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(job.id)) ? job.id.slice(0, 8).toUpperCase() : null;
+  function stmtEarningLabel(job) {
+    return job.status === "inspection_completed" ? "Inspection visit" : job.status === "materials_declined" ? "Convenience fee" : "Labor payout";
+  }
   function earningsStatementBody(job) {
     const a = jobAmount(job);
     const isInspectionOnly = job.status === "inspection_completed";
     const isMaterialsDeclined = job.status === "materials_declined";
-    const statement = earningsStatements.find(s => s.jobId === job.id);
-    const row = (label, value, muted) => (
-      <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.bd}` }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: muted ? T.ts : T.tx, fontFamily: FONT }}>{label}</span>
-        <span style={{ fontSize: 13, fontWeight: 700, color: muted ? T.ts : T.tx, fontFamily: FONT }}>{value}</span>
+    const earnings = a.gross + a.tip;
+    const ref = stmtJobRef(job);
+    const proName = `${firstName || ""} ${lastName || ""}`.trim();
+    const label = { fontSize: 10, fontWeight: 700, color: STMT.tm, letterSpacing: 0.6, marginBottom: 6, fontFamily: FONT };
+    const line = (l, v) => (
+      <div key={l} style={{ display: "flex", justifyContent: "space-between", marginBottom: 9 }}>
+        <span style={{ fontSize: 13, color: STMT.ts, fontFamily: FONT }}>{l}</span>
+        <span style={{ fontSize: 13, color: STMT.tx, fontWeight: 600, fontFamily: FONT }}>{v}</span>
       </div>
     );
     return (
-      <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18 }}>
-        {statement && <div style={{ fontSize: 10.5, fontWeight: 700, color: T.tm, fontFamily: FONT, marginBottom: 8 }}>Statement {statement.id}</div>}
-        <div style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{iconFor(job.category)} {job.title}</div>
-        <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 2, marginBottom: 6 }}>{job.category} · {job.city}</div>
-        <div style={{ fontSize: 11.5, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 6 }}>Completed {formatShortDate(job.completedAt)}</div>
-        {job.actualDurationMin != null && (
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 14 }}>
-            ⏱ On the job {job.actualDurationMin} min (est. ~{job.durationMin} min)
+      <div style={{ background: STMT.paper, borderRadius: 18, padding: 20, boxShadow: "0 2px 12px rgba(28,43,58,.08)", color: STMT.tx, fontFamily: FONT }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 16, marginBottom: 18, borderBottom: `2px solid ${STMT.tx}` }}>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 900, letterSpacing: 3, color: STMT.tx }}>HAVEN</div>
+            <div style={{ fontSize: 10, color: STMT.ts, marginTop: 2 }}>Haven Pro · Earnings</div>
           </div>
-        )}
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: (isInspectionOnly || isMaterialsDeclined) ? T.dxTx : T.pgd, background: (isInspectionOnly || isMaterialsDeclined) ? T.dxBg : T.pgt, border: `1px solid ${(isInspectionOnly || isMaterialsDeclined) ? T.dxBd : "transparent"}`, borderRadius: 9, padding: "5px 10px" }}>
-          {isInspectionOnly ? "Inspection Completed" : isMaterialsDeclined ? "Materials declined — job could not be completed" : "Full Repair"}
-        </span>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.5, color: STMT.tx }}>EARNINGS STATEMENT</div>
+            {ref && <div style={{ fontSize: 10.5, color: STMT.ts, marginTop: 3 }}>Job {ref}</div>}
+            <div style={{ fontSize: 11, color: STMT.ts, marginTop: 5 }}>{stmtDate(job.completedAt)}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 18 }}>
+          {proName ? (
+            <div>
+              <div style={label}>PRO</div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{proName}</div>
+              <div style={{ fontSize: 12, color: STMT.ts, marginTop: 2 }}>via Haven</div>
+            </div>
+          ) : <div aria-hidden="true" />}
+          <div>
+            <div style={label}>SERVICE LOCATION</div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>{job.city}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, background: STMT.tint, borderRadius: 14, padding: 14, marginBottom: 18 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 20, background: STMT.paper, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 20 }}>{iconFor(job.category)}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>{job.title}</div>
+            <div style={{ fontSize: 11, color: STMT.ts, marginTop: 1 }}>{job.category} · Completed {stmtDate(job.completedAt)} at {stmtTime(job.completedAt)}</div>
+            <span style={{ display: "inline-block", marginTop: 6, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.3, padding: "2px 9px", borderRadius: 8, color: (isInspectionOnly || isMaterialsDeclined) ? STMT.dx : STMT.ok, background: (isInspectionOnly || isMaterialsDeclined) ? STMT.dxBg : STMT.okBg }}>
+              {isInspectionOnly ? "Inspection completed" : isMaterialsDeclined ? "Not completed: materials declined" : "Full repair"}
+            </span>
+          </div>
+        </div>
 
         {job.jobNotes && (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 10.5, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>Job Notes</div>
-            <div style={{ fontSize: 12.5, fontWeight: 500, color: T.tx, fontFamily: FONT, lineHeight: 1.4 }}>{job.jobNotes}</div>
-          </div>
-        )}
-        {(job.beforePhoto || job.afterPhoto) && (
-          <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-            {job.beforePhoto && <img src={job.beforePhoto} alt="Before" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.bd}` }} />}
-            {job.afterPhoto && <img src={job.afterPhoto} alt="After" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.bd}` }} />}
+          <div style={{ marginBottom: 18 }}>
+            <div style={label}>JOB NOTES</div>
+            <div style={{ fontSize: 12, color: STMT.ts, lineHeight: 1.6 }}>{job.jobNotes}</div>
           </div>
         )}
 
-        <div style={{ marginTop: 18 }}>
-          {row(isInspectionOnly ? "Inspection Visit" : isMaterialsDeclined ? "Convenience Fee" : "Labor Payout", `$${a.gross}`)}
-          {a.tip > 0 && row("Tip (100% to you)", `+$${a.tip}`)}
-          {a.materials > 0 && row(`Materials Reimbursement${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, `+$${a.materials}`)}
+        <div style={{ marginBottom: a.materials > 0 ? 18 : 6 }}>
+          <div style={label}>EARNINGS</div>
+          {line(stmtEarningLabel(job), stmtMoney(a.gross))}
+          {a.tip > 0 && line("Tip (100% yours)", stmtMoney(a.tip))}
+          <div style={{ borderTop: `2px solid ${STMT.tx}`, marginTop: 6, paddingTop: 12, display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 14, fontWeight: 800 }}>Total earnings</span>
+            <span style={{ fontSize: 20, fontWeight: 900 }}>{stmtMoney(earnings)}</span>
+          </div>
         </div>
-        {job.materialsReceiptPhoto && (
-          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
-            <img src={job.materialsReceiptPhoto} alt="Receipt" style={{ width: 44, height: 44, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.bd}` }} />
-            <span style={{ fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: FONT }}>Receipt attached</span>
+
+        {a.materials > 0 && (
+          <div style={{ background: STMT.tint, borderRadius: 14, padding: 14, marginBottom: 6 }}>
+            <div style={label}>MATERIALS REIMBURSEMENT</div>
+            {line(`Materials you bought${job.materialsReceiptPhoto ? " · receipt on file" : ""}`, stmtMoney(a.materials))}
+            <div style={{ fontSize: 11, color: STMT.ts, lineHeight: 1.5 }}>Repays what you spent, in full. It isn't earnings.</div>
+            {job.materialsReceiptPhoto && <img src={job.materialsReceiptPhoto} alt="Materials receipt" style={{ width: 44, height: 44, borderRadius: 10, objectFit: "cover", border: `1px solid ${STMT.bd}`, marginTop: 10 }} />}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderTop: `1px solid ${STMT.bd}`, marginTop: 12, paddingTop: 10 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 700 }}>Earnings + reimbursement</span>
+              <span style={{ fontSize: 14, fontWeight: 800 }}>{stmtMoney(a.net)}</span>
+            </div>
           </div>
         )}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 14, marginTop: 4 }}>
-          <span style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT }}>TOTAL EARNINGS</span>
-          <span style={{ fontSize: 24, fontWeight: 900, color: T.pg, fontFamily: FONT }}>${a.net}</span>
+
+        <div style={{ borderTop: `1px solid ${STMT.bd}`, paddingTop: 14, marginTop: 14, textAlign: "center" }}>
+          <div style={{ fontSize: 10.5, color: STMT.tm, lineHeight: 1.6 }}>Recordkeeping document, not a tax form. Year-end tax documents will appear under Tax Documents once available.</div>
         </div>
       </div>
     );
+  }
+
+  function statementShareText(job) {
+    const a = jobAmount(job);
+    const ref = stmtJobRef(job);
+    return [
+      "Haven Pro — Earnings Statement" + (ref ? ` · Job ${ref}` : ""),
+      `${job.title} · ${job.category} · ${job.city}`,
+      `Completed ${stmtDate(job.completedAt)}`,
+      "",
+      "EARNINGS",
+      `${stmtEarningLabel(job)}: ${stmtMoney(a.gross)}`,
+      a.tip ? `Tip (100% yours): ${stmtMoney(a.tip)}` : null,
+      `Total earnings: ${stmtMoney(a.gross + a.tip)}`,
+      a.materials ? "" : null,
+      a.materials ? "MATERIALS REIMBURSEMENT (repays what you spent; not earnings)" : null,
+      a.materials ? `Materials you bought: ${stmtMoney(a.materials)}` : null,
+      a.materials ? `Earnings + reimbursement: ${stmtMoney(a.net)}` : null,
+      "",
+      "Recordkeeping document, not a tax form.",
+    ].filter(x => x !== null).join("\n");
+  }
+  async function shareStatement(job) {
+    const text = statementShareText(job);
+    try {
+      if (typeof navigator !== "undefined" && navigator.share) { await navigator.share({ title: "Haven Pro earnings statement", text }); return; }
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) { await navigator.clipboard.writeText(text); showToast("Statement copied"); return; }
+    } catch (_) {}
+    showToast("Sharing isn't available on this device");
+  }
+  function printStatement() {
+    try { window.print(); } catch (_) {}
   }
 
   function earningsStatementScreen(jobId) {
     const job = completedJobsHistory.find(j => j.id === jobId);
     if (!job) return monthlyBreakdownScreen();
-    const statement = earningsStatements.find(s => s.jobId === jobId);
     return (
-      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
+      <div className="hp-scroll" data-earnings-scroll style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popEarnings)}>
         {backHeader("Job Earnings Statement", popEarnings)}
         <div style={{ padding: "0 20px 32px" }}>
-          {earningsStatementBody(job)}
-
-          {statement && (
-            <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginTop: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: T.tx, fontFamily: FONT }}>Emailed to you</span>
-                {statusPill(statement.emailStatus === "sent" ? "verified" : statement.emailStatus === "failed" ? "failed" : "pending")}
-              </div>
-              <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginBottom: 10 }}>
-                Subject: Haven — Earnings statement for {job.title} · {formatShortDate(job.completedAt)}
-              </div>
-              <button onClick={() => resendEarningsStatement(jobId)} style={{ fontSize: 11.5, fontWeight: 700, color: T.pg, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Email Again</button>
-            </div>
-          )}
-          <div style={{ fontSize: 10.5, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 14, lineHeight: 1.5 }}>
-            This is a recordkeeping document, not a tax form. Year-end tax documents (e.g. your 1099) will appear separately under Tax Documents once available.
+          <div data-print-statement>{earningsStatementBody(job)}</div>
+          <div className="hp-no-print" style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button onClick={() => shareStatement(job)} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>⬆️ Share</button>
+            <button onClick={printStatement} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>🖨️ Print</button>
           </div>
+
         </div>
       </div>
     );
   }
 
-  function earningsScreen() {
-    const v = currentEarningsView;
+  function earningsScreen(v = currentEarningsView) {
     if (v.view === "monthly") return monthlyBreakdownScreen();
     if (v.view === "calendar") return calendarScreen(v.monthKey);
     if (v.view === "day") return dayDetailScreen(v.dateKey);
@@ -3046,7 +3498,7 @@ export default function HavenProApp() {
       return (
         <div key={i} style={{ display: "flex", justifyContent: fromPro ? "flex-end" : "flex-start", marginBottom: 8 }}>
           <div style={{
-            maxWidth: "75%", background: fromPro ? T.pgb : T.w, color: fromPro ? "#FFFFFF" : T.tx,
+            maxWidth: "75%", background: fromPro ? T.cta : T.w, color: fromPro ? "#FFFFFF" : T.tx,
             border: fromPro ? "none" : `1px solid ${T.bd}`, borderRadius: 14, padding: "10px 13px",
             fontSize: 13, fontWeight: 500, fontFamily: FONT, lineHeight: 1.4,
           }}>
@@ -3065,9 +3517,10 @@ export default function HavenProApp() {
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") onSend(); }}
           placeholder="Type a message…"
-          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none" }}
+          aria-label="Message"
+          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
         />
-        <button onClick={onSend} style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: T.pgb, color: "#fff", fontSize: 16, cursor: "pointer", flexShrink: 0 }}>➤</button>
+        <button onClick={onSend} style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: T.cta, color: "#fff", fontSize: 16, cursor: "pointer", flexShrink: 0 }}>➤</button>
       </div>
     );
   }
@@ -3080,12 +3533,16 @@ export default function HavenProApp() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }} {...swipeBackHandlers(popMessages)}>
         {backHeader(job.customerName, popMessages)}
         <div style={{ fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, textAlign: "center", marginBottom: 6 }}>{job.title} · {job.category}</div>
+        {CUSTOMER_MESSAGING_CONNECTED ? null : (
+          <div role="status" style={{ margin: "6px 20px 4px", padding: "10px 14px", borderRadius: 12, background: T.w, border: `1px solid ${T.bd}`, fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5 }}>
+            Messaging customers isn't available yet, so messages can't be sent or received here.
+          </div>
+        )}
         <div className="hp-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 20px 12px" }}>
           {thread.length === 0
-            ? <div style={{ textAlign: "center", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 24 }}>Say hello to {job.customerName} if you have any questions before you arrive.</div>
+            ? <div style={{ textAlign: "center", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 24 }}>Your conversation with {job.customerName} will appear here once messaging is available.</div>
             : chatBubbles(thread)}
         </div>
-        {chatInputBar(messageDraftText, setMessageDraftText, () => sendCustomerMessage(jobId))}
       </div>
     );
   }
@@ -3111,7 +3568,7 @@ export default function HavenProApp() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 800, color: T.tx }}>{job.customerName}</div>
                   <div style={{ fontSize: 12, fontWeight: 500, color: T.ts, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {last ? last.text : `${job.title} · Say hello`}
+                    {last ? last.text : `${job.title} · Messaging not available yet`}
                   </div>
                 </div>
               </button>
@@ -3122,8 +3579,7 @@ export default function HavenProApp() {
     );
   }
 
-  function messagesScreen() {
-    const v = currentMessagesView;
+  function messagesScreen(v = currentMessagesView) {
     if (v.view === "thread") return messageThreadScreen(v.jobId);
     return messagesListScreen();
   }
@@ -3175,9 +3631,10 @@ export default function HavenProApp() {
           value={value}
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
+          aria-label={label}
           inputMode={inputMode}
           type={type || "text"}
-          style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
         />
       </div>
     );
@@ -3185,10 +3642,10 @@ export default function HavenProApp() {
   function subScreenHeader(title, onCancel, onSave, saveLabel) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "28px 20px 16px" }}>
-        <button onClick={onCancel} style={{ border: "none", background: "none", color: T.ts, fontWeight: 700, fontSize: 14, fontFamily: FONT, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onCancel} style={{ border: "none", background: "none", color: T.ts, fontWeight: 700, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "12px 10px", margin: "-11px -4px" }}>Cancel</button>
         <div style={{ fontSize: 15.5, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{title}</div>
         {onSave ? (
-          <button onClick={onSave} style={{ border: "none", background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer" }}>{saveLabel || "Save"}</button>
+          <button onClick={onSave} style={{ border: "none", background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "12px 10px", margin: "-11px -4px" }}>{saveLabel || "Save"}</button>
         ) : <div style={{ width: 44 }} />}
       </div>
     );
@@ -3199,7 +3656,7 @@ export default function HavenProApp() {
   function backHeader(title, onBack) {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "28px 20px 16px" }}>
-        <button onClick={onBack} style={{ border: "none", background: "none", color: T.pg, fontSize: 22, fontWeight: 800, cursor: "pointer", padding: "0 4px 0 0", lineHeight: 1 }}>‹</button>
+        <button onClick={onBack} aria-label="Back" style={{ border: "none", background: "none", color: T.pg, fontSize: 22, fontWeight: 800, cursor: "pointer", padding: "11px 18px 11px 16px", margin: "-11px -14px -11px -16px", lineHeight: 1 }}>‹</button>
         <div style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{title}</div>
       </div>
     );
@@ -3272,23 +3729,27 @@ export default function HavenProApp() {
           {/* C. Verification */}
           <div style={{ marginBottom: 14 }}>
             {sectionLabel("Verification")}
-            {navRow("🪪", "Identity", statusLabelText(identityVerification.status), () => setProfileView("identity"))}
-            {navRow("✅", "Background Check", statusLabelText(backgroundCheck.status), () => setProfileView("backgroundCheck"))}
+            {navRow("🪪", "Identity", statusLabelText(shownStatus(identityVerification.status)), () => setProfileView("identity"))}
+            {navRow(backgroundCheckIcon(), "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
             {navRow("📜", "Professional Credentials", `${credentials.filter(c => c.status === "verified").length} verified · ${credentials.length} total`, () => setProfileView("credentials"))}
           </div>
 
           {/* D. Payouts & Tax */}
           <div style={{ marginBottom: 14 }}>
             {sectionLabel("Payouts & Tax")}
-            {navRow("🏦", "Payout Method", statusLabelText(payoutAccount.status), () => setProfileView("payout"))}
-            {navRow("🧾", "Tax Information", statusLabelText(taxProfile.status), openTaxInfo)}
+            {navRow("🏦", "Payout Method", statusLabelText(shownStatus(payoutAccount.status)), () => setProfileView("payout"))}
+            {navRow("🧾", "Tax Information", statusLabelText(shownStatus(taxProfile.status)), openTaxInfo)}
           </div>
+
+          {accountSection()}
 
           {/* E. Settings — single destination */}
           <div style={{ marginBottom: 8 }}>
             {sectionLabel("Settings")}
             {navRow("⚙️", "Settings", "Notifications, Appearance, Help & Support", () => setProfileView("settings"))}
           </div>
+
+          {profileSignOut()}
         </div>
       </div>
     );
@@ -3330,9 +3791,21 @@ export default function HavenProApp() {
       needs_review: "Needs Review", failed: "Failed", expired: "Expired",
       consent_required: "Consent Required", invited: "Invited", clear: "Clear", consider: "Consider", disputed: "Disputed", suspended: "Suspended",
       self_reported: "Self-Reported", verification_available: "Ready to Verify", unable_to_verify: "Unable to Verify", rejected: "Rejected",
-      restricted: "Restricted", enabled: "Enabled",
+      restricted: "Restricted", enabled: "Enabled", not_available: "Not available yet",
     };
     return map[status] || status;
+  }
+  function notAvailableNote() {
+    return (
+      <div role="status" style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 16, marginBottom: 14, fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5 }}>
+        This step isn't available yet. Haven will open it once its verification and payout partners are connected. Until then, accepting jobs stays locked.
+      </div>
+    );
+  }
+  // PRO-02: a green check only when the check is actually clear; otherwise the
+  // shield the setup card already uses for "not ready yet".
+  function backgroundCheckIcon() {
+    return shownStatus(backgroundCheck.status) === "clear" ? "✅" : "🛡️";
   }
   function statusPill(status) {
     const positive = ["verified", "clear", "enabled"].includes(status);
@@ -3368,7 +3841,7 @@ export default function HavenProApp() {
 
   function identityScreen() {
     const bothCaptured = identityProgress.idCaptured && identityProgress.selfieCaptured;
-    const status = identityVerification.status;
+    const status = shownStatus(identityVerification.status);
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("verificationCenter"))}>
         {backHeader("Identity Verification", () => setProfileView("verificationCenter"))}
@@ -3378,9 +3851,10 @@ export default function HavenProApp() {
           </div>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 16 }}>Verified by Persona, Haven's identity partner — Haven never reviews your ID directly.</div>
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
 
           {status === "not_started" && (
-            <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Start Identity Verification
             </button>
           )}
@@ -3394,7 +3868,7 @@ export default function HavenProApp() {
               <button onClick={() => setIdentityProgress(p => ({ ...p, selfieCaptured: true }))} style={{ width: "100%", marginBottom: 14, padding: "12px 0", borderRadius: 12, border: `1px solid ${identityProgress.selfieCaptured ? T.pg : T.bd}`, background: identityProgress.selfieCaptured ? T.pgt : T.w, color: identityProgress.selfieCaptured ? T.pgd : T.tx, fontSize: 13.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
                 {identityProgress.selfieCaptured ? "✓ " : ""}Selfie / Liveness Check (via Persona)
               </button>
-              <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>
+              <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>
                 Submit to Persona
               </button>
             </>
@@ -3415,7 +3889,7 @@ export default function HavenProApp() {
                 {status === "failed" && `Persona couldn't verify your identity${identityVerification.failureReasonCode ? ` (${identityVerification.failureReasonCode})` : ""}.`}
                 {status === "expired" && "Your identity verification has expired and needs to be redone."}
               </div>
-              <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
+              <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
             </>
           )}
 
@@ -3433,7 +3907,7 @@ export default function HavenProApp() {
   }
 
   function backgroundCheckScreen() {
-    const status = backgroundCheck.status;
+    const status = shownStatus(backgroundCheck.status);
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("verificationCenter"))}>
         {backHeader("Background Check", () => setProfileView("verificationCenter"))}
@@ -3443,9 +3917,10 @@ export default function HavenProApp() {
           </div>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.tm, fontFamily: FONT, marginBottom: 16 }}>Production launch requires legal review of FCRA disclosures, consent language, and pre-/post-adverse-action procedures — not built here.</div>
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
 
           {status === "not_started" && (
-            <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Start Background Check
             </button>
           )}
@@ -3458,7 +3933,7 @@ export default function HavenProApp() {
                   I authorize Haven to invite me to a background check through Checkr, its screening provider.
                 </span>
               </label>
-              <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+              <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
                 Authorize Background Check
               </button>
             </div>
@@ -3511,11 +3986,11 @@ export default function HavenProApp() {
                   </div>
                   {c.status === "verified" && c.verificationSource && <div style={{ fontSize: 10.5, fontWeight: 600, color: T.pg, fontFamily: FONT, marginTop: 3 }}>via {c.verificationSource}</div>}
                 </div>
-                {statusPill(c.status)}
+                {statusPill(shownCredentialStatus(c.status))}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {["self_reported", "verification_available"].includes(c.status) && <button onClick={() => verifyProfessionalCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.pg, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Request Verification</button>}
-                {c.status === "pending" && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.tm }}>Verifying…</span>}
+                {providerStepsOpen && ["self_reported", "verification_available"].includes(c.status) && <button onClick={() => verifyProfessionalCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.pg, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Request Verification</button>}
+                {providerStepsOpen && c.status === "pending" && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.tm }}>Verifying…</span>}
                 <button onClick={() => removeCredential(c.id)} style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, background: "none", border: "none", cursor: "pointer", padding: 0, marginLeft: "auto" }}>Remove</button>
               </div>
             </div>
@@ -3533,7 +4008,7 @@ export default function HavenProApp() {
               <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, marginBottom: 12 }}>📎 Document/photo upload — coming soon</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setCredentialDraft(null)} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: "transparent", color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>Cancel</button>
-                <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.pgb, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
+                <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.cta, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
               </div>
             </div>
           ) : (
@@ -3545,7 +4020,7 @@ export default function HavenProApp() {
   }
 
   function payoutScreen() {
-    const status = payoutAccount.status;
+    const status = shownStatus(payoutAccount.status);
     return (
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("main"))}>
         {backHeader("Payout Method", () => setProfileView("main"))}
@@ -3554,9 +4029,10 @@ export default function HavenProApp() {
             Haven partners with Stripe Connect to handle payouts — your bank details are entered on Stripe's hosted onboarding, never collected directly by Haven.
           </div>
           <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
 
           {status === "not_started" && (
-            <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
               Set Up Payouts with Stripe
             </button>
           )}
@@ -3606,7 +4082,8 @@ export default function HavenProApp() {
             </div>
           </div>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 }}>Current Status</div>
-          <div style={{ marginBottom: 12 }}>{statusPill(taxProfile.status)}</div>
+          <div style={{ marginBottom: 12 }}>{statusPill(shownStatus(taxProfile.status))}</div>
+{shownStatus(taxProfile.status) === "not_available" && notAvailableNote()}
           {devTestPanel("Stripe Connect tax reporting", [
             { label: "Verified", onClick: () => devSetTaxStatus("verified") },
             { label: "Pending", onClick: () => devSetTaxStatus("pending") },
@@ -3622,7 +4099,7 @@ export default function HavenProApp() {
     const readinessRow = (label, ok) => (
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0" }}>
         <span style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT }}>{label}</span>
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : "Action Required"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : label !== "Profile" && !providerStepsOpen ? "Not available yet" : "Action Required"}</span>
       </div>
     );
     return (
@@ -3644,13 +4121,13 @@ export default function HavenProApp() {
             {readinessRow("Tax Information", taxComplete)}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.bd}` }}>
               <span style={{ fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: FONT }}>Marketplace Access</span>
-              <span style={{ fontSize: 12.5, fontWeight: 800, color: marketplaceReady ? T.pg : T.emTx, fontFamily: FONT }}>{marketplaceReady ? "Ready" : "Action Required"}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: marketplaceReady ? T.pg : T.emTx, fontFamily: FONT }}>{marketplaceReady ? "Ready" : providerStepsOpen ? "Action Required" : "Not available yet"}</span>
             </div>
           </div>
 
           {sectionLabel("Required")}
-          {navRow("🪪", "Identity Verification", statusLabelText(identityVerification.status), () => setProfileView("identity"))}
-          {navRow("✅", "Background Check", statusLabelText(backgroundCheck.status), () => setProfileView("backgroundCheck"))}
+          {navRow("🪪", "Identity Verification", statusLabelText(shownStatus(identityVerification.status)), () => setProfileView("identity"))}
+          {navRow(backgroundCheckIcon(), "Background Check", statusLabelText(shownStatus(backgroundCheck.status)), () => setProfileView("backgroundCheck"))}
 
           <div style={{ marginTop: 18 }}>{sectionLabel("Optional / Trust Boosters")}</div>
           {navRow("📜", "Professional Credentials", `${credentials.filter(c => c.status === "verified").length} verified · ${credentials.length} total`, () => setProfileView("credentials"))}
@@ -3676,7 +4153,8 @@ export default function HavenProApp() {
             value={value}
             onChange={e => onChange(e.target.value)}
             placeholder={placeholder}
-            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none" }}
+            aria-label={label}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }}
           />
         </div>
       );
@@ -3711,10 +4189,11 @@ export default function HavenProApp() {
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>About</div>
             <textarea
+              aria-label="About"
               value={d.about}
               onChange={e => set("about", e.target.value)}
               rows={4}
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 14, fontFamily: FONT, outline: "none", resize: "none" }}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", resize: "none" }}
             />
           </div>
           {field("Home Operating City", d.homeCity, v => set("homeCity", v), "City, ST")}
@@ -3725,9 +4204,9 @@ export default function HavenProApp() {
   }
 
   const FAQ_ITEMS = [
-    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job — it's exactly what you receive, with no fee deducted. Materials reimbursement and tips are 100% yours too." },
-  { q: "What happens if a customer declines materials?", a: "The outcome depends on the path. Diagnosis: Inspection Completed + $45 Inspection Visit (Haven $0). Standard: Materials declined — job could not be completed + $30 convenience fee (Haven $0)." },
-    { q: "How do I get reimbursed for materials?", a: "Once a customer approves your request, go make the purchase, then submit the actual cost and a receipt photo in the app. You're reimbursed 100% — no platform fee, even if the actual cost differs from your estimate." },
+    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full. Reimbursement repays what you spent; it isn't extra earnings." },
+  { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and you're paid the $${INSPECTION_VISIT_FEE} inspection fee. If it was a standard job, it ends as not completed and you're paid a $${CONVENIENCE_FEE} convenience fee. Haven keeps nothing either way.` },
+    { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed the full amount with no fee taken out, even if it differs from your estimate." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." },
   ];
 
@@ -3743,7 +4222,7 @@ export default function HavenProApp() {
               <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 1 }}>{desc}</div>
             </div>
           </div>
-          <button className="hp-toggle" onClick={() => toggle(key)} style={{ width: 46, height: 27, borderRadius: 20, background: notifPrefs[key] ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer", flexShrink: 0 }}>
+          <button className="hp-toggle" role="switch" aria-checked={!!notifPrefs[key]} aria-label={label} onClick={() => toggle(key)} style={{ width: 46, height: 27, borderRadius: 20, background: notifPrefs[key] ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer", flexShrink: 0 }}>
             <div style={{ position: "absolute", top: 2.5, left: notifPrefs[key] ? 21 : 2.5, width: 22, height: 22, borderRadius: "50%", background: "#FFFFFF", boxShadow: "0 1px 3px rgba(0,0,0,.25)", transition: "left .18s ease" }} />
           </button>
         </div>
@@ -3789,7 +4268,7 @@ export default function HavenProApp() {
             </div>
           ))}
           <div style={{ fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3, margin: "18px 0 10px" }}>Still Need Help?</div>
-          <a href="mailto:pro-support@havenpro.example?subject=Haven%20Pro%20Support" style={{ display: "block", textAlign: "center", padding: "13px 0", borderRadius: 14, background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, textDecoration: "none" }}>
+          <a href="mailto:pro-support@havenpro.example?subject=Haven%20Pro%20Support" style={{ display: "block", textAlign: "center", padding: "13px 0", borderRadius: 14, background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, textDecoration: "none" }}>
             ✉️ Email Support
           </a>
         </div>
@@ -3810,18 +4289,69 @@ export default function HavenProApp() {
     );
   }
 
-  function authAccountCard() {
+  function authAccountCard({ showLabel = true } = {}) {
     let title = "Signed out";
     let detail = "Sign in to accept and manage jobs.";
+    let contact = null;
     if (authSession) {
       title = authSession.email || "Signed in";
       detail = "Signed in";
+      // PRO-01: email status only from Supabase Auth; phone isn't verifiable yet.
+      contact = [
+        authSession.emailConfirmed ? "Email confirmed" : "Email not confirmed yet. Check your inbox for the confirmation link.",
+        accountPhone ? "Phone not verified. Phone verification isn't available yet." : null,
+      ].filter(Boolean);
     }
     return (
       <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 8 }}>
-        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>
-        <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: 4 }}>{title}</div>
+        {showLabel && <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>Account</div>}
+        <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT, marginTop: showLabel ? 4 : 0 }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginTop: 2 }}>{detail}</div>
+        {contact && contact.map(line => (
+          <div key={line} style={{ fontSize: 12, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, lineHeight: 1.45 }}>{line}</div>
+        ))}
+      </div>
+    );
+  }
+
+  // Account (email, sign in) lives on Profile, above Settings (founder's
+  // call); it used to be inside Settings. Sign Out is at the bottom of Profile.
+  function accountSection() {
+    return (
+      <div style={{ marginBottom: 14 }}>
+        {sectionLabel("Account")}
+        {authAccountCard({ showLabel: false })}
+        {!authSession && settingsAuthOpen && (
+          <div style={{ marginTop: 8 }}>
+            {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
+            {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
+            {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginBottom: 8 }}>{authNotice}</div>}
+            <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+              {authBusy ? "Signing in…" : "Sign in"}
+            </button>
+          </div>
+        )}
+        {!authSession && !settingsAuthOpen && (
+          <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+            Sign in with email
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // Sign Out sits alone at the very bottom of Profile, below Account and
+  // Settings (founder's call). It still asks before signing out.
+  function profileSignOut() {
+    return (
+      <div style={{ marginTop: 14 }}>
+        {authSession ? (
+          <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+            {authBusy ? "Signing out…" : "Sign Out"}
+          </button>
+        ) : accountStatus === "signed_in" ? null : (
+          <button disabled style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
+        )}
       </div>
     );
   }
@@ -3832,7 +4362,6 @@ export default function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("main"))}>
         {backHeader("Settings", () => setProfileView("main"))}
         <div style={{ padding: "0 20px 32px" }}>
-          {authAccountCard()}
           {navRow("🔔", "Notifications", `${notifOnCount} of ${Object.keys(notifPrefs).length} on`, () => setProfileView("notifications"))}
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: "14px", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div>
@@ -3841,6 +4370,9 @@ export default function HavenProApp() {
             </div>
             <button
               className="hp-toggle"
+              role="switch"
+              aria-checked={theme === "dark"}
+              aria-label="Dark mode"
               onClick={() => setTheme(t => (t === "dark" ? "light" : "dark"))}
               style={{ width: 46, height: 27, borderRadius: 20, background: theme === "dark" ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer" }}
             >
@@ -3848,29 +4380,6 @@ export default function HavenProApp() {
             </button>
           </div>
           {navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport"))}
-          {!authSession && settingsAuthOpen && (
-            <div style={{ marginTop: 8 }}>
-              {formField("Email", signInDraft.email, v => setSignInDraft(p => ({ ...p, email: v })), "you@example.com", "email")}
-              {formField("Password", signInDraft.password, v => setSignInDraft(p => ({ ...p, password: v })), "Your password", null, "password")}
-              {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT, marginBottom: 8 }}>{authNotice}</div>}
-              <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
-                {authBusy ? "Signing in…" : "Sign in"}
-              </button>
-            </div>
-          )}
-          {!authSession && !settingsAuthOpen && (
-            <button onClick={openEmailSignIn} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.pg}`, background: "transparent", color: T.pg, fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
-              Sign in with email
-            </button>
-          )}
-          {authSession ? (
-            <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
-              {authBusy ? "Signing out…" : "Sign Out"}
-            </button>
-          ) : accountStatus === "signed_in" ? null : (
-            <button disabled style={{ width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tm, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: "default" }}>Sign Out</button>
-          )}
-
           {devTestPanel("account state", [
             { label: "Jump to Marketplace Ready", onClick: devJumpToMarketplaceReady },
           ])}
@@ -3879,19 +4388,19 @@ export default function HavenProApp() {
     );
   }
 
-  function profileScreen() {
-    if (profileView === "edit" && editDraft) return editProfileScreen();
-    if (profileView === "categories" && categoriesDraft) return manageCategoriesScreen();
-    if (profileView === "settings") return settingsScreen();
-    if (profileView === "notifications") return notificationsScreen();
-    if (profileView === "helpSupport") return helpSupportScreen();
-    if (profileView === "supportChat") return supportChatScreen();
-    if (profileView === "verificationCenter") return verificationCenterScreen();
-    if (profileView === "identity") return identityScreen();
-    if (profileView === "backgroundCheck") return backgroundCheckScreen();
-    if (profileView === "credentials") return credentialsScreen();
-    if (profileView === "payout") return payoutScreen();
-    if (profileView === "taxInfo" && taxDraft) return taxInfoScreen();
+  function profileScreen(view = profileView) {
+    if (view === "edit" && editDraft) return editProfileScreen();
+    if (view === "categories" && categoriesDraft) return manageCategoriesScreen();
+    if (view === "settings") return settingsScreen();
+    if (view === "notifications") return notificationsScreen();
+    if (view === "helpSupport") return helpSupportScreen();
+    if (view === "supportChat") return supportChatScreen();
+    if (view === "verificationCenter") return verificationCenterScreen();
+    if (view === "identity") return identityScreen();
+    if (view === "backgroundCheck") return backgroundCheckScreen();
+    if (view === "credentials") return credentialsScreen();
+    if (view === "payout") return payoutScreen();
+    if (view === "taxInfo" && taxDraft) return taxInfoScreen();
     return profileMainScreen();
   }
 
@@ -3916,13 +4425,15 @@ export default function HavenProApp() {
      a real background check can take days; onboarding shouldn't block
      on that, only Accept Job should (via the existing readiness gate).
      ══════════════════════════════════════════════════════════════════ */
-  const ONBOARDING_STEPS = ["welcome", "createAccount", "verifyContact", "createProfile", "chooseCategories", "serviceArea", "identity", "background", "payout", "tax", "credentials", "ready"];
+  // PRO-01: no "verifyContact" step. Its tap-to-verify buttons only flipped a
+  // local status. Email confirmation comes from Supabase Auth; phone
+  // verification doesn't exist yet. A saved "verifyContact" step (older
+  // builds) is moved on to createProfile below.
+  const ONBOARDING_STEPS = ["welcome", "createAccount", "createProfile", "chooseCategories", "serviceArea", "identity", "background", "payout", "tax", "credentials", "ready"];
   function onboardingBack() {
     const idx = ONBOARDING_STEPS.indexOf(onboardingStep);
     if (idx <= 0) return;
     let prev = ONBOARDING_STEPS[idx - 1];
-    // Real Auth sessions skip the demo tap-to-confirm contact wall.
-    if (prev === "verifyContact" && accountSourceRef.current === "auth") prev = "createAccount";
     setOnboardingStep(prev);
   }
   function onboardingNext() {
@@ -3935,7 +4446,7 @@ export default function HavenProApp() {
     return (
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px 20px 0" }}>
-          <button onClick={onboardingBack} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <button onClick={onboardingBack} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: "10px 16px", margin: "-10px -16px" }}>‹</button>
           <div style={{ flex: 1, height: 5, borderRadius: 3, background: T.bd, overflow: "hidden" }}>
             <div style={{ height: "100%", width: `${Math.min(100, Math.round((idx / total) * 100))}%`, background: T.pgb, borderRadius: 3, transition: "width .2s ease" }} />
           </div>
@@ -3950,7 +4461,7 @@ export default function HavenProApp() {
             <button
               disabled={!continueProps.enabled}
               onClick={continueProps.onClick || onboardingNext}
-              style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: continueProps.enabled ? "pointer" : "default", opacity: continueProps.enabled ? 1 : 0.4 }}
+              style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: continueProps.enabled ? "pointer" : "default", opacity: continueProps.enabled ? 1 : 0.4 }}
             >
               {continueProps.label || "Continue"}
             </button>
@@ -3982,7 +4493,7 @@ export default function HavenProApp() {
           {authSession ? (
             <>
               {authAccountCard()}
-              <button onClick={continueSignedInSetup} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
+              <button onClick={continueSignedInSetup} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
                 Continue
               </button>
               <button onClick={signOutHavenAccount} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", marginBottom: 10 }}>
@@ -3991,7 +4502,7 @@ export default function HavenProApp() {
             </>
           ) : (
             <>
-              <button onClick={() => { setAuthNotice(""); setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
+              <button onClick={() => { setAuthNotice(""); setOnboardingStatus("in_progress"); setOnboardingStep("createAccount"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer", marginBottom: 10 }}>
                 Create Account
               </button>
               <button onClick={openEmailSignIn} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.tx, fontSize: 14, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>
@@ -4051,9 +4562,10 @@ export default function HavenProApp() {
       setPhoneVerifyStatus("pending");
       if (result.session) {
         accountSourceRef.current = "auth";
-        setAuthSession(sessionToAuthState(result.session));
+        const signedUp = sessionToAuthState(result.session);
+        setAuthSession(signedUp);
         setAccountStatus("signed_in");
-        setEmailVerifyStatus("verified");
+        setEmailVerifyStatus(signedUp && signedUp.emailConfirmed ? "verified" : "pending");
         setOnboardingStatus("in_progress");
         setOnboardingStep("createProfile");
         return;
@@ -4095,14 +4607,14 @@ export default function HavenProApp() {
       return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", background: T.bg, padding: "28px 24px" }}>
           <div>
-            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0, marginBottom: 12 }}>‹</button>
+            <button onClick={() => { setWelcomeAuthView("home"); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: "10px 16px", margin: "-10px -16px 2px" }}>‹</button>
             <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginBottom: 8 }}>Confirm your email</div>
             <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.5, marginBottom: 12 }}>
               We created the Pro login for {signInDraft.email || accountEmail}. Open the confirmation email, then sign in here. The message returns to https://bluspots.github.io/haven-pro/.
             </div>
             {authNotice && <div style={{ fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, lineHeight: 1.45 }}>{authNotice}</div>}
           </div>
-          <button onClick={() => { setAuthNotice(""); setWelcomeAuthView("signIn"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
+          <button onClick={() => { setAuthNotice(""); setWelcomeAuthView("signIn"); }} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
             Sign in
           </button>
         </div>
@@ -4111,7 +4623,7 @@ export default function HavenProApp() {
     return (
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: T.bg }}>
         <div style={{ padding: "28px 24px 0" }}>
-          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: 0 }}>‹</button>
+          <button onClick={() => { setWelcomeAuthView("home"); setSettingsAuthOpen(false); setAuthNotice(""); }} aria-label="Back" style={{ background: "none", border: "none", fontSize: 20, color: T.tx, cursor: "pointer", padding: "10px 16px", margin: "-10px -16px" }}>‹</button>
           <div style={{ fontSize: 22, fontWeight: 900, color: T.tx, fontFamily: FONT, marginTop: 8 }}>Sign in</div>
           <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 4, marginBottom: 16 }}>Haven Pro account. Claiming a job and later job updates use this login.</div>
         </div>
@@ -4121,38 +4633,12 @@ export default function HavenProApp() {
           {authNotice && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.emTx, fontFamily: FONT }}>{authNotice}</div>}
         </div>
         <div style={{ padding: "10px 24px 22px" }}>
-          <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
+          <button onClick={submitEmailSignIn} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", opacity: authBusy ? 0.6 : 1 }}>
             {authBusy ? "Signing in…" : "Sign in"}
           </button>
         </div>
       </div>
     );
-  }
-
-  function onboardingVerifyContactScreen() {
-    const bothVerified = emailVerifyStatus === "verified" && phoneVerifyStatus === "verified";
-    const row = (label, value, status, onVerify) => (
-      <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: status === "verified" ? 0 : 10 }}>
-          <div>
-            <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.tx, fontFamily: FONT, marginTop: 2 }}>{value}</div>
-          </div>
-          {statusPill(status === "verified" ? "verified" : "pending")}
-        </div>
-        {status !== "verified" && (
-          <button onClick={onVerify} style={{ width: "100%", padding: "11px 0", borderRadius: 12, border: "none", background: T.pgb, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>
-            Verify {label}
-          </button>
-        )}
-      </div>
-    );
-    return onboardingChrome("Verify Your Contact Info", "This usually arrives by text or email — tap to confirm for this demo.", (
-      <>
-        {row("Email", accountEmail, emailVerifyStatus, () => setEmailVerifyStatus("verified"))}
-        {row("Phone", accountPhone, phoneVerifyStatus, () => setPhoneVerifyStatus("verified"))}
-      </>
-    ), { enabled: bothVerified });
   }
 
   function onboardingCreateProfileScreen() {
@@ -4182,7 +4668,7 @@ export default function HavenProApp() {
             onChange={e => setAbout(e.target.value)}
             placeholder="A sentence or two about your experience"
             rows={3}
-            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontFamily: FONT, outline: "none", resize: "none" }}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none", resize: "none" }}
           />
         </div>
       </>
@@ -4235,19 +4721,20 @@ export default function HavenProApp() {
   }
 
   function onboardingIdentityScreen() {
-    const status = identityVerification.status;
+    const status = shownStatus(identityVerification.status);
     const bothCaptured = identityProgress.idCaptured && identityProgress.selfieCaptured;
     return onboardingChrome("Verify Your Identity", "Customers trust Haven Pros inside their homes. Verified by Persona, Haven's identity partner.", (
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
         {status === "not_started" && (
-          <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Identity Verification</button>
+          <button onClick={startIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Identity Verification</button>
         )}
         {status === "session_created" && (
           <>
             <button onClick={() => setIdentityProgress(p => ({ ...p, idCaptured: true }))} style={{ width: "100%", marginBottom: 8, padding: "12px 0", borderRadius: 12, border: `1px solid ${identityProgress.idCaptured ? T.pg : T.bd}`, background: identityProgress.idCaptured ? T.pgt : T.w, color: identityProgress.idCaptured ? T.pgd : T.tx, fontSize: 13.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>{identityProgress.idCaptured ? "✓ " : ""}Government-Issued ID (via Persona)</button>
             <button onClick={() => setIdentityProgress(p => ({ ...p, selfieCaptured: true }))} style={{ width: "100%", marginBottom: 14, padding: "12px 0", borderRadius: 12, border: `1px solid ${identityProgress.selfieCaptured ? T.pg : T.bd}`, background: identityProgress.selfieCaptured ? T.pgt : T.w, color: identityProgress.selfieCaptured ? T.pgd : T.tx, fontSize: 13.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>{identityProgress.selfieCaptured ? "✓ " : ""}Selfie / Liveness Check (via Persona)</button>
-            <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>Submit to Persona</button>
+            <button disabled={!bothCaptured} onClick={submitIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: bothCaptured ? "pointer" : "default", opacity: bothCaptured ? 1 : 0.5 }}>Submit to Persona</button>
           </>
         )}
         {status === "pending" && <div style={{ background: T.dxBg, border: `1px solid ${T.dxBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.dxTx, textAlign: "center" }}>⏳ Persona is reviewing your submission.</div>}
@@ -4255,7 +4742,7 @@ export default function HavenProApp() {
         {["needs_review", "failed", "expired"].includes(status) && (
           <>
             <div style={{ background: T.emBg, border: `1px solid ${T.emBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.emTx, textAlign: "center", marginBottom: 14 }}>Persona flagged this one — you can try again.</div>
-            <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
+            <button onClick={retryIdentityVerification} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Try Again</button>
           </>
         )}
         {devTestPanel("Persona", [
@@ -4264,16 +4751,17 @@ export default function HavenProApp() {
           { label: "Failed", onClick: () => devSetIdentityStatus("failed") },
         ])}
       </>
-    ), { enabled: status !== "not_started", label: status === "verified" ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: status !== "not_started", label: ["not_available", "verified"].includes(status) ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingBackgroundScreen() {
-    const status = backgroundCheck.status;
+    const status = shownStatus(backgroundCheck.status);
     return onboardingChrome("Background Check", "Checkr, Haven's screening partner, runs this independently of identity verification.", (
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
         {status === "not_started" && (
-          <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Background Check</button>
+          <button onClick={startBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Start Background Check</button>
         )}
         {status === "consent_required" && (
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 16 }}>
@@ -4281,7 +4769,7 @@ export default function HavenProApp() {
               <input type="checkbox" checked={backgroundConsent} onChange={e => setBackgroundConsent(e.target.checked)} style={{ marginTop: 2 }} />
               <span style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, lineHeight: 1.4 }}>I authorize Haven to invite me to a background check through Checkr.</span>
             </label>
-            <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Authorize Background Check</button>
+            <button onClick={authorizeBackgroundCheck} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Authorize Background Check</button>
           </div>
         )}
         {["invited", "pending"].includes(status) && <div style={{ background: T.dxBg, border: `1px solid ${T.dxBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.dxTx, textAlign: "center" }}>⏳ Checkr is processing your report.</div>}
@@ -4292,16 +4780,17 @@ export default function HavenProApp() {
           { label: "Consider", onClick: () => devSetBackgroundStatus("consider") },
         ])}
       </>
-    ), { enabled: status !== "not_started", label: status === "clear" ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: status !== "not_started", label: ["not_available", "clear"].includes(status) ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingPayoutScreen() {
-    const status = payoutAccount.status;
+    const status = shownStatus(payoutAccount.status);
     return onboardingChrome("Set Up Payouts", "Haven partners with Stripe Connect — your bank details go directly to Stripe, never to Haven.", (
       <>
         <div style={{ marginBottom: 16 }}>{statusPill(status)}</div>
+{status === "not_available" && notAvailableNote()}
         {status === "not_started" && (
-          <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Set Up Payouts with Stripe</button>
+          <button onClick={startPayoutSetup} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Set Up Payouts with Stripe</button>
         )}
         {status === "pending" && <div style={{ background: T.dxBg, border: `1px solid ${T.dxBd}`, borderRadius: 14, padding: 16, fontSize: 12.5, fontWeight: 600, color: T.dxTx, textAlign: "center" }}>⏳ Stripe is verifying your account details.</div>}
         {status === "enabled" && (
@@ -4312,7 +4801,7 @@ export default function HavenProApp() {
         )}
         {devTestPanel("Stripe Connect", [{ label: "Enabled", onClick: () => devSetPayoutStatus("enabled") }])}
       </>
-    ), { enabled: status !== "not_started", label: status === "enabled" ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: status !== "not_started", label: ["not_available", "enabled"].includes(status) ? "Continue" : status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingTaxScreen() {
@@ -4325,18 +4814,19 @@ export default function HavenProApp() {
             {["Individual", "LLC", "Corporation"].map(t => pill(t, null, taxClassification === t, () => setTaxClassification(t), "onb-tc-" + t))}
           </div>
         </div>
-        <div style={{ marginBottom: 12 }}>{statusPill(taxProfile.status)}</div>
-        {taxProfile.status === "not_started" && (
+        <div style={{ marginBottom: 12 }}>{statusPill(shownStatus(taxProfile.status))}</div>
+{shownStatus(taxProfile.status) === "not_available" && notAvailableNote()}
+        {shownStatus(taxProfile.status) === "not_started" && (
           <button
-            onClick={() => { if (!taxLegalName.trim()) { showToast("Enter your legal name"); return; } setTaxProfile(v => ({ ...v, status: "pending", providerReference: `tax_demo_${Math.floor(1000 + Math.random() * 8999)}` })); }}
-            style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+            onClick={() => { if (!taxLegalName.trim()) { showToast("Enter your legal name"); return; } setTaxProfile(v => ({ ...v, status: "pending", providerReference: null })); }}
+            style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
           >
             Submit
           </button>
         )}
         {devTestPanel("Stripe Connect tax reporting", [{ label: "Verified", onClick: () => devSetTaxStatus("verified") }])}
       </>
-    ), { enabled: taxProfile.status !== "not_started", label: taxProfile.status === "verified" ? "Continue" : taxProfile.status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
+    ), { enabled: shownStatus(taxProfile.status) !== "not_started", label: ["verified", "not_available"].includes(shownStatus(taxProfile.status)) ? "Continue" : taxProfile.status === "not_started" ? "Start above to continue" : "Continue — I'll finish this later" });
   }
 
   function onboardingCredentialsScreen() {
@@ -4349,7 +4839,7 @@ export default function HavenProApp() {
               <div style={{ fontSize: 13.5, fontWeight: 700, color: T.tx, fontFamily: FONT }}>{c.name}</div>
               <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT }}>{c.type}</div>
             </div>
-            {statusPill(c.status)}
+            {statusPill(shownCredentialStatus(c.status))}
           </div>
         ))}
         {credentialDraft ? (
@@ -4362,7 +4852,7 @@ export default function HavenProApp() {
             {formField("License / Certificate Number", credentialDraft.number, v => setCredentialDraft(p => ({ ...p, number: v })), "optional")}
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setCredentialDraft(null)} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: `1px solid ${T.bd}`, background: "transparent", color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>Cancel</button>
-              <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.pgb, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
+              <button onClick={saveCredential} style={{ flex: 1, padding: "11px 0", borderRadius: 12, border: "none", background: T.cta, color: "#fff", fontSize: 13, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Add Credential</button>
             </div>
           </div>
         ) : (
@@ -4376,7 +4866,7 @@ export default function HavenProApp() {
     const readinessRow = (label, ok) => (
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0" }}>
         <span style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT }}>{label}</span>
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : "Pending"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: ok ? T.pg : T.tm, fontFamily: FONT }}>{ok ? "Complete" : label !== "Profile" && !providerStepsOpen ? "Not available yet" : "Pending"}</span>
       </div>
     );
     return (
@@ -4387,7 +4877,7 @@ export default function HavenProApp() {
             {marketplaceReady ? "You're ready to find work." : "One more step before you can accept jobs."}
           </div>
           <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT, textAlign: "center", marginBottom: 24, lineHeight: 1.5 }}>
-            {marketplaceReady ? "Go online whenever you want, browse jobs, and accept what fits." : "You can still browse jobs on your board — you just can't accept one until everything below is complete."}
+            {marketplaceReady ? "Go online whenever you want, browse jobs, and accept what fits." : providerStepsOpen ? "You can still browse jobs on your board — you just can't accept one until everything below is complete." : "You can browse jobs on your board. Verification and payouts aren't available yet, so accepting jobs stays locked until they open."}
           </div>
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18 }}>
             {readinessRow("Profile", profileComplete)}
@@ -4399,7 +4889,7 @@ export default function HavenProApp() {
         </div>
         <button
           onClick={() => { setOnboardingStatus("completed"); setOnboardingStep("done"); goTab("home"); }}
-          style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
+          style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}
         >
           {marketplaceReady ? "Find Work" : "Go to Job Board"}
         </button>
@@ -4416,7 +4906,7 @@ export default function HavenProApp() {
     if (onboardingStep === "welcome" && (welcomeAuthView === "signIn" || welcomeAuthView === "confirmEmail")) return onboardingAuthGateScreen();
     if (onboardingStep === "welcome") return onboardingWelcomeScreen();
     if (onboardingStep === "createAccount") return onboardingCreateAccountScreen();
-    if (onboardingStep === "verifyContact") return onboardingVerifyContactScreen();
+    if (onboardingStep === "verifyContact") return onboardingCreateProfileScreen(); // older saved step; moved on by the effect above
     if (onboardingStep === "createProfile") return onboardingCreateProfileScreen();
     if (onboardingStep === "chooseCategories") return onboardingChooseCategoriesScreen();
     if (onboardingStep === "serviceArea") return onboardingServiceAreaScreen();
@@ -4449,7 +4939,7 @@ export default function HavenProApp() {
         </div>
         <div>
           {view !== "connecting" && (
-            <button onClick={retryHavenConnect} disabled={busy} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.pgb, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
+            <button onClick={retryHavenConnect} disabled={busy} style={{ width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}>
               {busy ? "Retrying…" : "Retry"}
             </button>
           )}
@@ -4461,6 +4951,24 @@ export default function HavenProApp() {
     );
   }
 
+  function signOutConfirmSheet() {
+    if (!showSignOutConfirm || !authSession) return null;
+    return (
+      <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.35)", zIndex: 40, display: "flex", alignItems: "flex-end" }} onClick={cancelProSignOut}>
+        <div role="dialog" aria-modal="true" aria-labelledby="hp-signout-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === "Escape") cancelProSignOut(); }} style={{ background: T.w, width: "100%", borderRadius: "22px 22px 0 0", padding: "18px 20px 28px", paddingBottom: "max(28px, env(safe-area-inset-bottom))" }}>
+          <div style={{ width: 36, height: 4, borderRadius: 3, background: T.bd, margin: "0 auto 16px" }} />
+          <div id="hp-signout-title" style={{ fontSize: 17, fontWeight: 800, color: T.tx, fontFamily: FONT, textAlign: "center", marginBottom: 6 }}>Sign out of Haven Pro?</div>
+          <div style={{ fontSize: 13, fontWeight: 500, color: T.ts, fontFamily: FONT, textAlign: "center", lineHeight: 1.5, marginBottom: 18 }}>You'll need to sign in again to see and claim jobs.</div>
+          <button type="button" onClick={() => { void performProSignOut(); }} disabled={authBusy} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: authBusy ? T.bd : "#B42318", color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: FONT, cursor: authBusy ? "default" : "pointer", marginBottom: 10 }}>
+            {authBusy ? "Signing out…" : "Sign out"}
+          </button>
+          <button type="button" autoFocus onClick={cancelProSignOut} disabled={authBusy} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: `1px solid ${T.bd}`, background: "transparent", color: T.ts, fontSize: 14.5, fontWeight: 700, fontFamily: FONT, cursor: authBusy ? "default" : "pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
   function toastEl() {
     if (!toast) return null;
     return (
@@ -4482,7 +4990,19 @@ export default function HavenProApp() {
     input, textarea { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
     @keyframes havenProToastIn { from { opacity:0; transform:translate(-50%,8px);} to { opacity:1; transform:translate(-50%,0);} }
     .hp-scroll::-webkit-scrollbar { display:none; }
-    .hp-scroll { scrollbar-width: none; padding-bottom: calc(84px + env(safe-area-inset-bottom)) !important; }
+    /* Printing an earnings statement prints only the statement card, in
+       black on white whichever theme is on. */
+    @media print {
+      html, body { background: #fff !important; }
+      body * { visibility: hidden !important; background: transparent !important; }
+      [data-print-statement], [data-print-statement] * { visibility: visible !important; color: #000 !important; background: #fff !important; border-color: #ccc !important; }
+      [data-print-statement] { position: absolute; left: 0; top: 0; width: 100%; }
+      .hp-no-print { display: none !important; }
+    }
+    /* Vertical scrolling and pinch zoom stay with the browser; a sideways
+       drag stays with the app, so the edge swipe isn't cancelled. */
+    [data-swipe-host], [data-swipe-foreground], .hp-scroll { touch-action: pan-y; touch-action: pan-y pinch-zoom; }
+    .hp-scroll { scrollbar-width: none; padding-bottom: calc(60px + env(safe-area-inset-bottom)) !important; }
     .hp-tab-btn { background:none; border:none; cursor:pointer; }
     .hp-accept-btn:active { transform: scale(0.97); }
     .hp-toggle:active { transform: scale(0.98); }
@@ -4490,43 +5010,87 @@ export default function HavenProApp() {
     .hp-nav-btn:active { transform: scale(0.92); }
   `;
 
+  // The visible screen (it registers its Back action as it renders), then
+  // the previous screen underneath while an edge swipe is in progress.
+  backActionRef.current = null;
+  const foregroundScreen = connectionBlocked ? connectionScreen() : needsOnboarding ? onboardingScreen() : (
+    <>
+      {tab === "home" && homeScreen()}
+      {tab === "jobs" && jobsScreen()}
+      {tab === "earnings" && earningsScreen()}
+      {tab === "messages" && messagesScreen()}
+      {tab === "profile" && profileScreen()}
+    </>
+  );
+  backDestRef.current = connectionBlocked || needsOnboarding ? null : backDestination();
+  const edgeAnimated = edgeBack.phase !== "idle" && !prefersReducedMotion();
+  const edgeSettling = edgeBack.phase === "settling";
+  const edgeW = edgeBack.width || 390;
+  const edgeProgress = edgeSettling ? edgeBack.settleTo : Math.max(0, Math.min(1, edgeBack.dragX / edgeW));
+  const edgeX = edgeAnimated ? (edgeSettling ? (edgeBack.settleTo === 1 ? edgeW : 0) : edgeBack.dragX) : 0;
+  const edgeEase = edgeSettling ? `${EDGE_SETTLE_MS}ms cubic-bezier(0.32,0.72,0,1)` : null;
+  let swipeUnderlay = null;
+  if (edgeAnimated && edgeBack.dest) {
+    renderingUnderlay.current = true;
+    let under = null;
+    try { under = renderTabView(edgeBack.dest); } finally { renderingUnderlay.current = false; }
+    swipeUnderlay = (
+      <div ref={underlayRef} data-swipe-underlay="" aria-hidden="true" inert=""
+        style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", background: T.bg, zIndex: 0, pointerEvents: "none",
+          transform: `translateX(${-0.25 * edgeW * (1 - edgeProgress)}px)`, transition: edgeEase ? "transform " + edgeEase : "none" }}>
+        {under}
+        <div style={{ position: "absolute", inset: 0, background: "#000", opacity: 0.18 * (1 - edgeProgress), pointerEvents: "none", transition: edgeEase ? "opacity " + edgeEase : "none" }} />
+      </div>
+    );
+  }
+  const swipeForegroundStyle = {
+    flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: T.bg, zIndex: 1,
+    position: edgeAnimated ? "absolute" : "relative", inset: edgeAnimated ? 0 : "auto",
+    transform: edgeAnimated ? `translateX(${edgeX}px)` : "none",
+    transition: edgeEase ? "transform " + edgeEase : "none",
+    boxShadow: edgeAnimated && edgeX > 0 ? "-8px 0 24px rgba(0,0,0,.15)" : "none",
+  };
+
   // Compute outer and inner frame styles to support full-bleed on phones
   const outerStyle = showFrameChrome
     ? { minHeight: "100vh", background: "linear-gradient(155deg,#C7D2CB 0%,#B9C7BE 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT }
     : {
-        minHeight: "100dvh",
+        // One screen tall plus one pixel. The frame below fills what's left
+        // after the status-bar inset. The spare pixel lets the page scroll by
+        // 1px, which "tap the status bar to scroll to top" needs (see the
+        // effect above); it is the bottom edge of the tab bar's padding, so
+        // nothing shows.
+        height: "calc(100dvh + 1px)",
         background: T.bg,
         display: "flex",
         flexDirection: "column",
         fontFamily: FONT,
         padding: 0,
-        // Respect iOS safe areas when launched standalone
+        // Respect iOS safe areas when launched standalone. No bottom padding
+        // here: the bottom nav pads itself for the home indicator (its
+        // background runs to the screen edge, like a native tab bar), and
+        // .hp-scroll pads its content to clear the nav.
         paddingTop: "env(safe-area-inset-top)",
-        paddingBottom: "env(safe-area-inset-bottom)",
         paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",
       };
   const frameStyle = showFrameChrome
     ? { width: 390, height: 844, background: T.bg, borderRadius: 46, overflow: "hidden", boxShadow: "0 32px 80px rgba(15,26,23,.30), 0 0 0 1px rgba(15,26,23,.08)", display: "flex", flexDirection: "column", position: "relative" }
-    : { width: "100%", height: "100dvh", background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
+    : { width: "100%", flex: 1, minHeight: 0, background: T.bg, borderRadius: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", boxShadow: "none" };
 
   return (
     <>
       <style>{CSS}</style>
       <div className="haven-pro-frame-outer" style={outerStyle}>
         <div className="hp-phone-frame" style={frameStyle}>
-          <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            {connectionBlocked ? connectionScreen() : needsOnboarding ? onboardingScreen() : (
-              <>
-                {tab === "home" && homeScreen()}
-                {tab === "jobs" && jobsScreen()}
-                {tab === "earnings" && earningsScreen()}
-                {tab === "messages" && messagesScreen()}
-                {tab === "profile" && profileScreen()}
-              </>
-            )}
+          <div data-swipe-host style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
+            {swipeUnderlay}
+            <div ref={swipeLayerRef} data-swipe-foreground style={swipeForegroundStyle}>
+              {foregroundScreen}
+            </div>
           </div>
           {!connectionBlocked && !needsOnboarding && bottomNav()}
+          {signOutConfirmSheet()}
           {toastEl()}
         </div>
       </div>

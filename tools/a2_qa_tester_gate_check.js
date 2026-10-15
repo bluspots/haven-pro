@@ -174,7 +174,8 @@ async function openSettings(window) {
   clickText(window, "Profile");
   await sleep(40);
   clickText(window, "Settings");
-  await waitFor(window, t => t.includes("Sign Out"), "Settings");
+  // Sign Out moved from Settings to Profile; "Appearance" marks Settings.
+  await waitFor(window, t => t.includes("Appearance"), "Settings");
 }
 async function openIdentity(window) {
   clickText(window, "Profile");
@@ -505,7 +506,10 @@ async function checkStaleCacheRecovery() {
     assert.strictEqual(be.rows[PRO_ID].home_city, "Tampa, FL", "city reached the server");
     assert.strictEqual(wsStatus(be.rows[PRO_ID].pro_workspace, "identityVerification"), "not_started", "server never got the stale verified");
     await openProfileMain(window);
-    assert.ok(/Not Started/.test(identityRowStatus(window)), "local identity replaced with the server value: " + identityRowStatus(window));
+    // HB-13: for a non-QA Pro the row shows "Not available yet" (no provider is
+    // connected); the stale cached "Verified" must never show. The stored value
+    // is checked just below.
+    assert.ok(/Not available yet/.test(identityRowStatus(window)) && !/Verified/.test(identityRowStatus(window)), "local identity replaced with the server value: " + identityRowStatus(window));
     const cache = JSON.parse(window.localStorage.getItem("haven_pro_workspace_v1"));
     assert.strictEqual(cache.byUserId[PRO_ID].identityVerification.status, "not_started", "device cache replaced with the server value");
     assert.strictEqual(cache.byUserId[PRO_ID].firstName, "Grace", "device cache keeps the name");
@@ -533,9 +537,12 @@ async function checkSameTabSwitch() {
     await settle(be);
     await openProfileMain(window);
     assert.ok(/Verified/.test(identityRowStatus(window)), "tester's identity is Verified");
-    clickText(window, "Settings");
-    await waitFor(window, () => !!findButton(window, "Sign Out"), "Settings Sign Out");
+    // Sign Out lives on Profile (it moved there from Settings).
+    await waitFor(window, () => !!findButton(window, "Sign Out"), "Profile Sign Out");
     findButton(window, "Sign Out").click();
+    // Sign Out asks for confirmation first.
+    await waitFor(window, () => !!window.document.querySelector('[role="dialog"][aria-labelledby="hp-signout-title"]'), "sign-out confirmation");
+    Array.from(window.document.querySelectorAll('[role="dialog"] button')).find(b => (b.textContent || "").trim() === "Sign out").click();
     await waitFor(window, t => t.includes("Signed out"), "signed out");
     // A non-tester signs in on the same tab.
     const before = be.events.length;
@@ -550,7 +557,8 @@ async function checkSameTabSwitch() {
     assert.strictEqual(loadPatches.length, 0, "no profile write on the next user's sign-in");
     assert.ok(!("identityVerification" in be.rows[OTHER_ID].pro_workspace), "next user's workspace untouched");
     await openProfileMain(window);
-    assert.ok(/Not Started/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
+    // HB-13: a non-tester sees "Not available yet", never the previous tester's "Verified".
+    assert.ok(/Not available yet/.test(identityRowStatus(window)) && !/Verified/.test(identityRowStatus(window)), "next user's identity is the default: " + identityRowStatus(window));
     // The next user's own edit saves, without any carried-over status.
     const beforeEdit = be.events.length;
     const r10 = Array.from(window.document.querySelectorAll("#root *")).filter(el => el.children.length === 0 && (el.textContent || "").trim() === "10 mi").pop();

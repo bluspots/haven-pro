@@ -63,14 +63,18 @@ function setInput(window, placeholder, value) {
   if (!input) throw new Error("no input " + placeholder + "\n" + screenText(window).slice(0, 600));
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
   setter.call(input, value);
-  input.dispatchEvent(new window.Event("input", { bubbles: true }));
+  // React here is Node's copy, not wired to jsdom's events: call the element's onChange prop, as the other checks do.
+  const propsKey = Object.keys(input).find(k => k.startsWith("__reactProps$"));
+  input[propsKey].onChange({ target: input, currentTarget: input });
 }
 function setTextarea(window, value) {
   const el = window.document.querySelector("#root textarea");
   if (!el) throw new Error("no textarea");
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
   setter.call(el, value);
-  el.dispatchEvent(new window.Event("input", { bubbles: true }));
+  // React here is Node's copy, not wired to jsdom's events: call the element's onChange prop, as the other checks do.
+  const propsKey = Object.keys(el).find(k => k.startsWith("__reactProps$"));
+  el[propsKey].onChange({ target: el, currentTarget: el });
 }
 function serviceArea(window) {
   const m = rootText(window).match(/Service Area(.{0,40}?) and surrounding areas/);

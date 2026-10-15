@@ -96,28 +96,4 @@ function freshProDefaults() {
     earningsStatements: [],
   };
 }
-function demoProDefaults() {
-  return {
-    workCategories: new Set(DEFAULT_WORK_CATEGORIES),
-    travelRadius: 15,
-    homeCity: "Orlando, FL",
-    firstName: "Alex",
-    lastName: "Rivera",
-    about: "Licensed plumber with 8 years of experience across Central Florida. Specializing in leak repair, fixture installs, and emergency calls.",
-    avatarEmoji: "👷",
-    avatarPhoto: null,
-    identityVerification: { provider: "persona", providerVerificationId: null, status: "verified", verifiedAt: Date.now() - 30 * DAY_MS, failureReasonCode: null, recheckAt: null },
-    backgroundCheck: { provider: "checkr", providerReportId: null, status: "clear", clearedAt: Date.now() - 30 * DAY_MS },
-    credentials: [
-      { id: "cred1", type: "License", name: "Florida Plumbing Contractor", jurisdiction: "FL", number: "FL #123456", expiration: "2027-06", status: "verified", verificationSource: "Florida DBPR (simulated adapter)", verifiedAt: Date.now() - 30 * DAY_MS, expiresAt: null, providerReference: "dbpr_demo_2291" },
-      { id: "cred2", type: "Certification", name: "EPA Section 608", jurisdiction: "", number: "", expiration: "2025-03", status: "self_reported", verificationSource: null, verifiedAt: null, expiresAt: null, providerReference: null },
-    ],
-    payoutAccount: { provider: "stripe", providerAccountId: "acct_demo_82910", payoutsEnabled: true, requirementsDue: [], status: "enabled", last4: "4821" },
-    taxProfile: { provider: "stripe_connect", status: "verified", providerReference: "tax_demo_5510", taxFormAvailability: "Future 1099/tax-document flow, subject to legal and tax review" },
-    taxLegalName: "Alex Rivera",
-    taxClassification: "Individual",
-    completedJobsHistory: SIM_COMPLETED_JOBS,
-    earningsStatements: [],
-  };
-}
 
