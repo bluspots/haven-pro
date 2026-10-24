@@ -86,7 +86,7 @@ function HavenEnRouteNavigation(props) {
   if (!point) {
     mapArea = h("div", { style: boxStyle, "data-map-state": "no-location", role: "note" },
       h("div", { style: noteStyle }, "Exact location not available yet. Use the city directions below."));
-  } else if (!online) {
+  } else if (!online && state !== "loaded") {
     mapArea = h("div", { style: boxStyle, "data-map-state": "offline", role: "note" },
       h("div", { style: noteStyle }, "Map unavailable offline. The directions buttons still work once you're connected."));
   } else if (!src) {
