@@ -105,6 +105,20 @@ function mapSupabaseRowToJob(row) {
   };
 }
 
+// PRO-B30 (contract FE-08, planned 0030 / HB-22): an unassigned board row is
+// shown by city + server-provided distance only. Exact lat/lng are never kept
+// for jobs this Pro isn't assigned to, even while the RPC still returns them,
+// so nothing can compute a distance, pin or route from them. The exact point
+// comes only from the assigned-job row after acceptance (see
+// resolveAssignedJobLocation). An approximate-area field is not read until the
+// backend deploys it.
+function mapBoardRowToJob(row) {
+  const job = mapSupabaseRowToJob(row);
+  job.lat = null;
+  job.lng = null;
+  return job;
+}
+
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return []; // no backend config — fail closed (no SIM fallback)
@@ -138,10 +152,11 @@ async function fetchPostedJobsFromSupabase() {
     const clean = rows.filter((row) => {
       const isPosted = row && row.status === "posted";
       const hasPro = !(row == null) && row.pro_id != null;
-      const hasPoint = row.lat != null && row.lng != null && row.distance_mi != null && Number.isFinite(Number(row.distance_mi));
-      return isPosted && !hasPro && hasPoint;
+      // Server-checked distance is all the board needs (no lat/lng required).
+      const hasDistance = row.distance_mi != null && row.distance_mi !== "" && Number.isFinite(Number(row.distance_mi));
+      return isPosted && !hasPro && hasDistance;
     });
-    return clean.map(mapSupabaseRowToJob);
+    return clean.map(mapBoardRowToJob);
   } catch (e) {
     console.warn("Supabase jobs fetch error", e);
     return [];
@@ -214,7 +229,21 @@ async function fetchActiveJobsFromSupabase() {
 
 // Terminal status sync after a decline (only if this job was backend-claimed).
 // Slice 5: empty / 0-row representation is not a landed write.
-async function bestEffortPatchTerminalStatus(job, finalStatus) {
+// PRO-S29 (contract FE-01, planned 0029): fees are server-owned after posting,
+// so this never sends inspection_fee_cents / convenience_fee_cents.
+// opts.backendStatus: the status just read from the server. If it already is
+// finalStatus, nothing is PATCHed. Otherwise only { status } is sent, and if the
+// write isn't confirmed the assigned row is re-read: the job counts as finished
+// only when the server shows finalStatus. Returns { ok, row? } so the caller
+// can use the server's fee values.
+const TERMINAL_SYNC_STATUSES = new Set(["inspection_completed", "materials_declined"]);
+async function bestEffortPatchTerminalStatus(job, finalStatus, opts) {
+  // Only the two decline terminals are synced here ("complete" has its own write).
+  if (!TERMINAL_SYNC_STATUSES.has(finalStatus)) return { ok: false, reason: "unsupported_status" };
+  const known = opts || {};
+  if (known.backendStatus === finalStatus) {
+    return { ok: true, skipped: true, row: known.backendRow || null };
+  }
   try {
     const cfg = getSupabaseConfig();
     if (!cfg) return { ok: false, reason: "not_configured" };
@@ -227,12 +256,6 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
     }
     const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(job.id)}&pro_id=eq.${encodeURIComponent(actor.proId)}`;
     const body = { status: finalStatus };
-    if (finalStatus === "inspection_completed") {
-      const cents = Math.round(((job.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
-      body.inspection_fee_cents = cents;
-    } else if (finalStatus === "materials_declined") {
-      body.convenience_fee_cents = CONVENIENCE_FEE * 100;
-    }
     const res = await fetch(url, {
       method: "PATCH",
       headers: {
@@ -244,17 +267,21 @@ async function bestEffortPatchTerminalStatus(job, finalStatus) {
       },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
+    if (res.ok) {
+      let rows = [];
+      try { rows = await res.json(); } catch { rows = []; }
+      const landed = Array.isArray(rows)
+        ? rows.find(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === finalStatus)
+        : null;
+      if (landed) return { ok: true, row: landed };
+      console.warn("Supabase terminal status sync returned no matching row");
+    } else {
       console.warn("Supabase terminal status sync failed", res.status, await res.text());
-      return { ok: false, reason: "update_failed" };
     }
-    let rows = [];
-    try { rows = await res.json(); } catch { rows = []; }
-    if (Array.isArray(rows) && rows.some(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase() && r.status === finalStatus)) {
-      return { ok: true };
-    }
-    console.warn("Supabase terminal status sync returned no matching row");
-    return { ok: false, reason: "not_updated" };
+    // Not confirmed: the server is authoritative. Done only if it already shows finalStatus.
+    const current = await fetchAssignedJobStatus(job.id);
+    if (current === finalStatus) return { ok: true, reloaded: true };
+    return { ok: false, reason: res.ok ? "not_updated" : "update_failed", serverStatus: current };
   } catch (e) {
     console.warn("Supabase terminal status sync error", e);
     return { ok: false, reason: "network_error" };
@@ -358,7 +385,10 @@ async function claimJobOnSupabase(job) {
           r.status === "en_route" &&
           String(r.pro_id || "").toLowerCase() === String(actor.proId).toLowerCase()
       );
-      if (landed) return { ok: true, mode: "rpc" };
+      if (landed) {
+        const row = list.find(r => r && String(r.id).toLowerCase() === String(job.id).toLowerCase());
+        return { ok: true, mode: "rpc", row: row || null };
+      }
       return { ok: false, reason: "already_claimed" };
     }
     // If the RPC isn't present (404/400) or unauthorized, fall back to direct update path
@@ -396,7 +426,7 @@ async function claimJobOnSupabase(job) {
       rows = [];
     }
     if (Array.isArray(rows) && rows.length > 0) {
-      return { ok: true, mode: "update" };
+      return { ok: true, mode: "update", row: rows[0] || null };
     }
     return { ok: false, reason: "already_claimed" };
   } catch (e) {
@@ -416,6 +446,41 @@ const WORK_AFTER_ARRIVAL_STATUSES = new Set([
 
 function isBackendClaimedJob(job) {
   return !!job && !!getSupabaseConfig() && looksLikeUuid(job.id) && !!job.backendClaimed;
+}
+
+// PRO-B30 / contract §2: the exact service point is read only for a job this Pro
+// is assigned to: from pro_claim_job's returned row, else from the assigned
+// jobs row (jobs?id=..&pro_id=<me>). Returns { lat, lng, city } with nulls when
+// the server doesn't provide them (never invented).
+function locationFieldsFromRow(row) {
+  if (!row) return null;
+  const lat = row.lat != null && row.lat !== "" && Number.isFinite(Number(row.lat)) ? Number(row.lat) : null;
+  const lng = row.lng != null && row.lng !== "" && Number.isFinite(Number(row.lng)) ? Number(row.lng) : null;
+  const out = { lat: lat != null && lng != null ? lat : null, lng: lat != null && lng != null ? lng : null };
+  if (row.city_label) out.city = row.city_label;
+  return out;
+}
+async function resolveAssignedJobLocation(jobId, claimRow) {
+  const fromClaim = locationFieldsFromRow(claimRow);
+  if (fromClaim && fromClaim.lat != null) return fromClaim;
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return fromClaim || { lat: null, lng: null };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return fromClaim || { lat: null, lng: null };
+  const url =
+    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}` +
+    `&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,lat,lng,city_label`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" },
+    });
+    if (!res.ok) return fromClaim || { lat: null, lng: null };
+    const rows = await res.json();
+    return locationFieldsFromRow(Array.isArray(rows) ? rows[0] : null) || fromClaim || { lat: null, lng: null };
+  } catch (e) {
+    return fromClaim || { lat: null, lng: null };
+  }
 }
 
 // Read the assigned job's current status. null on miss / error (caller fail-closes).

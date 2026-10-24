@@ -170,9 +170,11 @@ export default function HavenProApp() {
   useEffect(() => {
     const cfg = getSupabaseConfig();
     if (!cfg) return;
-    // Only poll while there is at least one backend-claimed job awaiting customer action
+    // Poll while a backend-claimed job is waiting on, or can be ended by, the customer.
+    // PRO-P29 (contract FE-01, planned 0029): diagnosing is included so the Pro sees a
+    // customer ending the job at inspection_completed from diagnosing.
     const jobsToPoll = activeJobs.filter(j =>
-      j.backendClaimed && looksLikeUuid(j.id) && (j.status === "materials_requested" || j.status === "materials_approved")
+      j.backendClaimed && looksLikeUuid(j.id) && (j.status === "diagnosing" || j.status === "materials_requested" || j.status === "materials_approved")
     );
     if (jobsToPoll.length === 0) return;
     let cancelled = false;
@@ -207,7 +209,7 @@ export default function HavenProApp() {
         } else if (backendStatus === "inspection_completed" && currentJob.status !== "inspection_completed") {
           const cents = typeof row.inspection_fee_cents === "number" ? row.inspection_fee_cents : Math.round(((currentJob.inspectionFee || INSPECTION_VISIT_FEE) || 0) * 100);
           const fee = Math.round(cents / 100);
-          const record = await finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed");
+          const record = await finalizeJob({ ...currentJob, inspectionFee: fee }, "inspection_completed", { backendStatus, backendRow: row });
           if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
           showToast(`Inspection Completed — Inspection Visit $${fee}`);
@@ -215,7 +217,7 @@ export default function HavenProApp() {
         } else if (backendStatus === "materials_declined" && currentJob.status !== "materials_declined") {
           const cents = typeof row.convenience_fee_cents === "number" ? row.convenience_fee_cents : CONVENIENCE_FEE * 100;
           const conv = Math.round(cents / 100);
-          const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined");
+          const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined", { backendStatus, backendRow: row });
           if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
           showToast(`Customer declined materials, so the job couldn't be finished. You're paid a $${conv} convenience fee.`);
@@ -1438,6 +1440,7 @@ export default function HavenProApp() {
     // If a backend is configured, claim there first and handle conflicts clearly
     const cfg = getSupabaseConfig();
     let backendClaimed = false;
+    let assignedLocation = null;
     if (cfg && looksLikeUuid(job.id)) {
       if (acceptingJobId === job.id) return;
       setAcceptingJobId(job.id);
@@ -1462,6 +1465,8 @@ export default function HavenProApp() {
           return;
         }
         backendClaimed = true;
+        // PRO-B30: the board row carries no exact point; take it from the assigned row.
+        assignedLocation = await resolveAssignedJobLocation(job.id, result.row);
       } finally {
         setAcceptingJobId(null);
       }
@@ -1470,7 +1475,7 @@ export default function HavenProApp() {
     setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
     setActiveJobs(prev => [
       ...prev,
-      { ...job, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed },
+      { ...job, ...(assignedLocation || {}), status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed },
     ]);
     setTab("jobs");
     setMyJobsStack([{ view: "detail", jobId: job.id }]);
@@ -1739,7 +1744,7 @@ export default function HavenProApp() {
     }
   }
 
-  async function finalizeJob(job, finalStatus) {
+  async function finalizeJob(job, finalStatus, syncOpts) {
     // No tip is invented (HB-02). A tip appears only once the backend records
     // a real one; until tips are connected, completed jobs carry none.
     const tipAmount = 0;
@@ -1764,11 +1769,15 @@ export default function HavenProApp() {
     // Decline terminals on a backend job must land before any local history.
     // A skipped write (no session) leaves the active job on screen.
     if ((finalStatus === "inspection_completed" || finalStatus === "materials_declined") && isBackendClaimedJob(job)) {
-      const synced = await bestEffortPatchTerminalStatus(job, finalStatus);
+      const synced = await bestEffortPatchTerminalStatus(job, finalStatus, syncOpts);
       if (!synced || !synced.ok) {
         showToast("Couldn't update the job. Try again.");
         return null;
       }
+      // Fees are server-owned: record what the server stored when it says.
+      const srv = synced.row;
+      if (srv && finalStatus === "inspection_completed" && typeof srv.inspection_fee_cents === "number") record.inspectionFee = Math.round(srv.inspection_fee_cents / 100);
+      if (srv && finalStatus === "materials_declined" && typeof srv.convenience_fee_cents === "number") record.convenienceFee = Math.round(srv.convenience_fee_cents / 100);
     }
     setCompletedJobsHistory(prev => [...prev, record]);
     generateEarningsStatement(record);
