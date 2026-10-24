@@ -1513,6 +1513,123 @@ function subscribeHavenAuth(onChange) {
     }
   };
 }
+const HAVEN_ASSIGNED_JOB_MAP_ENABLED = false;
+const HAVEN_STATIC_MAP_W = 600;
+const HAVEN_STATIC_MAP_H = 300;
+const HAVEN_MAP_PIN_COLOR = "0f6e4e";
+function havenAssignedJobPoint(job) {
+  if (!job || !job.backendClaimed) return null;
+  const lat = job.lat != null && job.lat !== "" ? Number(job.lat) : NaN;
+  const lng = job.lng != null && job.lng !== "" ? Number(job.lng) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+function havenFixed5(n) {
+  return Number(n).toFixed(5);
+}
+function havenStaticMapUrl(point, dark) {
+  if (!point || typeof HAVEN_MAPBOX_PUBLIC_TOKEN === "undefined" || !HAVEN_MAPBOX_PUBLIC_TOKEN) return null;
+  const style = dark ? "mapbox/dark-v11" : "mapbox/streets-v12";
+  const lng = havenFixed5(point.lng), lat = havenFixed5(point.lat);
+  return "https://api.mapbox.com/styles/v1/" + style + "/static/pin-l+" + HAVEN_MAP_PIN_COLOR + "(" + lng + "," + lat + ")/" + lng + "," + lat + ",15,0/" + HAVEN_STATIC_MAP_W + "x" + HAVEN_STATIC_MAP_H + "@2x?access_token=" + encodeURIComponent(HAVEN_MAPBOX_PUBLIC_TOKEN);
+}
+function havenAppleMapsUrl(point) {
+  if (!point) return null;
+  return "https://maps.apple.com/?daddr=" + havenFixed5(point.lat) + "," + havenFixed5(point.lng) + "&dirflg=d";
+}
+function havenIsOnline() {
+  try {
+    return typeof navigator === "undefined" || navigator.onLine !== false;
+  } catch (e) {
+    return true;
+  }
+}
+function HavenEnRouteNavigation(props) {
+  const { job, mapsUrl, hasOrigin, T, dark, font } = props;
+  const h = React.createElement;
+  const point = havenAssignedJobPoint(job);
+  const src = havenStaticMapUrl(point, dark);
+  const [online, setOnline] = React.useState(havenIsOnline());
+  const [attempt, setAttempt] = React.useState(0);
+  const imgKey = (src || "") + "#" + attempt;
+  const [imgState, setImgState] = React.useState({ key: imgKey, s: "loading" });
+  const state = imgState.key === imgKey ? imgState.s : "loading";
+  const setState = (s) => setImgState({ key: imgKey, s });
+  React.useEffect(() => {
+    const up = () => setOnline(true), down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => {
+      window.removeEventListener("online", up);
+      window.removeEventListener("offline", down);
+    };
+  }, []);
+  const city = job && job.city ? job.city : "";
+  const boxStyle = { position: "relative", width: "100%", aspectRatio: "2 / 1", background: dark ? "#16211d" : "#e8ece9", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" };
+  const noteStyle = { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: font, textAlign: "center", padding: "0 16px", lineHeight: 1.4 };
+  let mapArea;
+  if (!point) {
+    mapArea = h(
+      "div",
+      { style: boxStyle, "data-map-state": "no-location", role: "note" },
+      h("div", { style: noteStyle }, "Exact location not available yet. Use the city directions below.")
+    );
+  } else if (!online) {
+    mapArea = h(
+      "div",
+      { style: boxStyle, "data-map-state": "offline", role: "note" },
+      h("div", { style: noteStyle }, "Map unavailable offline. The directions buttons still work once you're connected.")
+    );
+  } else if (!src) {
+    mapArea = h(
+      "div",
+      { style: boxStyle, "data-map-state": "error", role: "note" },
+      h("div", { style: noteStyle }, "Map unavailable right now.")
+    );
+  } else {
+    mapArea = h(
+      "div",
+      { style: boxStyle, "data-map-state": state, "aria-busy": state === "loading" ? "true" : "false" },
+      state !== "loaded" && h("div", { style: noteStyle }, state === "error" ? "Map unavailable right now." : "Loading map…"),
+      state === "error" && h("button", {
+        type: "button",
+        onClick: () => setAttempt((a) => a + 1),
+        style: { position: "absolute", bottom: 12, left: "50%", transform: "translateX(-50%)", minHeight: 44, padding: "0 18px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" }
+      }, "Try again"),
+      state !== "error" && h("img", {
+        key: imgKey,
+        src,
+        alt: "Map of the job location" + (city ? " in " + city : ""),
+        loading: "lazy",
+        decoding: "async",
+        draggable: false,
+        onLoad: () => setState("loaded"),
+        onError: () => setState("error"),
+        style: { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: state === "loaded" ? 1 : 0, transition: "opacity .2s" }
+      })
+    );
+  }
+  const apple = havenAppleMapsUrl(point);
+  const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center" });
+  return h(
+    "div",
+    { "data-testid": "assigned-job-map", style: { borderRadius: 18, overflow: "hidden", marginBottom: 16, border: "1px solid " + T.bd, background: T.w } },
+    h(
+      "div",
+      { style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px" } },
+      h("span", { "aria-hidden": "true", style: { fontSize: 18 } }, "📍"),
+      h("span", { style: { fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: font } }, point ? city ? "Job location · " + city : "Job location" : hasOrigin ? "Directions to " + city : "Navigating to " + city)
+    ),
+    mapArea,
+    h(
+      "div",
+      { style: { display: "flex", gap: 8, padding: 12 } },
+      apple && h("a", { href: apple, target: "_blank", rel: "noopener noreferrer", style: btn(true) }, "Open in Apple Maps"),
+      h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!apple) }, "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps"))
+    )
+  );
+}
 const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 function formatShortDate(ts) {
@@ -3510,6 +3627,9 @@ function HavenProApp() {
     const destination = hasDestCoords ? `${job.lat},${job.lng}` : job.city;
     const hasOrigin = !!proLiveLocation;
     const mapsUrl = hasOrigin ? `https://www.google.com/maps/dir/?api=1&origin=${proLiveLocation.lat},${proLiveLocation.lng}&destination=${encodeURIComponent(destination)}&travelmode=driving` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination)}`;
+    if (HAVEN_ASSIGNED_JOB_MAP_ENABLED) {
+      return /* @__PURE__ */ React.createElement(HavenEnRouteNavigation, { job, mapsUrl, hasOrigin, T, dark: theme === "dark", font: FONT });
+    }
     return /* @__PURE__ */ React.createElement(
       "a",
       {
