@@ -224,7 +224,8 @@ async function boardAndAcceptCheck(claimRowCoords, assignedRowCoords, label) {
     return null;
   });
   try {
-    await waitFor(w, t => t.includes("Fix leaking faucet") && t.includes("2.5 mi"), "board shows the job by distance");
+    await waitFor(w, t => t.includes("Fix leaking faucet") && t.includes("Orlando · 2.5 mi"), "board shows the job by city and server distance");
+    ok(true, label + ": board card shows the city and the server distance");
     const accept = button(w, /^Accept Job$/);
     ok(!!accept, label + ": board job is acceptable without client-side coordinates");
     accept.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));

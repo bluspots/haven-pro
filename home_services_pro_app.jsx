@@ -2108,7 +2108,9 @@ export default function HavenProApp() {
             <div style={{ fontSize: 14, fontWeight: 800, color: T.tx, fontFamily: FONT }}>{job.title}</div>
             {(() => {
               const parts = [];
-              if (job.distanceMi != null) parts.push(`📍 ${Number(job.distanceMi).toFixed(1)} mi`);
+              // PRO-B30 / FE-08: city + the server's distance (no exact location before acceptance).
+              const place = [job.city, job.distanceMi != null ? `${Number(job.distanceMi).toFixed(1)} mi` : null].filter(Boolean).join(" · ");
+              if (place) parts.push(`📍 ${place}`);
               if (job.durationMin != null) parts.push(`⏱ ~${job.durationMin} min`);
               return parts.length > 0
                 ? <div style={{ fontSize: 11.5, fontWeight: 500, color: T.ts, fontFamily: FONT, marginTop: 1 }}>{parts.join(" · ")}</div>
