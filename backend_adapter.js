@@ -483,6 +483,42 @@ async function resolveAssignedJobLocation(jobId, claimRow) {
   }
 }
 
+// FE-05 (founder 2026-10-24, corrected 2026-10-24 23:50 ET): the most this Pro
+// can claim on a receipt comes ONLY from the authoritative server record of what
+// the customer approved: materials_approved_cents (migration 0025) minus
+// materials_reimbursed_cents already recorded. Nothing else is treated as an
+// approved amount (not materials_estimate_cents, not the job status).
+// Result: { status: "known", maxCents } | { status: "unavailable" } (no
+// authoritative record: column missing before 0025 (42703), value null, or no
+// row) | { status: "failed" } (the read itself failed). The UI blocks
+// submission unless the status is "known". The server enforces the real rule (0029).
+function materialsCapFromRow(row) {
+  if (!row) return { status: "unavailable" };
+  const num = v => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+  const approved = num(row.materials_approved_cents);
+  if (approved === null) return { status: "unavailable" };
+  const reimbursed = num(row.materials_reimbursed_cents) || 0;
+  return { status: "known", maxCents: Math.max(0, approved - reimbursed) };
+}
+async function fetchMaterialsReimbursementCap(jobId) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return { status: "unavailable" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { status: "failed" };
+  const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,materials_approved_cents,materials_reimbursed_cents`;
+  try {
+    const res = await fetch(url, { method: "GET", headers: { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return /42703/.test(text) ? { status: "unavailable" } : { status: "failed" };
+    }
+    const rows = await res.json();
+    return materialsCapFromRow(Array.isArray(rows) ? rows[0] || null : null);
+  } catch (e) {
+    return { status: "failed" };
+  }
+}
+
 // Read the assigned job's current status. null on miss / error (caller fail-closes).
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();

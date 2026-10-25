@@ -250,7 +250,7 @@ export default function HavenProApp() {
           const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined", { backendStatus, backendRow: row });
           if (!record) return;
           setActiveJobs(prev => prev.filter(j => j.id !== job.id));
-          showToast(`Customer declined materials, so the job couldn't be finished. You're paid a $${conv} convenience fee.`);
+          showToast(`Customer declined materials, so the job couldn't be finished. A $${conv} convenience fee applies. Payments aren't processed in the app yet.`);
           setMyJobsStack([{ view: "list" }]);
         } else if (
           (backendStatus === "in_progress" || backendStatus === "complete") &&
@@ -1717,6 +1717,9 @@ export default function HavenProApp() {
     }
   }
   async function startDiagnosis(jobId) {
+    // FE-04: Diagnosing only for an eligible diagnosis job, and only from arrived.
+    const current = activeJobsRef.current.find(j => j.id === jobId);
+    if (!current || current.status !== "arrived" || !jobRequiresDiagnosis(current)) return;
     await advanceClaimedStatus(jobId, {
       fromStatuses: ["arrived"],
       toStatus: "diagnosing",
@@ -1774,12 +1777,33 @@ export default function HavenProApp() {
   /* ── Receipt submission — the actual reimbursement gate. Approval only
      authorized the purchase; the pro must submit a receipt-verified real
      cost before anything is credited, per the corrected materials flow. ── */
+  function formatCapDollars(cents) {
+    const d = Math.max(0, Number(cents) || 0) / 100;
+    return Number.isInteger(d) ? String(d) : d.toFixed(2);
+  }
+  // FE-05: the limit comes only from the server's authoritative approved amount.
+  // Without it (unavailable or failed read) the receipt can't be submitted; the
+  // Pro can retry. The entered amount and photo stay in the draft.
+  function loadReceiptCap(jobId) {
+    const job = activeJobsRef.current.find(j => j.id === jobId);
+    if (!job || !isBackendClaimedJob(job)) {
+      setReceiptDraft(prev => (prev && prev.jobId === jobId ? { ...prev, cap: { status: "unavailable" } } : prev));
+      return;
+    }
+    setReceiptDraft(prev => (prev && prev.jobId === jobId ? { ...prev, cap: { status: "loading" } } : prev));
+    fetchMaterialsReimbursementCap(jobId).then(cap => {
+      setReceiptDraft(prev => (prev && prev.jobId === jobId ? { ...prev, cap: cap || { status: "failed" } } : prev));
+    });
+  }
   function openReceiptForm(jobId) {
     const job = activeJobs.find(j => j.id === jobId);
     const estimate = job && job.pendingMaterialsRequest ? job.pendingMaterialsRequest.totalCost : "";
-    setReceiptDraft({ jobId, cost: estimate ? String(estimate) : "", photo: null });
+    setReceiptDraft({ jobId, cost: estimate ? String(estimate) : "", photo: null, cap: { status: "loading" } });
     pushMyJobs({ view: "receipt", jobId });
+    loadReceiptCap(jobId);
   }
+
+
   function cancelReceiptForm() {
     setReceiptDraft(null);
     popMyJobs();
@@ -1789,6 +1813,15 @@ export default function HavenProApp() {
     if (!receiptDraft) return;
     const { jobId, cost, photo } = receiptDraft;
     if (!(Number(cost) > 0)) { showToast("Enter the actual amount you paid"); return; }
+    const cap = receiptDraft.cap;
+    if (!cap || cap.status !== "known") {
+      showToast("This receipt can't be submitted until the customer-approved amount is confirmed. Tap Retry.");
+      return;
+    }
+    if (Math.round(Number(cost) * 100) > cap.maxCents) {
+      showToast(`That's more than the $${formatCapDollars(cap.maxCents)} the customer approved. Enter $${formatCapDollars(cap.maxCents)} or less.`);
+      return;
+    }
     if (!photo) { showToast("Attach a photo of the receipt"); return; }
     const job = activeJobsRef.current.find(j => j.id === jobId);
     submittingReceiptRef.current = true;
@@ -1825,7 +1858,7 @@ export default function HavenProApp() {
       updateActiveJob(jobId, localUpdates);
       setReceiptDraft(null);
       popMyJobs();
-      showToast("Receipt added. Your materials will be reimbursed in full. You can keep working on the job.");
+      showToast("Receipt added. You can keep working on the job.");
     } finally {
       submittingReceiptRef.current = false;
     }
@@ -1855,8 +1888,8 @@ export default function HavenProApp() {
     setTimeout(() => {
       const lower = text.toLowerCase();
       let reply = "Thanks for reaching out! This is a demo of Haven Support chat — a real team member will follow up here once this is connected to live support.";
-      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.";
-      else if (lower.includes("material")) reply = "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed in full.";
+      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept. It's exactly what you receive, with no fee taken out. Tips are 100% yours. Materials you buy for an approved request are reimbursed up to the amount the customer approved. Payments aren't processed in the app yet.";
+      else if (lower.includes("material")) reply = "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. Reimbursement covers what you actually paid, up to the amount the customer approved. Payments aren't processed in the app yet.";
       else if (lower.includes("categor")) reply = "You can update your Work Categories anytime from Profile — only jobs in your enabled categories show up on your board.";
       setSupportMessages(prev => [...prev, { from: "support", text: reply, at: Date.now() }]);
     }, 1400);
@@ -2726,7 +2759,7 @@ export default function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(cancelMaterialsForm)}>
         {backHeader("Request Materials", cancelMaterialsForm)}
         <div style={{ padding: "0 20px 32px" }}>
-          {job && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 }}>For {job.title} — the customer approves this before you buy anything. You're reimbursed in full for what you buy.</div>}
+          {job && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 }}>For {job.title} — the customer approves this before you buy anything. Reimbursement covers what you actually pay, up to the amount the customer approves.</div>}
           {materialsDraft.items.map((it, i) => (
             <div key={i} style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -2776,9 +2809,26 @@ export default function HavenProApp() {
         <div style={{ padding: "0 20px 32px" }}>
           {job && (
             <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 }}>
-              For {job.title}. Enter what you actually paid (it can differ from the estimate) and add a photo of the receipt. The customer covers this cost, and you're reimbursed in full with no fee taken out.
+              For {job.title}. Enter what you actually paid and add a photo of the receipt. You can claim up to the amount the customer approved.
             </div>
           )}
+          {(() => {
+            // FE-05: show the limit only from the authoritative approved amount; otherwise block with Retry.
+            const cap = receiptDraft.cap || { status: "unavailable" };
+            const over = cap.status === "known" && Number(receiptDraft.cost) > 0 && Math.round(Number(receiptDraft.cost) * 100) > cap.maxCents;
+            const text = cap.status === "loading" ? "Checking the amount the customer approved…"
+              : cap.status === "known" ? `Customer approved: up to $${formatCapDollars(cap.maxCents)}`
+              : cap.status === "failed" ? "Couldn't check the amount the customer approved, so this receipt can't be submitted yet. Your details are saved here. Check your connection and tap Retry."
+              : "The customer-approved amount isn't available yet, so this receipt can't be submitted. Your details are saved here. Tap Retry later.";
+            const blocked = cap.status === "unavailable" || cap.status === "failed";
+            return (
+              <div data-testid="receipt-cap" data-cap-status={cap.status} style={{ marginBottom: 16 }}>
+                <div role={blocked ? "alert" : undefined} style={{ fontSize: 13, fontWeight: 700, color: cap.status === "known" ? T.tx : (blocked ? T.emTx : T.ts), fontFamily: FONT, lineHeight: 1.45 }}>{text}</div>
+                {over && <div role="alert" data-testid="receipt-over" style={{ fontSize: 12.5, fontWeight: 700, color: T.emTx, fontFamily: FONT, marginTop: 6 }}>{`That's more than the $${formatCapDollars(cap.maxCents)} the customer approved. Enter $${formatCapDollars(cap.maxCents)} or less.`}</div>}
+                {blocked && <button type="button" onClick={() => loadReceiptCap(receiptDraft.jobId)} style={{ marginTop: 8, minHeight: 44, padding: "0 18px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>Retry</button>}
+              </div>
+            );
+          })()}
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>Actual Cost Paid</div>
             <input
@@ -2806,7 +2856,12 @@ export default function HavenProApp() {
               </label>
             )}
           </div>
-          <button onClick={submitReceipt} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" }}>Submit Receipt</button>
+          {(() => {
+            const cap = receiptDraft.cap || { status: "unknown" };
+            const over = cap.status === "known" && Number(receiptDraft.cost) > 0 && Math.round(Number(receiptDraft.cost) * 100) > cap.maxCents;
+            const off = over || cap.status !== "known";
+            return <button onClick={submitReceipt} disabled={off} aria-disabled={off ? "true" : "false"} style={{ width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: off ? "not-allowed" : "pointer", opacity: off ? 0.55 : 1 }}>Submit Receipt</button>;
+          })()}
         </div>
       </div>
     );
@@ -3273,7 +3328,7 @@ export default function HavenProApp() {
           )}
 
           <div style={{ fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 4, lineHeight: 1.5 }}>
-            The payout shown before you accept is exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.
+            The payout shown before you accept is exactly what you receive, with no fee taken out. Tips are 100% yours. Materials you buy for an approved request are reimbursed up to the amount the customer approved. Payments aren't processed in the app yet.
           </div>
         </div>
         {ledgerFilterSheet()}
@@ -4271,9 +4326,9 @@ export default function HavenProApp() {
   }
 
   const FAQ_ITEMS = [
-    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full. Reimbursement repays what you spent; it isn't extra earnings." },
-  { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and you're paid the $${INSPECTION_VISIT_FEE} inspection fee. If it was a standard job, it ends as not completed and you're paid a $${CONVENIENCE_FEE} convenience fee. Haven keeps nothing either way.` },
-    { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed the full amount with no fee taken out, even if it differs from your estimate." },
+    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours. Materials you buy for an approved request are reimbursed up to the amount the customer approved. Payments aren't processed in the app yet. Reimbursement repays what you spent; it isn't extra earnings." },
+  { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and the $${INSPECTION_VISIT_FEE} inspection fee applies. If it was a standard job, it ends as not completed and a $${CONVENIENCE_FEE} convenience fee applies. Payments aren't processed in the app yet.` },
+    { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. Reimbursement covers what you actually paid, up to the amount the customer approved. Payments aren't processed in the app yet." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." },
   ];
 

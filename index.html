@@ -688,6 +688,32 @@ async function resolveAssignedJobLocation(jobId, claimRow) {
     return fromClaim || { lat: null, lng: null };
   }
 }
+function materialsCapFromRow(row) {
+  if (!row) return { status: "unavailable" };
+  const num = (v) => v === null || v === void 0 || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+  const approved = num(row.materials_approved_cents);
+  if (approved === null) return { status: "unavailable" };
+  const reimbursed = num(row.materials_reimbursed_cents) || 0;
+  return { status: "known", maxCents: Math.max(0, approved - reimbursed) };
+}
+async function fetchMaterialsReimbursementCap(jobId) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return { status: "unavailable" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return { status: "failed" };
+  const url = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,materials_approved_cents,materials_reimbursed_cents`;
+  try {
+    const res = await fetch(url, { method: "GET", headers: { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return /42703/.test(text) ? { status: "unavailable" } : { status: "failed" };
+    }
+    const rows = await res.json();
+    return materialsCapFromRow(Array.isArray(rows) ? rows[0] || null : null);
+  } catch (e) {
+    return { status: "failed" };
+  }
+}
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();
   if (!cfg || !looksLikeUuid(jobId)) return null;
@@ -1796,7 +1822,7 @@ function HavenProApp() {
           const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined", { backendStatus, backendRow: row });
           if (!record) return;
           setActiveJobs((prev) => prev.filter((j) => j.id !== job.id));
-          showToast(`Customer declined materials, so the job couldn't be finished. You're paid a $${conv} convenience fee.`);
+          showToast(`Customer declined materials, so the job couldn't be finished. A $${conv} convenience fee applies. Payments aren't processed in the app yet.`);
           setMyJobsStack([{ view: "list" }]);
         } else if ((backendStatus === "in_progress" || backendStatus === "complete") && (currentJob.status === "materials_requested" || currentJob.status === "materials_approved")) {
           if (backendStatus === "in_progress") {
@@ -3103,6 +3129,8 @@ function HavenProApp() {
     }
   }
   async function startDiagnosis(jobId) {
+    const current = activeJobsRef.current.find((j) => j.id === jobId);
+    if (!current || current.status !== "arrived" || !jobRequiresDiagnosis(current)) return;
     await advanceClaimedStatus(jobId, {
       fromStatuses: ["arrived"],
       toStatus: "diagnosing",
@@ -3156,11 +3184,27 @@ function HavenProApp() {
       materialsTimers.current[jobId] = timer;
     }
   }
+  function formatCapDollars(cents) {
+    const d = Math.max(0, Number(cents) || 0) / 100;
+    return Number.isInteger(d) ? String(d) : d.toFixed(2);
+  }
+  function loadReceiptCap(jobId) {
+    const job = activeJobsRef.current.find((j) => j.id === jobId);
+    if (!job || !isBackendClaimedJob(job)) {
+      setReceiptDraft((prev) => prev && prev.jobId === jobId ? { ...prev, cap: { status: "unavailable" } } : prev);
+      return;
+    }
+    setReceiptDraft((prev) => prev && prev.jobId === jobId ? { ...prev, cap: { status: "loading" } } : prev);
+    fetchMaterialsReimbursementCap(jobId).then((cap) => {
+      setReceiptDraft((prev) => prev && prev.jobId === jobId ? { ...prev, cap: cap || { status: "failed" } } : prev);
+    });
+  }
   function openReceiptForm(jobId) {
     const job = activeJobs.find((j) => j.id === jobId);
     const estimate = job && job.pendingMaterialsRequest ? job.pendingMaterialsRequest.totalCost : "";
-    setReceiptDraft({ jobId, cost: estimate ? String(estimate) : "", photo: null });
+    setReceiptDraft({ jobId, cost: estimate ? String(estimate) : "", photo: null, cap: { status: "loading" } });
     pushMyJobs({ view: "receipt", jobId });
+    loadReceiptCap(jobId);
   }
   function cancelReceiptForm() {
     setReceiptDraft(null);
@@ -3172,6 +3216,15 @@ function HavenProApp() {
     const { jobId, cost, photo } = receiptDraft;
     if (!(Number(cost) > 0)) {
       showToast("Enter the actual amount you paid");
+      return;
+    }
+    const cap = receiptDraft.cap;
+    if (!cap || cap.status !== "known") {
+      showToast("This receipt can't be submitted until the customer-approved amount is confirmed. Tap Retry.");
+      return;
+    }
+    if (Math.round(Number(cost) * 100) > cap.maxCents) {
+      showToast(`That's more than the $${formatCapDollars(cap.maxCents)} the customer approved. Enter $${formatCapDollars(cap.maxCents)} or less.`);
       return;
     }
     if (!photo) {
@@ -3206,7 +3259,7 @@ function HavenProApp() {
       updateActiveJob(jobId, localUpdates);
       setReceiptDraft(null);
       popMyJobs();
-      showToast("Receipt added. Your materials will be reimbursed in full. You can keep working on the job.");
+      showToast("Receipt added. You can keep working on the job.");
     } finally {
       submittingReceiptRef.current = false;
     }
@@ -3230,8 +3283,8 @@ function HavenProApp() {
     setTimeout(() => {
       const lower = text.toLowerCase();
       let reply = "Thanks for reaching out! This is a demo of Haven Support chat — a real team member will follow up here once this is connected to live support.";
-      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.";
-      else if (lower.includes("material")) reply = "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed in full.";
+      if (lower.includes("payout") || lower.includes("fee")) reply = "Your labor payout is fixed and shown before you accept. It's exactly what you receive, with no fee taken out. Tips are 100% yours. Materials you buy for an approved request are reimbursed up to the amount the customer approved. Payments aren't processed in the app yet.";
+      else if (lower.includes("material")) reply = "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. Reimbursement covers what you actually paid, up to the amount the customer approved. Payments aren't processed in the app yet.";
       else if (lower.includes("categor")) reply = "You can update your Work Categories anytime from Profile — only jobs in your enabled categories show up on your board.";
       setSupportMessages((prev) => [...prev, { from: "support", text: reply, at: Date.now() }]);
     }, 1400);
@@ -3872,7 +3925,7 @@ function HavenProApp() {
       setMaterialsDraft((prev) => ({ ...prev, items: prev.items.filter((_, idx) => idx !== i) }));
     }
     const total = materialsDraft.items.reduce((sum, it) => sum + (Number(it.cost) || 0), 0);
-    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelMaterialsForm) }, backHeader("Request Materials", cancelMaterialsForm), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 } }, "For ", job.title, " — the customer approves this before you buy anything. You're reimbursed in full for what you buy."), materialsDraft.items.map((it, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase" } }, "Item ", i + 1), materialsDraft.items.length > 1 && /* @__PURE__ */ React.createElement("button", { onClick: () => removeItem(i), style: { border: "none", background: "none", color: T.ts, fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "Remove")), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelMaterialsForm) }, backHeader("Request Materials", cancelMaterialsForm), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16 } }, "For ", job.title, " — the customer approves this before you buy anything. Reimbursement covers what you actually pay, up to the amount the customer approves."), materialsDraft.items.map((it, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: 14, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, textTransform: "uppercase" } }, "Item ", i + 1), materialsDraft.items.length > 1 && /* @__PURE__ */ React.createElement("button", { onClick: () => removeItem(i), style: { border: "none", background: "none", color: T.ts, fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "Remove")), /* @__PURE__ */ React.createElement(
       "input",
       {
         value: it.name,
@@ -3904,7 +3957,13 @@ function HavenProApp() {
       reader.onload = () => set("photo", reader.result);
       reader.readAsDataURL(file);
     }
-    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelReceiptForm) }, backHeader("Submit Receipt", cancelReceiptForm), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 } }, "For ", job.title, ". Enter what you actually paid (it can differ from the estimate) and add a photo of the receipt. The customer covers this cost, and you're reimbursed in full with no fee taken out."), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "Actual Cost Paid"), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelReceiptForm) }, backHeader("Submit Receipt", cancelReceiptForm), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 } }, "For ", job.title, ". Enter what you actually paid and add a photo of the receipt. You can claim up to the amount the customer approved."), (() => {
+      const cap = receiptDraft.cap || { status: "unavailable" };
+      const over = cap.status === "known" && Number(receiptDraft.cost) > 0 && Math.round(Number(receiptDraft.cost) * 100) > cap.maxCents;
+      const text = cap.status === "loading" ? "Checking the amount the customer approved…" : cap.status === "known" ? `Customer approved: up to $${formatCapDollars(cap.maxCents)}` : cap.status === "failed" ? "Couldn't check the amount the customer approved, so this receipt can't be submitted yet. Your details are saved here. Check your connection and tap Retry." : "The customer-approved amount isn't available yet, so this receipt can't be submitted. Your details are saved here. Tap Retry later.";
+      const blocked = cap.status === "unavailable" || cap.status === "failed";
+      return /* @__PURE__ */ React.createElement("div", { "data-testid": "receipt-cap", "data-cap-status": cap.status, style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { role: blocked ? "alert" : void 0, style: { fontSize: 13, fontWeight: 700, color: cap.status === "known" ? T.tx : blocked ? T.emTx : T.ts, fontFamily: FONT, lineHeight: 1.45 } }, text), over && /* @__PURE__ */ React.createElement("div", { role: "alert", "data-testid": "receipt-over", style: { fontSize: 12.5, fontWeight: 700, color: T.emTx, fontFamily: FONT, marginTop: 6 } }, `That's more than the $${formatCapDollars(cap.maxCents)} the customer approved. Enter $${formatCapDollars(cap.maxCents)} or less.`), blocked && /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => loadReceiptCap(receiptDraft.jobId), style: { marginTop: 8, minHeight: 44, padding: "0 18px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Retry"));
+    })(), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "Actual Cost Paid"), /* @__PURE__ */ React.createElement(
       "input",
       {
         value: receiptDraft.cost,
@@ -3913,7 +3972,12 @@ function HavenProApp() {
         inputMode: "decimal",
         style: { width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }
       }
-    )), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 } }, "Receipt Photo"), receiptDraft.photo ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } }, /* @__PURE__ */ React.createElement("img", { src: receiptDraft.photo, alt: "Receipt", style: { width: 64, height: 64, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.bd}` } }), /* @__PURE__ */ React.createElement("label", { style: { padding: "9px 14px", borderRadius: 10, border: `1px solid ${T.pg}`, color: T.pg, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Replace", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))) : /* @__PURE__ */ React.createElement("label", { style: { display: "block", textAlign: "center", padding: "18px 0", borderRadius: 14, border: `1.5px dashed ${T.bd}`, color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "📷 Attach Receipt Photo", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))), /* @__PURE__ */ React.createElement("button", { onClick: submitReceipt, style: { width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" } }, "Submit Receipt")));
+    )), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 } }, "Receipt Photo"), receiptDraft.photo ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } }, /* @__PURE__ */ React.createElement("img", { src: receiptDraft.photo, alt: "Receipt", style: { width: 64, height: 64, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.bd}` } }), /* @__PURE__ */ React.createElement("label", { style: { padding: "9px 14px", borderRadius: 10, border: `1px solid ${T.pg}`, color: T.pg, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Replace", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))) : /* @__PURE__ */ React.createElement("label", { style: { display: "block", textAlign: "center", padding: "18px 0", borderRadius: 14, border: `1.5px dashed ${T.bd}`, color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "📷 Attach Receipt Photo", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))), (() => {
+      const cap = receiptDraft.cap || { status: "unknown" };
+      const over = cap.status === "known" && Number(receiptDraft.cost) > 0 && Math.round(Number(receiptDraft.cost) * 100) > cap.maxCents;
+      const off = over || cap.status !== "known";
+      return /* @__PURE__ */ React.createElement("button", { onClick: submitReceipt, disabled: off, "aria-disabled": off ? "true" : "false", style: { width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: off ? "not-allowed" : "pointer", opacity: off ? 0.55 : 1 } }, "Submit Receipt");
+    })()));
   }
   function jobCompleteScreen(jobId) {
     const job = completedJobsHistory.find((j) => j.id === jobId);
@@ -4201,7 +4265,7 @@ function HavenProApp() {
     })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } }, buckets.map((b, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { flex: 1, textAlign: "center", fontSize: 10.5, fontWeight: i === highlightIndex ? 800 : 600, color: i === highlightIndex ? T.pg : T.tm } }, b.label)))), /* @__PURE__ */ React.createElement("div", { role: "tablist", "aria-label": "Earnings period", style: { display: "flex", gap: 3, background: T.bg, border: `1px solid ${T.bd}`, borderRadius: 10, padding: 3 } }, [["week", "Week"], ["month", "Month"], ["year", "Year"]].map(([p, label]) => {
       const on = earningsPeriod === p;
       return /* @__PURE__ */ React.createElement("button", { key: p, role: "tab", "aria-selected": on, onClick: () => selectEarningsPeriod(p), style: { flex: 1, padding: "6px 0", borderRadius: 8, border: "none", background: on ? T.w : "transparent", boxShadow: on ? "0 1px 2px rgba(15,26,23,.12)" : "none", color: on ? T.pg : T.ts, fontSize: 12, fontWeight: on ? 800 : 600, fontFamily: FONT, cursor: "pointer" } }, label);
-    }))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 18 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => pushEarnings({ view: "monthly" }), style: { flex: 1, background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: "12px 8px", textAlign: "center", cursor: "pointer", fontFamily: FONT } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 18, fontWeight: 900, color: T.tx } }, "$", lifetimeTotal), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: T.pg, marginTop: 2 } }, "Lifetime ›")), statCard(bucketSelected ? String(bucketJobs.length) : String(completedJobsHistory.length), bucketSelected ? "Jobs In Range" : "Completed Jobs"), statCard(bucketSelected ? `$${bucketAvgPerHour}/hr` : `$${avgPerHour}/hr`, bucketSelected ? "Range Avg Hourly" : "Avg Hourly")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 } }, bucketSelected ? selectedBucket.fullLabel : ledgerCategoryFilter === "all" ? "All Completed Jobs" : `${ledgerCategoryFilter} Jobs`), bucketSelected ? /* @__PURE__ */ React.createElement("button", { onClick: () => setSelectedBucket(null), style: { display: "flex", alignItems: "center", gap: 4, border: `1px solid ${T.pg}`, background: T.pgt, borderRadius: 10, padding: "5px 9px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: T.pgd, fontFamily: FONT } }, selectedBucket.shortLabel), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 800, color: T.pgd } }, "✕")) : ledgerCategoryFilter !== "all" ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => setLedgerFilterOpen(true), style: { display: "flex", alignItems: "center", gap: 4, border: `1px solid ${T.pg}`, background: T.pgt, borderRadius: 10, padding: "5px 9px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12 } }, iconFor(ledgerCategoryFilter)), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: T.pgd, fontFamily: FONT } }, ledgerCategoryFilter)), /* @__PURE__ */ React.createElement("button", { onClick: () => setLedgerCategoryFilter("all"), "aria-label": "Clear filter", style: { border: "none", background: "none", cursor: "pointer", color: T.ts, fontSize: 14, fontWeight: 800, padding: 0 } }, "✕")) : /* @__PURE__ */ React.createElement("button", { onClick: () => setLedgerFilterOpen(true), style: { display: "flex", alignItems: "center", gap: 5, border: `1px solid ${T.bd}`, background: "transparent", borderRadius: 10, padding: "5px 10px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12 } }, "⚙️"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT } }, "Filter"))), bucketSelected ? bucketJobs.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "24px 0", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT } }, "No jobs completed in that range.") : bucketJobs.map(ledgerRow) : /* @__PURE__ */ React.createElement(React.Fragment, null, sortedJobs.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "24px 0", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT } }, "No ", ledgerCategoryFilter, " jobs completed yet."), sortedJobs.map(ledgerRow)), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 4, lineHeight: 1.5 } }, "The payout shown before you accept is exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full.")), ledgerFilterSheet());
+    }))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 18 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => pushEarnings({ view: "monthly" }), style: { flex: 1, background: T.w, border: `1px solid ${T.bd}`, borderRadius: 14, padding: "12px 8px", textAlign: "center", cursor: "pointer", fontFamily: FONT } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 18, fontWeight: 900, color: T.tx } }, "$", lifetimeTotal), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: T.pg, marginTop: 2 } }, "Lifetime ›")), statCard(bucketSelected ? String(bucketJobs.length) : String(completedJobsHistory.length), bucketSelected ? "Jobs In Range" : "Completed Jobs"), statCard(bucketSelected ? `$${bucketAvgPerHour}/hr` : `$${avgPerHour}/hr`, bucketSelected ? "Range Avg Hourly" : "Avg Hourly")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: FONT, textTransform: "uppercase", letterSpacing: 0.3 } }, bucketSelected ? selectedBucket.fullLabel : ledgerCategoryFilter === "all" ? "All Completed Jobs" : `${ledgerCategoryFilter} Jobs`), bucketSelected ? /* @__PURE__ */ React.createElement("button", { onClick: () => setSelectedBucket(null), style: { display: "flex", alignItems: "center", gap: 4, border: `1px solid ${T.pg}`, background: T.pgt, borderRadius: 10, padding: "5px 9px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: T.pgd, fontFamily: FONT } }, selectedBucket.shortLabel), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 800, color: T.pgd } }, "✕")) : ledgerCategoryFilter !== "all" ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => setLedgerFilterOpen(true), style: { display: "flex", alignItems: "center", gap: 4, border: `1px solid ${T.pg}`, background: T.pgt, borderRadius: 10, padding: "5px 9px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12 } }, iconFor(ledgerCategoryFilter)), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: T.pgd, fontFamily: FONT } }, ledgerCategoryFilter)), /* @__PURE__ */ React.createElement("button", { onClick: () => setLedgerCategoryFilter("all"), "aria-label": "Clear filter", style: { border: "none", background: "none", cursor: "pointer", color: T.ts, fontSize: 14, fontWeight: 800, padding: 0 } }, "✕")) : /* @__PURE__ */ React.createElement("button", { onClick: () => setLedgerFilterOpen(true), style: { display: "flex", alignItems: "center", gap: 5, border: `1px solid ${T.bd}`, background: "transparent", borderRadius: 10, padding: "5px 10px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12 } }, "⚙️"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT } }, "Filter"))), bucketSelected ? bucketJobs.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "24px 0", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT } }, "No jobs completed in that range.") : bucketJobs.map(ledgerRow) : /* @__PURE__ */ React.createElement(React.Fragment, null, sortedJobs.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "24px 0", fontSize: 12.5, fontWeight: 500, color: T.ts, fontFamily: FONT } }, "No ", ledgerCategoryFilter, " jobs completed yet."), sortedJobs.map(ledgerRow)), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 500, color: T.tm, fontFamily: FONT, textAlign: "center", marginTop: 4, lineHeight: 1.5 } }, "The payout shown before you accept is exactly what you receive, with no fee taken out. Tips are 100% yours. Materials you buy for an approved request are reimbursed up to the amount the customer approved. Payments aren't processed in the app yet.")), ledgerFilterSheet());
   }
   function monthlyBreakdownScreen() {
     const byMonth = {};
@@ -4623,9 +4687,9 @@ function HavenProApp() {
     )), field("Home Operating City", d.homeCity, (v) => set("homeCity", v), "City, ST"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 500, color: T.tm, fontFamily: FONT, marginTop: -6 } }, "Determines which state's jobs you're eligible for.")));
   }
   const FAQ_ITEMS = [
-    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full. Reimbursement repays what you spent; it isn't extra earnings." },
-    { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and you're paid the $${INSPECTION_VISIT_FEE} inspection fee. If it was a standard job, it ends as not completed and you're paid a $${CONVENIENCE_FEE} convenience fee. Haven keeps nothing either way.` },
-    { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed the full amount with no fee taken out, even if it differs from your estimate." },
+    { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours. Materials you buy for an approved request are reimbursed up to the amount the customer approved. Payments aren't processed in the app yet. Reimbursement repays what you spent; it isn't extra earnings." },
+    { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and the $${INSPECTION_VISIT_FEE} inspection fee applies. If it was a standard job, it ends as not completed and a $${CONVENIENCE_FEE} convenience fee applies. Payments aren't processed in the app yet.` },
+    { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. Reimbursement covers what you actually paid, up to the amount the customer approved. Payments aren't processed in the app yet." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." }
   ];
   function notificationsScreen() {
