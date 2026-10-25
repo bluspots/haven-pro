@@ -2566,6 +2566,10 @@ export default function HavenProApp() {
     const mapsUrl = hasOrigin
       ? `https://www.google.com/maps/dir/?api=1&origin=${proLiveLocation.lat},${proLiveLocation.lng}&destination=${encodeURIComponent(destination)}&travelmode=driving`
       : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination)}`;
+    // MAP-05 M5-1/M5-2 (pro_maps.js): assigned-job map + Apple Maps. Off until the backend gate is verified.
+    if (HAVEN_ASSIGNED_JOB_MAP_ENABLED) {
+      return <HavenEnRouteNavigation job={job} mapsUrl={mapsUrl} hasOrigin={hasOrigin} T={T} dark={theme === "dark"} font={FONT} />;
+    }
     return (
       <a
         href={mapsUrl}
