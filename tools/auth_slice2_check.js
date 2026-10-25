@@ -262,7 +262,8 @@ async function checkSignedInWrites() {
   assertSessionBound(insp[0], AUTH_UID);
   const inspBody = JSON.parse(insp[0].opts.body);
   assert.strictEqual(inspBody.status, "inspection_completed");
-  assert.strictEqual(inspBody.inspection_fee_cents, 4500);
+  // Contract FE-01 / 0029: fees are server-owned after posting; the terminal sync sends status only.
+  assert.deepStrictEqual(Object.keys(inspBody), ["status"], "terminal sync body is { status } only");
 
   await api.bestEffortPatchTerminalStatus(
     { id: JOB_ID, backendClaimed: true },
@@ -272,7 +273,7 @@ async function checkSignedInWrites() {
   assertSessionBound(declined[0], AUTH_UID);
   const declinedBody = JSON.parse(declined[0].opts.body);
   assert.strictEqual(declinedBody.status, "materials_declined");
-  assert.strictEqual(declinedBody.convenience_fee_cents, 3000);
+  assert.deepStrictEqual(Object.keys(declinedBody), ["status"], "decline sync body is { status } only");
 
   const posted = await api.fetchPostedJobsFromSupabase();
   assert.ok(Array.isArray(posted));

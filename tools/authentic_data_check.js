@@ -19,7 +19,7 @@ const jsx = fs.readFileSync(path.join(root, "home_services_pro_app.jsx"), "utf8"
 const built = fs.readFileSync(path.join(root, "prototype-pro.html"), "utf8");
 
 // (1)
-const fin = jsx.slice(jsx.indexOf("async function finalizeJob(job, finalStatus) {"), jsx.indexOf("const record = {", jsx.indexOf("async function finalizeJob(job, finalStatus) {")));
+const fin = jsx.slice(jsx.indexOf("async function finalizeJob("), jsx.indexOf("const record = {", jsx.indexOf("async function finalizeJob(")));
 ok(/const tipAmount = 0;/.test(fin) && !/Math\.random/.test(fin), "finalizeJob sets no tip and uses no random numbers");
 ok(/tipAmount, tipStatus: tipAmount > 0 \? "paid" : "notAdded",/.test(jsx), "so every completed job records tipStatus notAdded");
 // (2)
