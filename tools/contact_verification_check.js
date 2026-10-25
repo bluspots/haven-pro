@@ -160,7 +160,11 @@ async function main() {
 
   // (4) restored step from an older build
   const old = { __v: 1, byUserId: { [AUTH_UID]: { onboardingStatus: "in_progress", onboardingStep: "verifyContact", firstName: "Ada", lastName: "Lovelace", accountEmail: "pro@example.com", accountPhone: "5551234567", emailVerifyStatus: "pending", phoneVerifyStatus: "pending" } } };
-  const r2 = await renderWelcome({ [KEY]: JSON.stringify(old) }, { supabase: lib({ bootUser: user(false) }) });
+  // Phase 1B L5: the device cache is shown only when the profiles read fails
+  // (an empty server row shows the server state), so these older-build cache
+  // cases run with the profiles read unavailable. Nothing is written either way.
+  const profilesDown = async (url) => (String(url).includes("/rest/v1/profiles") ? { ok: false, status: 503, json: async () => ({}), text: async () => "{}" } : { ok: true, status: 200, json: async () => [], text: async () => "" });
+  const r2 = await renderWelcome({ [KEY]: JSON.stringify(old) }, { supabase: lib({ bootUser: user(false) }), fetch: profilesDown });
   try {
     for (let i = 0; i < 60 && !rootText(r2.window).includes("Create Your Profile"); i++) await tick(25);
     ok(rootText(r2.window).includes("Create Your Profile") && !/Verify (Email|Phone)/.test(rootText(r2.window)), "a saved verifyContact step continues at Create Your Profile");
@@ -171,7 +175,7 @@ async function main() {
   // (3)+(5) account card for a Pro whose older build stored a tapped "verified" phone
   const done = { __v: 1, byUserId: { [AUTH_UID]: { onboardingStatus: "completed", onboardingStep: "done", firstName: "Ada", lastName: "Lovelace", accountEmail: "pro@example.com", accountPhone: "5551234567", emailVerifyStatus: "verified", phoneVerifyStatus: "verified" } } };
   for (const confirmed of [false, true]) {
-    const r3 = await renderWelcome({ [KEY]: JSON.stringify(done) }, { supabase: lib({ bootUser: user(confirmed) }) });
+    const r3 = await renderWelcome({ [KEY]: JSON.stringify(done) }, { supabase: lib({ bootUser: user(confirmed) }), fetch: profilesDown });
     try {
       for (let i = 0; i < 80 && !Array.from(r3.window.document.querySelectorAll("button")).some(b => /Profile/.test(b.textContent || "")); i++) await tick(25);
       const tab = Array.from(r3.window.document.querySelectorAll("button")).filter(b => /^\W*Profile$/.test((b.textContent || "").trim())).pop();

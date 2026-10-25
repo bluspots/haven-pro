@@ -1112,72 +1112,88 @@ function havenOperatingNumbers(snapshot) {
   return { lat: lat, lng: lng };
 }
 
-// Geocode the operating city only when it is new or its coordinates are missing.
-// A repeat save of the same city reuses the stored point and does not call Mapbox.
-async function havenAttachOperatingCoordinates(snapshot) {
-  const city = snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() : "";
-  const nums = havenOperatingNumbers(snapshot);
-  const have = nums.lat != null && nums.lng != null;
-  if (!city) {
-    havenOperatingFix = { city: "", lat: null, lng: null, failed: "" };
-    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+// Phase 1B profile fix: resolve the operating city to a point. Returns
+// { ok: true, lat, lng } or { ok: false }. A failed lookup (Mapbox 403, no
+// result, network) is never turned into null coordinates for a save; the
+// caller keeps the previous city and point instead. The last good point is
+// reused for the same city so a repeat save does not call Mapbox again.
+// skipKnownFailure: background callers (load backfill) do not retry a city
+// that already failed in this tab; an explicit user edit always retries.
+async function havenResolveOperatingCity(city, opts) {
+  const c = city ? String(city).trim() : "";
+  if (!c) return { ok: false };
+  const o = opts || {};
+  const hintLat = o.hint && o.hint.lat != null ? Number(o.hint.lat) : NaN;
+  const hintLng = o.hint && o.hint.lng != null ? Number(o.hint.lng) : NaN;
+  if (Number.isFinite(hintLat) && Number.isFinite(hintLng)) {
+    havenOperatingFix = { city: c, lat: hintLat, lng: hintLng, failed: "" };
+    return { ok: true, lat: hintLat, lng: hintLng };
   }
-  if (have && (!havenOperatingFix.city || havenOperatingFix.city === city)) {
-    havenOperatingFix = { city: city, lat: nums.lat, lng: nums.lng, failed: "" };
-    return Object.assign({}, snapshot, { operatingLat: nums.lat, operatingLng: nums.lng });
+  if (havenOperatingFix.city === c && havenOperatingFix.lat != null && havenOperatingFix.lng != null) {
+    return { ok: true, lat: havenOperatingFix.lat, lng: havenOperatingFix.lng };
   }
-  if (!have && havenOperatingFix.city === city && havenOperatingFix.lat != null && havenOperatingFix.failed !== city) {
-    return Object.assign({}, snapshot, { operatingLat: havenOperatingFix.lat, operatingLng: havenOperatingFix.lng });
-  }
-  if (havenOperatingFix.failed === city) {
-    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
-  }
+  if (o.skipKnownFailure && havenOperatingFix.failed === c) return { ok: false };
   let point = null;
   if (typeof havenGeocodeAddress === "function") {
     try {
-      if (havenOperatingInflight && havenOperatingInflightCity === city) {
+      if (havenOperatingInflight && havenOperatingInflightCity === c) {
         point = await havenOperatingInflight;
       } else {
-        havenOperatingInflightCity = city;
-        havenOperatingInflight = havenGeocodeAddress(city);
+        havenOperatingInflightCity = c;
+        havenOperatingInflight = havenGeocodeAddress(c);
         point = await havenOperatingInflight;
       }
     } catch (e) {
       point = null;
     } finally {
-      if (havenOperatingInflightCity === city) havenOperatingInflight = null;
+      if (havenOperatingInflightCity === c) havenOperatingInflight = null;
     }
   }
   const lat = point && point.lat != null ? Number(point.lat) : NaN;
   const lng = point && point.lng != null ? Number(point.lng) : NaN;
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    havenOperatingFix = { city: "", lat: null, lng: null, failed: city };
-    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+    havenOperatingFix = Object.assign({}, havenOperatingFix, { failed: c });
+    return { ok: false };
   }
-  havenOperatingFix = { city: city, lat: lat, lng: lng, failed: "" };
-  return Object.assign({}, snapshot, { operatingLat: lat, operatingLng: lng });
+  havenOperatingFix = { city: c, lat: lat, lng: lng, failed: "" };
+  return { ok: true, lat: lat, lng: lng };
 }
 
-function havenProProfileWriteBody(snapshot, mode) {
-  const first = snapshot && snapshot.firstName ? String(snapshot.firstName).trim() : "";
-  const last = snapshot && snapshot.lastName ? String(snapshot.lastName).trim() : "";
-  const display = [first, last].filter(Boolean).join(" ") || null;
-  const email = snapshot && snapshot.accountEmail ? String(snapshot.accountEmail).trim() : "";
-  const legacy = { display_name: display };
-  if (email) legacy.email = email;
-  if (mode === "legacy") return legacy;
-  const nums = havenOperatingNumbers(snapshot);
-  const body = Object.assign({}, legacy, {
-    first_name: first || null,
-    last_name: last || null,
-    home_city: snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() || null : null,
-    work_categories: Array.isArray(snapshot.workCategories) ? snapshot.workCategories : [],
-    pro_workspace: snapshot || {},
-  });
-  if (mode === "located") {
+// True when this city can be saved: it resolves to a point, or this schema
+// does not store a city (legacy). Used to check a city before it is accepted.
+async function havenCheckOperatingCity(city) {
+  if (havenProProfileSchema === "legacy") return true;
+  const res = await havenResolveOperatingCity(city);
+  return !!(res && res.ok);
+}
+
+// Phase 1B profile fix: the PATCH body holds only the changed fields.
+// `changes` is a partial workspace (only keys the user edited). Columns are
+// written only for keys present in `changes`. pro_workspace is the server's
+// current workspace (`baseWorkspace`) with the changed keys merged on top, so
+// server keys this save did not touch are kept. Never a full local replace.
+function havenProProfileWriteBody(changes, mode, baseWorkspace) {
+  const c = changes && typeof changes === "object" ? changes : {};
+  const base = baseWorkspace && typeof baseWorkspace === "object" && !Array.isArray(baseWorkspace) ? baseWorkspace : {};
+  const has = function (k) { return Object.prototype.hasOwnProperty.call(c, k); };
+  const text = function (v) { return v == null ? "" : String(v).trim(); };
+  const body = {};
+  const nameChanged = has("firstName") || has("lastName");
+  const first = has("firstName") ? text(c.firstName) : text(base.firstName);
+  const last = has("lastName") ? text(c.lastName) : text(base.lastName);
+  if (nameChanged) body.display_name = [first, last].filter(Boolean).join(" ") || null;
+  if (has("accountEmail") && text(c.accountEmail)) body.email = text(c.accountEmail);
+  if (mode === "legacy") return body;
+  if (has("firstName")) body.first_name = first || null;
+  if (has("lastName")) body.last_name = last || null;
+  if (has("homeCity")) body.home_city = text(c.homeCity) || null;
+  if (has("workCategories")) body.work_categories = Array.isArray(c.workCategories) ? c.workCategories.slice() : [];
+  if (mode === "located" && has("operatingLat") && has("operatingLng")) {
+    const nums = havenOperatingNumbers(c);
     body.operating_lat = nums.lat;
     body.operating_lng = nums.lng;
   }
+  if (Object.keys(c).length) body.pro_workspace = Object.assign({}, base, c);
   return body;
 }
 
@@ -1320,8 +1336,36 @@ async function fetchHavenProServerWorkspace(userId) {
   }
 }
 
-async function saveHavenProProfile(userId, snapshot) {
-  if (!userId || !snapshot) return { ok: false, reason: "no_user" };
+// Phase 1B profile fix: the server's current pro_workspace, read right before
+// a save so the merge keeps every key this save does not change.
+async function havenReadProWorkspaceForWrite(cfg, headers, userId) {
+  try {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=pro_workspace`;
+    const res = await fetch(url, { method: "GET", headers: { apikey: headers.apikey, Authorization: headers.Authorization, Accept: "application/json" } });
+    if (!res || !res.ok) return { ok: false, reason: "read_failed", status: res && res.status };
+    const text = await res.text();
+    let rows = null;
+    try { rows = text ? JSON.parse(text) : null; } catch (e) { rows = null; }
+    if (!Array.isArray(rows) || !rows.length) return { ok: false, reason: "row_missing" };
+    const ws = rows[0] && rows[0].pro_workspace && typeof rows[0].pro_workspace === "object" && !Array.isArray(rows[0].pro_workspace)
+      ? rows[0].pro_workspace
+      : {};
+    return { ok: true, workspace: ws };
+  } catch (e) {
+    return { ok: false, reason: "network_error" };
+  }
+}
+
+// Update the signed-in Pro's own profiles row with only the changed fields.
+// `changes` is a partial workspace. Coordinates are never taken from local
+// state: they are written only together with a city that resolved to a point.
+// A city that does not resolve is not saved (the server keeps the previous
+// city and point) and the result says geocodeFailed.
+// opts.serverWorkspace: a workspace just read from the server (guard retry),
+//   used as the merge base instead of reading again.
+async function saveHavenProProfile(userId, changes, opts) {
+  if (!userId || !changes || typeof changes !== "object") return { ok: false, reason: "no_user" };
+  const o = opts || {};
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: false, reason: "not_configured" };
   const actor = await resolveHavenJobWriteAuth(cfg);
@@ -1333,49 +1377,124 @@ async function saveHavenProProfile(userId, snapshot) {
     "Content-Type": "application/json",
     Prefer: "return=representation",
   };
-  async function patch(mode, bodySnapshot) {
+  let used = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "full" ? "full" : "located";
+  let baseWs = null;
+  if (used !== "legacy") {
+    if (o.serverWorkspace && typeof o.serverWorkspace === "object" && !Array.isArray(o.serverWorkspace)) {
+      baseWs = o.serverWorkspace;
+    } else {
+      const read = await havenReadProWorkspaceForWrite(cfg, headers, userId);
+      // Without the server's current workspace a merge could drop keys: do not write.
+      if (!read.ok) return { ok: false, reason: read.reason || "read_failed", readFailed: true };
+      baseWs = read.workspace;
+    }
+  }
+  const hint = { lat: changes.operatingLat, lng: changes.operatingLng };
+  const toWrite = Object.assign({}, changes);
+  delete toWrite.operatingLat;
+  delete toWrite.operatingLng;
+  let geocodeFailed = false;
+  if (used !== "legacy" && Object.prototype.hasOwnProperty.call(toWrite, "homeCity")) {
+    const city = toWrite.homeCity == null ? "" : String(toWrite.homeCity).trim();
+    if (!city) {
+      // The user cleared the city: no point goes with no city.
+      toWrite.operatingLat = null;
+      toWrite.operatingLng = null;
+    } else {
+      const fix = await havenResolveOperatingCity(city, { hint: hint });
+      if (fix && fix.ok) {
+        toWrite.operatingLat = fix.lat;
+        toWrite.operatingLng = fix.lng;
+      } else {
+        geocodeFailed = true;
+        delete toWrite.homeCity;
+      }
+    }
+  }
+  if (!Object.keys(toWrite).length) {
+    return geocodeFailed
+      ? { ok: false, reason: "geocode_failed", geocodeFailed: true, written: {} }
+      : { ok: true, reason: "no_changes", written: {} };
+  }
+  async function patch(mode) {
     const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`;
+    const body = havenProProfileWriteBody(toWrite, mode, baseWs);
+    if (!Object.keys(body).length) return { ok: true, status: 204, body: [], empty: true };
     const res = await fetch(url, {
       method: "PATCH",
       headers: headers,
-      body: JSON.stringify(havenProProfileWriteBody(bodySnapshot || snapshot, mode)),
+      body: JSON.stringify(body),
     });
     const text = await res.text();
-    let body = null;
-    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
-    return { ok: res.ok, status: res.status, body: body };
+    let parsed = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = null; }
+    return { ok: res.ok, status: res.status, body: parsed };
   }
   try {
-    let toSave = snapshot;
-    let used = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "full" ? "full" : "located";
-    if (used !== "legacy") {
-      toSave = await havenAttachOperatingCoordinates(snapshot);
-    }
-    let got = await patch(used, toSave);
+    let got = await patch(used);
     if (!got.ok && used === "located" && (got.status === 400 || got.status === 406)) {
       havenProProfileSchema = "full";
       used = "full";
-      got = await patch("full", toSave);
+      got = await patch("full");
     }
     if (!got.ok && used === "full" && (got.status === 400 || got.status === 406)) {
       havenProProfileSchema = "legacy";
       used = "legacy";
-      got = await patch("legacy", toSave);
+      got = await patch("legacy");
     }
     if (!got.ok) {
       // Phase 1B A2: the 0024 profiles guard rejected a QA-only provider
       // result (stale cache). The caller may refetch and retry once.
       if (havenIsQaGuardRejection(got.status, got.body)) {
-        return { ok: false, reason: "guard_rejected", guard: true, status: got.status };
+        return { ok: false, reason: "guard_rejected", guard: true, status: got.status, geocodeFailed: geocodeFailed };
       }
-      return { ok: false, reason: "write_failed", status: got.status };
+      return { ok: false, reason: "write_failed", status: got.status, geocodeFailed: geocodeFailed };
     }
+    if (got.empty) return { ok: true, mode: used, written: {}, geocodeFailed: geocodeFailed };
     if (used === "located") havenProProfileSchema = "located";
     else if (used === "full") havenProProfileSchema = "full";
     const rows = Array.isArray(got.body) ? got.body : [];
-    if (!rows.length) return { ok: false, reason: "row_missing" };
+    if (!rows.length) return { ok: false, reason: "row_missing", geocodeFailed: geocodeFailed };
     const modeOut = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "located" ? "located" : "full";
-    return { ok: true, mode: modeOut };
+    return { ok: true, mode: modeOut, written: toWrite, geocodeFailed: geocodeFailed };
+  } catch (e) {
+    return { ok: false, reason: "network_error", geocodeFailed: geocodeFailed };
+  }
+}
+
+// Phase 1B profile fix: a saved server row with a city but no point gets the
+// point filled in on load. Only operating_lat/operating_lng are written, and
+// only while the server row still has that same city and no point, so this
+// can never replace a point (or a city) saved elsewhere. A failed lookup
+// writes nothing. Located schema only.
+async function havenBackfillOperatingCoordinates(userId, city) {
+  const c = city ? String(city).trim() : "";
+  if (!userId || !c || havenProProfileSchema !== "located") return { ok: false, reason: "skipped" };
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, reason: "not_configured" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok || actor.proId !== userId) return { ok: false, reason: "no_session" };
+  const fix = await havenResolveOperatingCity(c, { skipKnownFailure: true });
+  if (!fix || !fix.ok) return { ok: false, reason: "geocode_failed" };
+  try {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&home_city=eq.${encodeURIComponent(c)}&operating_lat=is.null`;
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ operating_lat: fix.lat, operating_lng: fix.lng }),
+    });
+    if (!res || !res.ok) return { ok: false, reason: "write_failed", status: res && res.status };
+    const text = await res.text();
+    let rows = null;
+    try { rows = text ? JSON.parse(text) : null; } catch (e) { rows = null; }
+    if (!Array.isArray(rows) || !rows.length) return { ok: false, reason: "not_applied" };
+    return { ok: true, lat: fix.lat, lng: fix.lng };
   } catch (e) {
     return { ok: false, reason: "network_error" };
   }
@@ -1384,9 +1503,9 @@ async function saveHavenProProfile(userId, snapshot) {
 function subscribeHavenAuth(onChange) {
   const client = getHavenSupabaseClient();
   if (!client) return function () {};
-  const { data } = client.auth.onAuthStateChange(function (_event, session) {
+  const { data } = client.auth.onAuthStateChange(function (event, session) {
     rememberHavenSession(session);
-    if (typeof onChange === "function") onChange(session || null);
+    if (typeof onChange === "function") onChange(session || null, event);
   });
   const sub = data && data.subscription;
   return function () {

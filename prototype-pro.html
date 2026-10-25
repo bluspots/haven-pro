@@ -1463,72 +1463,88 @@ function havenOperatingNumbers(snapshot) {
   return { lat: lat, lng: lng };
 }
 
-// Geocode the operating city only when it is new or its coordinates are missing.
-// A repeat save of the same city reuses the stored point and does not call Mapbox.
-async function havenAttachOperatingCoordinates(snapshot) {
-  const city = snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() : "";
-  const nums = havenOperatingNumbers(snapshot);
-  const have = nums.lat != null && nums.lng != null;
-  if (!city) {
-    havenOperatingFix = { city: "", lat: null, lng: null, failed: "" };
-    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+// Phase 1B profile fix: resolve the operating city to a point. Returns
+// { ok: true, lat, lng } or { ok: false }. A failed lookup (Mapbox 403, no
+// result, network) is never turned into null coordinates for a save; the
+// caller keeps the previous city and point instead. The last good point is
+// reused for the same city so a repeat save does not call Mapbox again.
+// skipKnownFailure: background callers (load backfill) do not retry a city
+// that already failed in this tab; an explicit user edit always retries.
+async function havenResolveOperatingCity(city, opts) {
+  const c = city ? String(city).trim() : "";
+  if (!c) return { ok: false };
+  const o = opts || {};
+  const hintLat = o.hint && o.hint.lat != null ? Number(o.hint.lat) : NaN;
+  const hintLng = o.hint && o.hint.lng != null ? Number(o.hint.lng) : NaN;
+  if (Number.isFinite(hintLat) && Number.isFinite(hintLng)) {
+    havenOperatingFix = { city: c, lat: hintLat, lng: hintLng, failed: "" };
+    return { ok: true, lat: hintLat, lng: hintLng };
   }
-  if (have && (!havenOperatingFix.city || havenOperatingFix.city === city)) {
-    havenOperatingFix = { city: city, lat: nums.lat, lng: nums.lng, failed: "" };
-    return Object.assign({}, snapshot, { operatingLat: nums.lat, operatingLng: nums.lng });
+  if (havenOperatingFix.city === c && havenOperatingFix.lat != null && havenOperatingFix.lng != null) {
+    return { ok: true, lat: havenOperatingFix.lat, lng: havenOperatingFix.lng };
   }
-  if (!have && havenOperatingFix.city === city && havenOperatingFix.lat != null && havenOperatingFix.failed !== city) {
-    return Object.assign({}, snapshot, { operatingLat: havenOperatingFix.lat, operatingLng: havenOperatingFix.lng });
-  }
-  if (havenOperatingFix.failed === city) {
-    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
-  }
+  if (o.skipKnownFailure && havenOperatingFix.failed === c) return { ok: false };
   let point = null;
   if (typeof havenGeocodeAddress === "function") {
     try {
-      if (havenOperatingInflight && havenOperatingInflightCity === city) {
+      if (havenOperatingInflight && havenOperatingInflightCity === c) {
         point = await havenOperatingInflight;
       } else {
-        havenOperatingInflightCity = city;
-        havenOperatingInflight = havenGeocodeAddress(city);
+        havenOperatingInflightCity = c;
+        havenOperatingInflight = havenGeocodeAddress(c);
         point = await havenOperatingInflight;
       }
     } catch (e) {
       point = null;
     } finally {
-      if (havenOperatingInflightCity === city) havenOperatingInflight = null;
+      if (havenOperatingInflightCity === c) havenOperatingInflight = null;
     }
   }
   const lat = point && point.lat != null ? Number(point.lat) : NaN;
   const lng = point && point.lng != null ? Number(point.lng) : NaN;
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    havenOperatingFix = { city: "", lat: null, lng: null, failed: city };
-    return Object.assign({}, snapshot, { operatingLat: null, operatingLng: null });
+    havenOperatingFix = Object.assign({}, havenOperatingFix, { failed: c });
+    return { ok: false };
   }
-  havenOperatingFix = { city: city, lat: lat, lng: lng, failed: "" };
-  return Object.assign({}, snapshot, { operatingLat: lat, operatingLng: lng });
+  havenOperatingFix = { city: c, lat: lat, lng: lng, failed: "" };
+  return { ok: true, lat: lat, lng: lng };
 }
 
-function havenProProfileWriteBody(snapshot, mode) {
-  const first = snapshot && snapshot.firstName ? String(snapshot.firstName).trim() : "";
-  const last = snapshot && snapshot.lastName ? String(snapshot.lastName).trim() : "";
-  const display = [first, last].filter(Boolean).join(" ") || null;
-  const email = snapshot && snapshot.accountEmail ? String(snapshot.accountEmail).trim() : "";
-  const legacy = { display_name: display };
-  if (email) legacy.email = email;
-  if (mode === "legacy") return legacy;
-  const nums = havenOperatingNumbers(snapshot);
-  const body = Object.assign({}, legacy, {
-    first_name: first || null,
-    last_name: last || null,
-    home_city: snapshot && snapshot.homeCity ? String(snapshot.homeCity).trim() || null : null,
-    work_categories: Array.isArray(snapshot.workCategories) ? snapshot.workCategories : [],
-    pro_workspace: snapshot || {},
-  });
-  if (mode === "located") {
+// True when this city can be saved: it resolves to a point, or this schema
+// does not store a city (legacy). Used to check a city before it is accepted.
+async function havenCheckOperatingCity(city) {
+  if (havenProProfileSchema === "legacy") return true;
+  const res = await havenResolveOperatingCity(city);
+  return !!(res && res.ok);
+}
+
+// Phase 1B profile fix: the PATCH body holds only the changed fields.
+// `changes` is a partial workspace (only keys the user edited). Columns are
+// written only for keys present in `changes`. pro_workspace is the server's
+// current workspace (`baseWorkspace`) with the changed keys merged on top, so
+// server keys this save did not touch are kept. Never a full local replace.
+function havenProProfileWriteBody(changes, mode, baseWorkspace) {
+  const c = changes && typeof changes === "object" ? changes : {};
+  const base = baseWorkspace && typeof baseWorkspace === "object" && !Array.isArray(baseWorkspace) ? baseWorkspace : {};
+  const has = function (k) { return Object.prototype.hasOwnProperty.call(c, k); };
+  const text = function (v) { return v == null ? "" : String(v).trim(); };
+  const body = {};
+  const nameChanged = has("firstName") || has("lastName");
+  const first = has("firstName") ? text(c.firstName) : text(base.firstName);
+  const last = has("lastName") ? text(c.lastName) : text(base.lastName);
+  if (nameChanged) body.display_name = [first, last].filter(Boolean).join(" ") || null;
+  if (has("accountEmail") && text(c.accountEmail)) body.email = text(c.accountEmail);
+  if (mode === "legacy") return body;
+  if (has("firstName")) body.first_name = first || null;
+  if (has("lastName")) body.last_name = last || null;
+  if (has("homeCity")) body.home_city = text(c.homeCity) || null;
+  if (has("workCategories")) body.work_categories = Array.isArray(c.workCategories) ? c.workCategories.slice() : [];
+  if (mode === "located" && has("operatingLat") && has("operatingLng")) {
+    const nums = havenOperatingNumbers(c);
     body.operating_lat = nums.lat;
     body.operating_lng = nums.lng;
   }
+  if (Object.keys(c).length) body.pro_workspace = Object.assign({}, base, c);
   return body;
 }
 
@@ -1671,8 +1687,36 @@ async function fetchHavenProServerWorkspace(userId) {
   }
 }
 
-async function saveHavenProProfile(userId, snapshot) {
-  if (!userId || !snapshot) return { ok: false, reason: "no_user" };
+// Phase 1B profile fix: the server's current pro_workspace, read right before
+// a save so the merge keeps every key this save does not change.
+async function havenReadProWorkspaceForWrite(cfg, headers, userId) {
+  try {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=pro_workspace`;
+    const res = await fetch(url, { method: "GET", headers: { apikey: headers.apikey, Authorization: headers.Authorization, Accept: "application/json" } });
+    if (!res || !res.ok) return { ok: false, reason: "read_failed", status: res && res.status };
+    const text = await res.text();
+    let rows = null;
+    try { rows = text ? JSON.parse(text) : null; } catch (e) { rows = null; }
+    if (!Array.isArray(rows) || !rows.length) return { ok: false, reason: "row_missing" };
+    const ws = rows[0] && rows[0].pro_workspace && typeof rows[0].pro_workspace === "object" && !Array.isArray(rows[0].pro_workspace)
+      ? rows[0].pro_workspace
+      : {};
+    return { ok: true, workspace: ws };
+  } catch (e) {
+    return { ok: false, reason: "network_error" };
+  }
+}
+
+// Update the signed-in Pro's own profiles row with only the changed fields.
+// `changes` is a partial workspace. Coordinates are never taken from local
+// state: they are written only together with a city that resolved to a point.
+// A city that does not resolve is not saved (the server keeps the previous
+// city and point) and the result says geocodeFailed.
+// opts.serverWorkspace: a workspace just read from the server (guard retry),
+//   used as the merge base instead of reading again.
+async function saveHavenProProfile(userId, changes, opts) {
+  if (!userId || !changes || typeof changes !== "object") return { ok: false, reason: "no_user" };
+  const o = opts || {};
   const cfg = getSupabaseConfig();
   if (!cfg) return { ok: false, reason: "not_configured" };
   const actor = await resolveHavenJobWriteAuth(cfg);
@@ -1684,49 +1728,124 @@ async function saveHavenProProfile(userId, snapshot) {
     "Content-Type": "application/json",
     Prefer: "return=representation",
   };
-  async function patch(mode, bodySnapshot) {
+  let used = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "full" ? "full" : "located";
+  let baseWs = null;
+  if (used !== "legacy") {
+    if (o.serverWorkspace && typeof o.serverWorkspace === "object" && !Array.isArray(o.serverWorkspace)) {
+      baseWs = o.serverWorkspace;
+    } else {
+      const read = await havenReadProWorkspaceForWrite(cfg, headers, userId);
+      // Without the server's current workspace a merge could drop keys: do not write.
+      if (!read.ok) return { ok: false, reason: read.reason || "read_failed", readFailed: true };
+      baseWs = read.workspace;
+    }
+  }
+  const hint = { lat: changes.operatingLat, lng: changes.operatingLng };
+  const toWrite = Object.assign({}, changes);
+  delete toWrite.operatingLat;
+  delete toWrite.operatingLng;
+  let geocodeFailed = false;
+  if (used !== "legacy" && Object.prototype.hasOwnProperty.call(toWrite, "homeCity")) {
+    const city = toWrite.homeCity == null ? "" : String(toWrite.homeCity).trim();
+    if (!city) {
+      // The user cleared the city: no point goes with no city.
+      toWrite.operatingLat = null;
+      toWrite.operatingLng = null;
+    } else {
+      const fix = await havenResolveOperatingCity(city, { hint: hint });
+      if (fix && fix.ok) {
+        toWrite.operatingLat = fix.lat;
+        toWrite.operatingLng = fix.lng;
+      } else {
+        geocodeFailed = true;
+        delete toWrite.homeCity;
+      }
+    }
+  }
+  if (!Object.keys(toWrite).length) {
+    return geocodeFailed
+      ? { ok: false, reason: "geocode_failed", geocodeFailed: true, written: {} }
+      : { ok: true, reason: "no_changes", written: {} };
+  }
+  async function patch(mode) {
     const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`;
+    const body = havenProProfileWriteBody(toWrite, mode, baseWs);
+    if (!Object.keys(body).length) return { ok: true, status: 204, body: [], empty: true };
     const res = await fetch(url, {
       method: "PATCH",
       headers: headers,
-      body: JSON.stringify(havenProProfileWriteBody(bodySnapshot || snapshot, mode)),
+      body: JSON.stringify(body),
     });
     const text = await res.text();
-    let body = null;
-    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
-    return { ok: res.ok, status: res.status, body: body };
+    let parsed = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = null; }
+    return { ok: res.ok, status: res.status, body: parsed };
   }
   try {
-    let toSave = snapshot;
-    let used = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "full" ? "full" : "located";
-    if (used !== "legacy") {
-      toSave = await havenAttachOperatingCoordinates(snapshot);
-    }
-    let got = await patch(used, toSave);
+    let got = await patch(used);
     if (!got.ok && used === "located" && (got.status === 400 || got.status === 406)) {
       havenProProfileSchema = "full";
       used = "full";
-      got = await patch("full", toSave);
+      got = await patch("full");
     }
     if (!got.ok && used === "full" && (got.status === 400 || got.status === 406)) {
       havenProProfileSchema = "legacy";
       used = "legacy";
-      got = await patch("legacy", toSave);
+      got = await patch("legacy");
     }
     if (!got.ok) {
       // Phase 1B A2: the 0024 profiles guard rejected a QA-only provider
       // result (stale cache). The caller may refetch and retry once.
       if (havenIsQaGuardRejection(got.status, got.body)) {
-        return { ok: false, reason: "guard_rejected", guard: true, status: got.status };
+        return { ok: false, reason: "guard_rejected", guard: true, status: got.status, geocodeFailed: geocodeFailed };
       }
-      return { ok: false, reason: "write_failed", status: got.status };
+      return { ok: false, reason: "write_failed", status: got.status, geocodeFailed: geocodeFailed };
     }
+    if (got.empty) return { ok: true, mode: used, written: {}, geocodeFailed: geocodeFailed };
     if (used === "located") havenProProfileSchema = "located";
     else if (used === "full") havenProProfileSchema = "full";
     const rows = Array.isArray(got.body) ? got.body : [];
-    if (!rows.length) return { ok: false, reason: "row_missing" };
+    if (!rows.length) return { ok: false, reason: "row_missing", geocodeFailed: geocodeFailed };
     const modeOut = havenProProfileSchema === "legacy" ? "legacy" : havenProProfileSchema === "located" ? "located" : "full";
-    return { ok: true, mode: modeOut };
+    return { ok: true, mode: modeOut, written: toWrite, geocodeFailed: geocodeFailed };
+  } catch (e) {
+    return { ok: false, reason: "network_error", geocodeFailed: geocodeFailed };
+  }
+}
+
+// Phase 1B profile fix: a saved server row with a city but no point gets the
+// point filled in on load. Only operating_lat/operating_lng are written, and
+// only while the server row still has that same city and no point, so this
+// can never replace a point (or a city) saved elsewhere. A failed lookup
+// writes nothing. Located schema only.
+async function havenBackfillOperatingCoordinates(userId, city) {
+  const c = city ? String(city).trim() : "";
+  if (!userId || !c || havenProProfileSchema !== "located") return { ok: false, reason: "skipped" };
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, reason: "not_configured" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok || actor.proId !== userId) return { ok: false, reason: "no_session" };
+  const fix = await havenResolveOperatingCity(c, { skipKnownFailure: true });
+  if (!fix || !fix.ok) return { ok: false, reason: "geocode_failed" };
+  try {
+    const url = `${cfg.url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&home_city=eq.${encodeURIComponent(c)}&operating_lat=is.null`;
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ operating_lat: fix.lat, operating_lng: fix.lng }),
+    });
+    if (!res || !res.ok) return { ok: false, reason: "write_failed", status: res && res.status };
+    const text = await res.text();
+    let rows = null;
+    try { rows = text ? JSON.parse(text) : null; } catch (e) { rows = null; }
+    if (!Array.isArray(rows) || !rows.length) return { ok: false, reason: "not_applied" };
+    return { ok: true, lat: fix.lat, lng: fix.lng };
   } catch (e) {
     return { ok: false, reason: "network_error" };
   }
@@ -1735,9 +1854,9 @@ async function saveHavenProProfile(userId, snapshot) {
 function subscribeHavenAuth(onChange) {
   const client = getHavenSupabaseClient();
   if (!client) return function () {};
-  const { data } = client.auth.onAuthStateChange(function (_event, session) {
+  const { data } = client.auth.onAuthStateChange(function (event, session) {
     rememberHavenSession(session);
-    if (typeof onChange === "function") onChange(session || null);
+    if (typeof onChange === "function") onChange(session || null, event);
   });
   const sub = data && data.subscription;
   return function () {
@@ -1966,6 +2085,36 @@ function havenGuardedSignature(snapshot) {
   return JSON.stringify([g.identityVerification.status, g.backgroundCheck.status, g.payoutAccount.status, g.payoutAccount.payoutsEnabled, g.taxProfile.status]);
 }
 
+// Phase 1B profile fix: shown when a city does not resolve to a point. The
+// city is not saved; the previous city and point stay in the app and on the server.
+const HAVEN_GEOCODE_FAILED_COPY = "We couldn't find that location. Check the city and try again.";
+// The profile fields that changed between `base` (what the server holds, as
+// last loaded or saved) and `next` (current local state). Only these are
+// written. Coordinates are never diffed: they are derived from the city and
+// only saved together with a city that resolved. A name change sends both
+// name parts so display_name stays whole.
+// Phase 1B follow-up: the pre-save read of the server profile failed, so
+// nothing was saved. Shown with a Retry button; the form keeps the edits.
+const HAVEN_PROFILE_READ_FAILED_COPY = "We couldn't reach Haven to save your profile. Your changes are still here. Check your connection and tap Retry.";
+// Any other failed explicit save (also shown with Retry).
+const HAVEN_PROFILE_SAVE_FAILED_COPY = "Your profile wasn't saved. Your changes are still here. Tap Retry to try again.";
+function havenProfileChanges(base, next, opts) {
+  const out = {};
+  if (!next || typeof next !== "object") return out;
+  const b = base && typeof base === "object" ? base : {};
+  Object.keys(next).forEach(function (k) {
+    if (k === "operatingLat" || k === "operatingLng") return;
+    if (JSON.stringify(next[k]) !== JSON.stringify(b[k])) out[k] = next[k];
+  });
+  if (Object.prototype.hasOwnProperty.call(out, "firstName") || Object.prototype.hasOwnProperty.call(out, "lastName")) {
+    out.firstName = next.firstName;
+    out.lastName = next.lastName;
+  }
+  // Create Your Profile binds the city field to state on every keystroke.
+  // The city is saved when the step is left (checked by Continue), not while typing.
+  if (!(opts && opts.includeCity) && next.onboardingStep === "createProfile" && next.onboardingStatus !== "completed") delete out.homeCity;
+  return out;
+}
 // HB-13: identity / background-check / payout / tax providers aren't connected yet.
 const HAVEN_PROVIDER_CHECKS_CONNECTED = false;
 
@@ -2132,6 +2281,10 @@ function HavenProApp() {
   // Profile sub-navigation + drafts (draft/commit pattern so typing never silently saves)
   const [profileView, setProfileView] = useState("main"); // main | edit | categories | settings
   const [editDraft, setEditDraft] = useState(null);
+  // Phase 1B follow-up: an explicit profile save (Edit Profile / Create Your
+  // Profile) that failed: { where: "edit" | "onboarding", message }.
+  const [profileSaveError, setProfileSaveError] = useState(null);
+  const [profileSaveBusy, setProfileSaveBusy] = useState(false);
   const [categoriesDraft, setCategoriesDraft] = useState(null);
 
   /* ── Verification / Payouts & Tax — production-shaped state model.
@@ -2298,6 +2451,14 @@ function HavenProApp() {
   const profileHydratePromiseRef = useRef(null);
   const profileHydrateUserRef = useRef(null);
   const operatingCityRef = useRef(null);
+  // Phase 1B profile fix: profile writes send only what changed since the
+  // server's values were applied (baseline). Writes run one at a time, and a
+  // (re)hydrate waits for them and blocks new ones until it is done.
+  const profileHydrateInflightRef = useRef(false);
+  const profileBaselineRef = useRef(null);
+  const latestProfileSnapshotRef = useRef(null);
+  const profileWriteChainRef = useRef(Promise.resolve());
+  const [profileSyncEpoch, setProfileSyncEpoch] = useState(0);
   const dragBaseY = useRef(0);
   const suppressNextClick = useRef(false);
 
@@ -2487,9 +2648,9 @@ function HavenProApp() {
      no retry when the server already matches what was sent (not stale), so
      this can never loop. Any other failure keeps the existing handling. */
   const guardRecoveryRef = useRef(false);
-  async function saveProProfileWithGuardRecovery(userId, snapshot) {
+  async function saveProProfileWithGuardRecovery(userId, snapshot, opts) {
     let first;
-    try { first = await saveHavenProProfile(userId, snapshot); } catch (e) { first = { ok: false, reason: "exception" }; }
+    try { first = await saveHavenProProfile(userId, snapshot, opts); } catch (e) { first = { ok: false, reason: "exception" }; }
     if (!first || first.ok || !first.guard) return first;
     if (guardRecoveryRef.current || typeof fetchHavenProServerWorkspace !== "function") return first;
     guardRecoveryRef.current = true;
@@ -2498,7 +2659,8 @@ function HavenProApp() {
       try { server = await fetchHavenProServerWorkspace(userId); } catch (e) { server = null; }
       if (!server || !server.ok) return first;
       const guarded = havenGuardedSectionsFromServer(server.workspace);
-      if (havenGuardedSignature(guarded) === havenGuardedSignature(snapshot)) return first;
+      // `snapshot` holds only the changed keys; compare what the row would hold.
+      if (havenGuardedSignature(guarded) === havenGuardedSignature(Object.assign({}, server.workspace, snapshot))) return first;
       // Signed out or switched user while refetching: do nothing.
       if (profileHydrateUserRef.current !== userId) return first;
       setIdentityVerification(guarded.identityVerification);
@@ -2506,62 +2668,96 @@ function HavenProApp() {
       setPayoutAccount(guarded.payoutAccount);
       setTaxProfile(guarded.taxProfile);
       const retrySnapshot = Object.assign({}, snapshot, guarded);
-      if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, retrySnapshot);
+      if (typeof saveHavenProWorkspace === "function") {
+        const cached = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
+        saveHavenProWorkspace(userId, Object.assign({}, cached || {}, retrySnapshot));
+      }
       let retry;
-      try { retry = await saveHavenProProfile(userId, retrySnapshot); } catch (e) { retry = { ok: false, reason: "exception" }; }
+      try { retry = await saveHavenProProfile(userId, retrySnapshot, Object.assign({}, opts || {}, { serverWorkspace: server.workspace })); } catch (e) { retry = { ok: false, reason: "exception" }; }
       return retry;
     } finally {
       guardRecoveryRef.current = false;
     }
   }
-  function hydrateSignedInProProfile(userId) {
+  // Phase 1B profile fix: read the signed-in Pro's row and apply it before any
+  // profile write can run. Server values win over local ones. Runs on sign-in,
+  // on session restore, and again (force) whenever Supabase reports the
+  // session, so a long-open tab picks up a profile saved elsewhere.
+  function hydrateSignedInProProfile(userId, opts) {
     if (!userId) return Promise.resolve(false);
-    if (profileHydratedForRef.current === userId) return Promise.resolve(!!profileHydrateResultRef.current);
-    if (profileHydratePromiseRef.current && profileHydrateUserRef.current === userId) {
+    const force = !!(opts && opts.force);
+    if (profileHydrateInflightRef.current && profileHydratePromiseRef.current && profileHydrateUserRef.current === userId) {
       return profileHydratePromiseRef.current;
     }
+    if (!force && profileHydratedForRef.current === userId) return Promise.resolve(!!profileHydrateResultRef.current);
+    // Block profile writes until the server's values are applied.
+    profileHydratedForRef.current = null;
+    profileBaselineRef.current = null;
     profileHydrateUserRef.current = userId;
-    const promise = (async function () {
-      let remote = null;
-      if (typeof fetchHavenProProfile === "function") {
-        try { remote = await fetchHavenProProfile(userId); } catch (e) { remote = null; }
-      }
-      if (profileHydrateUserRef.current !== userId) return false;
-      if (accountSourceRef.current === "local") return false;
-      let applied = false;
-      if (remote && remote.saved && remote.snapshot) {
-        applied = applyHavenProWorkspace(remote.snapshot);
-        if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, remote.snapshot);
-      } else {
-        const snap = typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
-        if (remote && remote.nameOnly) {
-          const parsed = splitHavenDisplayName(remote.nameOnly);
-          if (snap) {
-            if (parsed.first) snap.firstName = parsed.first;
-            if (parsed.last) snap.lastName = parsed.last;
-          } else if (parsed.first) {
-            setFirstName(parsed.first);
-            if (parsed.last) setLastName(parsed.last);
-            applied = true;
+    profileHydrateInflightRef.current = true;
+    let promise = null;
+    promise = (async function () {
+      try {
+        // A save already in flight finishes first, so the read below includes it.
+        try { await profileWriteChainRef.current; } catch (e) { /* ignore */ }
+        let remote = null;
+        if (typeof fetchHavenProProfile === "function") {
+          try { remote = await fetchHavenProProfile(userId); } catch (e) { remote = null; }
+        }
+        if (profileHydrateUserRef.current !== userId) return false;
+        if (accountSourceRef.current === "local") return false;
+        let applied = false;
+        if (remote && remote.saved && remote.snapshot) {
+          const snap = Object.assign({}, remote.snapshot);
+          // Saved city with no point: fill in the point only (never the city,
+          // never over a point saved elsewhere; a failed lookup writes nothing).
+          const city = snap.homeCity ? String(snap.homeCity).trim() : "";
+          if (city && (snap.operatingLat == null || snap.operatingLng == null) && Object.prototype.hasOwnProperty.call(snap, "operatingLat") && typeof havenBackfillOperatingCoordinates === "function") {
+            let fix = null;
+            try { fix = await havenBackfillOperatingCoordinates(userId, city); } catch (e) { fix = null; }
+            if (profileHydrateUserRef.current !== userId) return false;
+            if (fix && fix.ok) {
+              snap.operatingLat = fix.lat;
+              snap.operatingLng = fix.lng;
+            }
           }
+          applied = applyHavenProWorkspace(snap);
+          if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(userId, snap);
+        } else {
+          // Phase 1B L5: a row with no saved profile shows the server state
+          // (Create Your Profile). The device cache is never applied over it
+          // and never uploaded; nothing is written until the Pro taps Save.
+          // Only when the server could not be read is the cache shown (no write).
+          const serverEmpty = !!(remote && remote.ok);
+          const snap = !serverEmpty && typeof loadHavenProWorkspace === "function" ? loadHavenProWorkspace(userId) : null;
+          if (remote && remote.nameOnly) {
+            const parsed = splitHavenDisplayName(remote.nameOnly);
+            if (parsed.first) {
+              setFirstName(parsed.first);
+              if (parsed.last) setLastName(parsed.last);
+              applied = true;
+            }
+          }
+          if (snap) applied = applyHavenProWorkspace(snap) || applied;
         }
-        if (snap) applied = applyHavenProWorkspace(snap) || applied;
-        if (remote && remote.writable && snap && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snap) && typeof saveHavenProProfile === "function") {
-          try { await saveProProfileWithGuardRecovery(userId, snap); } catch (e) { /* cache remains until the row accepts the write */ }
+        if (profileHydrateUserRef.current === userId) {
+          profileHydratedForRef.current = userId;
+          profileHydrateResultRef.current = !!applied;
+          profileBaselineRef.current = null;
+          // Re-render so the persist effect records the applied state as the baseline.
+          setProfileSyncEpoch(n => n + 1);
         }
+        return applied;
+      } finally {
+        if (profileHydratePromiseRef.current === promise) profileHydrateInflightRef.current = false;
       }
-      if (profileHydrateUserRef.current === userId) {
-        profileHydratedForRef.current = userId;
-        profileHydrateResultRef.current = !!applied;
-      }
-      return applied;
     })();
     profileHydratePromiseRef.current = promise;
     return promise;
   }
   // Mirror a real session into the local account flag. Never overwrites a loaded demo profile.
   // Restores the local workspace for this uid so a refresh does not drop into Create Your Profile.
-  function applyAuthSession(session) {
+  function applyAuthSession(session, event) {
     const next = sessionToAuthState(session);
     setAuthSession(next);
     if (!next) return;
@@ -2575,6 +2771,10 @@ function HavenProApp() {
     if (next.id && workspaceAppliedForRef.current !== next.id) {
       workspaceAppliedForRef.current = next.id;
       hydrateSignedInProProfile(next.id);
+    } else if (next.id && event !== "TOKEN_REFRESHED") {
+      // Phase 1B profile fix: SIGNED_IN (e.g. a long-open tab regaining focus)
+      // or any other session load re-reads the server profile before any write.
+      hydrateSignedInProProfile(next.id, { force: true });
     }
   }
   function clearAuthLinkedAccount() {
@@ -2590,6 +2790,9 @@ function HavenProApp() {
     profileHydrateResultRef.current = false;
     profileHydratePromiseRef.current = null;
     profileHydrateUserRef.current = null;
+    profileHydrateInflightRef.current = false;
+    profileBaselineRef.current = null;
+    latestProfileSnapshotRef.current = null;
     if (accountSourceRef.current !== "auth") return;
     accountSourceRef.current = null;
     setAccountStatus("signed_out");
@@ -2788,8 +2991,8 @@ function HavenProApp() {
       setWelcomeAuthView("signIn");
     }
     if (!authUnsubscribeRef.current) {
-      authUnsubscribeRef.current = subscribeHavenAuth(function (next) {
-        if (next) applyAuthSession(next);
+      authUnsubscribeRef.current = subscribeHavenAuth(function (next, event) {
+        if (next) applyAuthSession(next, event);
         else clearAuthLinkedAccount();
       });
     }
@@ -2833,18 +3036,108 @@ function HavenProApp() {
     })();
   }, [authSession && authSession.id]);
 
-  // Cache locally and write the signed-in Pro's own profiles row.
-  // Wait until hydrate finishes so a blank first paint cannot overwrite a saved profile.
+  // Phase 1B profile fix: one profile save. Sends only the fields that differ
+  // from the baseline (the server's values as last loaded or saved), merged
+  // into the server's current pro_workspace. A city that does not resolve to
+  // a point is not saved: the previous city and point come back and the user
+  // sees HAVEN_GEOCODE_FAILED_COPY.
+  async function runProfileSync(userId) {
+    if (!userId || profileHydratedForRef.current !== userId || profileHydrateUserRef.current !== userId) return;
+    if (accountSourceRef.current === "local") return;
+    const base = profileBaselineRef.current;
+    const next = latestProfileSnapshotRef.current;
+    if (!base || !next) return;
+    const changes = havenProfileChanges(base, next);
+    if (!Object.keys(changes).length) return;
+    if (typeof saveHavenProProfile !== "function") return;
+    if (typeof havenSnapshotHasSavedProfile === "function" && !havenSnapshotHasSavedProfile(next)) return;
+    let res = null;
+    try { res = await saveProProfileWithGuardRecovery(userId, changes); } catch (e) { res = null; }
+    if (profileHydrateUserRef.current !== userId) return;
+    if (res && res.ok && res.written && profileBaselineRef.current) {
+      profileBaselineRef.current = Object.assign({}, profileBaselineRef.current, res.written);
+      const w = res.written;
+      if (Object.prototype.hasOwnProperty.call(w, "operatingLat") && latestProfileSnapshotRef.current && String(latestProfileSnapshotRef.current.homeCity || "").trim() === String(w.homeCity || "").trim()) {
+        setOperatingLat(w.operatingLat);
+        setOperatingLng(w.operatingLng);
+      }
+    }
+    if (res && !res.ok && res.readFailed) showToast(HAVEN_PROFILE_READ_FAILED_COPY);
+    if (res && res.geocodeFailed) {
+      const latest = latestProfileSnapshotRef.current;
+      // Put the previous city and point back, unless the user already typed another city.
+      if (latest && latest.homeCity === changes.homeCity && profileBaselineRef.current) {
+        const prev = profileBaselineRef.current;
+        const prevCity = typeof prev.homeCity === "string" ? prev.homeCity : "";
+        operatingCityRef.current = prevCity.trim();
+        setHomeCity(prevCity);
+        setOperatingLat(prev.operatingLat == null ? null : prev.operatingLat);
+        setOperatingLng(prev.operatingLng == null ? null : prev.operatingLng);
+      }
+      showToast(HAVEN_GEOCODE_FAILED_COPY);
+    }
+  }
+  // Phase 1B follow-up: save the given profile values now, through the same
+  // read-then-merge path, and report the result so the caller can keep its
+  // form open on failure. Signed-out / local accounts: nothing to save here.
+  async function saveProfileNow(overrides, opts) {
+    const userId = authSession && authSession.id;
+    if (!userId || accountSourceRef.current === "local" || profileHydratedForRef.current !== userId || !profileBaselineRef.current) {
+      return { ok: true, skipped: true };
+    }
+    let out = null;
+    const run = async function () {
+      if (profileHydrateUserRef.current !== userId || !profileBaselineRef.current) { out = { ok: false, reason: "not_ready" }; return; }
+      const next = Object.assign({}, latestProfileSnapshotRef.current || buildHavenProWorkspaceSnapshot(), overrides || {});
+      const changes = havenProfileChanges(profileBaselineRef.current, next, opts);
+      if (!Object.keys(changes).length) { out = { ok: true, written: {} }; return; }
+      let res = null;
+      try { res = await saveProProfileWithGuardRecovery(userId, changes); } catch (e) { res = null; }
+      out = res || { ok: false, reason: "exception" };
+      if (out.ok && out.written && profileBaselineRef.current) {
+        profileBaselineRef.current = Object.assign({}, profileBaselineRef.current, out.written);
+      }
+    };
+    const chain = profileWriteChainRef.current.then(run).catch(() => {});
+    profileWriteChainRef.current = chain;
+    await chain;
+    return out || { ok: false, reason: "exception" };
+  }
+  function profileSaveErrorFor(res) {
+    return res && res.readFailed ? HAVEN_PROFILE_READ_FAILED_COPY : HAVEN_PROFILE_SAVE_FAILED_COPY;
+  }
+  function profileSaveErrorBanner(where, onRetry) {
+    if (!profileSaveError || profileSaveError.where !== where) return null;
+    return (
+      <div role="alert" style={{ margin: "0 0 14px", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13.5, fontWeight: 600, fontFamily: FONT }}>
+        <div style={{ marginBottom: 10 }}>{profileSaveError.message}</div>
+        <button onClick={onRetry} disabled={profileSaveBusy} style={{ border: `1px solid ${T.pg}`, background: "none", color: T.pg, fontWeight: 800, fontSize: 14, fontFamily: FONT, cursor: "pointer", padding: "10px 16px", borderRadius: 10, minHeight: 44 }}>{profileSaveBusy ? "Retrying…" : "Retry"}</button>
+      </div>
+    );
+  }
+  function requestProfileSync(userId) {
+    const chain = profileWriteChainRef.current.then(() => runProfileSync(userId)).catch(() => {});
+    profileWriteChainRef.current = chain;
+    return chain;
+  }
+
+  // Cache locally and save the user's profile edits to their own profiles row.
+  // Nothing is written until hydrate has applied the server's values, and the
+  // first run after a hydrate only records the baseline (no write on load).
   useEffect(() => {
     if (!authSession || !authSession.id) return;
     if (accountSourceRef.current === "local") return;
     if (profileHydratedForRef.current !== authSession.id) return;
     const snapshot = buildHavenProWorkspaceSnapshot();
+    latestProfileSnapshotRef.current = snapshot;
     if (typeof saveHavenProWorkspace === "function") saveHavenProWorkspace(authSession.id, snapshot);
-    if (typeof saveHavenProProfile === "function" && typeof havenSnapshotHasSavedProfile === "function" && havenSnapshotHasSavedProfile(snapshot)) {
-      saveProProfileWithGuardRecovery(authSession.id, snapshot);
+    if (!profileBaselineRef.current) {
+      profileBaselineRef.current = snapshot;
+      return;
     }
+    requestProfileSync(authSession.id);
   }, [
+    profileSyncEpoch,
     authSession,
     onboardingStatus,
     onboardingStep,
@@ -3735,8 +4028,8 @@ function HavenProApp() {
     setQaBusy(true);
     let res = null;
     try {
-      const snapshot = Object.assign({}, buildHavenProWorkspaceSnapshot(), patch);
-      res = await saveHavenProProfile(authSession.id, snapshot);
+      // Only the QA-changed provider sections, merged into the server's workspace.
+      res = await saveHavenProProfile(authSession.id, Object.assign({}, patch));
     } catch (e) {
       res = null;
     }
@@ -3745,6 +4038,7 @@ function HavenProApp() {
       showToast("Haven didn't accept that QA change");
       return false;
     }
+    if (profileBaselineRef.current && res.written) profileBaselineRef.current = Object.assign({}, profileBaselineRef.current, res.written);
     if (patch.identityVerification) setIdentityVerification(patch.identityVerification);
     if (patch.backgroundCheck) setBackgroundCheck(patch.backgroundCheck);
     if (patch.payoutAccount) setPayoutAccount(patch.payoutAccount);
@@ -3866,7 +4160,41 @@ function HavenProApp() {
     setEditDraft({ firstName, lastName, about, homeCity, avatarEmoji, avatarPhoto });
     setProfileView("edit");
   }
-  function saveEditProfile() {
+  async function saveEditProfile() {
+    if (!editDraft) return;
+    // Phase 1B: a new city is accepted only if it resolves to a point. If it
+    // doesn't, nothing is saved, the form stays open, and the profile keeps
+    // the previous city and point.
+    const nextCity = String(editDraft.homeCity || "").trim();
+    if (nextCity && nextCity !== String(homeCity || "").trim() && typeof havenCheckOperatingCity === "function") {
+      let found = false;
+      try { found = await havenCheckOperatingCity(nextCity); } catch (e) { found = false; }
+      if (!found) {
+        showToast(HAVEN_GEOCODE_FAILED_COPY);
+        return;
+      }
+    }
+    // Phase 1B follow-up: save from the form, so a failed save keeps it open
+    // with the edits and a Retry (which reads the server again, then saves).
+    const draft = editDraft;
+    if (profileSaveBusy) return;
+    setProfileSaveBusy(true);
+    let res = null;
+    try {
+      res = await saveProfileNow({ firstName: draft.firstName, lastName: draft.lastName, about: draft.about, homeCity: draft.homeCity, avatarEmoji: draft.avatarEmoji });
+    } finally {
+      setProfileSaveBusy(false);
+    }
+    if (!res || !res.ok) {
+      if (res && res.geocodeFailed && !res.readFailed) { setProfileSaveError(null); showToast(HAVEN_GEOCODE_FAILED_COPY); return; }
+      setProfileSaveError({ where: "edit", message: profileSaveErrorFor(res) });
+      return;
+    }
+    setProfileSaveError(null);
+    if (res.written && Object.prototype.hasOwnProperty.call(res.written, "operatingLat")) {
+      setOperatingLat(res.written.operatingLat);
+      setOperatingLng(res.written.operatingLng);
+    }
     setFirstName(editDraft.firstName);
     setLastName(editDraft.lastName);
     setAbout(editDraft.about);
@@ -3878,6 +4206,7 @@ function HavenProApp() {
     showToast("Profile updated");
   }
   function cancelEditProfile() {
+    setProfileSaveError(null);
     setEditDraft(null);
     setProfileView("main");
   }
@@ -5892,6 +6221,7 @@ function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(cancelEditProfile)}>
         {subScreenHeader("Edit Profile", cancelEditProfile, saveEditProfile)}
         <div style={{ padding: "0 20px 32px" }}>
+          {profileSaveErrorBanner("edit", saveEditProfile)}
           <div style={{ marginBottom: 18 }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 }}>Profile Photo</div>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
@@ -6380,6 +6710,7 @@ function HavenProApp() {
     }
     return onboardingChrome("Create Your Profile", "Haven Pro represents you as an individual — no business info needed.", (
       <>
+        {profileSaveErrorBanner("onboarding", continueFromCreateProfile)}
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 20 }}>
           <label style={{ cursor: "pointer" }}>
             <input type="file" accept="image/*" onChange={handlePhotoUpload} style={{ display: "none" }} />
@@ -6401,7 +6732,38 @@ function HavenProApp() {
           />
         </div>
       </>
-    ), { enabled: !!homeCity.trim() });
+    ), { enabled: !!homeCity.trim(), onClick: continueFromCreateProfile });
+  }
+  // Phase 1B: the city must resolve to a point before onboarding moves on;
+  // otherwise the user sees HAVEN_GEOCODE_FAILED_COPY and stays here.
+  async function continueFromCreateProfile() {
+    const city = String(homeCity || "").trim();
+    if (!city) return;
+    if (typeof havenCheckOperatingCity === "function") {
+      let found = false;
+      try { found = await havenCheckOperatingCity(city); } catch (e) { found = false; }
+      if (!found) {
+        showToast(HAVEN_GEOCODE_FAILED_COPY);
+        return;
+      }
+    }
+    // Phase 1B follow-up: save this step's city (and the rest of the step)
+    // before moving on. A failed save stays here with the values and a Retry.
+    if (profileSaveBusy) return;
+    setProfileSaveBusy(true);
+    let res = null;
+    try { res = await saveProfileNow({}, { includeCity: true }); } finally { setProfileSaveBusy(false); }
+    if (!res || !res.ok) {
+      if (res && res.geocodeFailed && !res.readFailed) { setProfileSaveError(null); showToast(HAVEN_GEOCODE_FAILED_COPY); return; }
+      setProfileSaveError({ where: "onboarding", message: profileSaveErrorFor(res) });
+      return;
+    }
+    setProfileSaveError(null);
+    if (res.written && Object.prototype.hasOwnProperty.call(res.written, "operatingLat")) {
+      setOperatingLat(res.written.operatingLat);
+      setOperatingLng(res.written.operatingLng);
+    }
+    onboardingNext();
   }
 
   function onboardingChooseCategoriesScreen() {
