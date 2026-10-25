@@ -598,7 +598,9 @@ async function checkGetUserNetworkFailure() {
     assertErrorScreen(app.window, "still offline");
     mode = "online";
     clickButton(app.window, "Retry");
-    await waitFor(app.window, t => t.includes("My Jobs"), "app after getUser confirms");
+    // The mocked profiles read is empty, so the signed-in Pro sees the
+    // server state (L5: the device cache is not applied over it).
+    await waitFor(app.window, t => t.includes("Signed in") && t.includes("Continue"), "signed-in app after getUser confirms");
     assert.ok(!rootText(app.window).includes(ERROR_TITLE));
   } finally {
     try { app.window.close(); } catch (e) { /* ignore */ }
