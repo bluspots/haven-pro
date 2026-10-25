@@ -688,6 +688,40 @@ async function resolveAssignedJobLocation(jobId, claimRow) {
     return fromClaim || { lat: null, lng: null };
   }
 }
+function materialsCapFromRow(row) {
+  if (!row) return null;
+  const num = (v) => v === null || v === void 0 || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+  const approved = num(row.materials_approved_cents);
+  const reimbursed = num(row.materials_reimbursed_cents) || 0;
+  if (approved !== null) return { maxCents: Math.max(0, approved - reimbursed), source: "approved" };
+  const estimate = num(row.materials_estimate_cents);
+  if (row.status === "materials_approved" && estimate !== null && estimate > 0) return { maxCents: estimate, source: "request" };
+  return null;
+}
+async function fetchMaterialsReimbursementCap(jobId) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return null;
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok) return null;
+  const base = `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}&pro_id=eq.${encodeURIComponent(actor.proId)}&select=`;
+  const headers = { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" };
+  const read = async (cols) => {
+    const res = await fetch(base + cols, { method: "GET", headers });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { missingColumn: /42703/.test(text), row: null };
+    }
+    const rows = await res.json();
+    return { missingColumn: false, row: Array.isArray(rows) ? rows[0] || null : null };
+  };
+  try {
+    let r = await read("id,status,materials_approved_cents,materials_reimbursed_cents,materials_estimate_cents");
+    if (r.missingColumn) r = await read("id,status,materials_reimbursed_cents,materials_estimate_cents");
+    return materialsCapFromRow(r.row);
+  } catch (e) {
+    return null;
+  }
+}
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();
   if (!cfg || !looksLikeUuid(jobId)) return null;
@@ -1796,7 +1830,7 @@ function HavenProApp() {
           const record = await finalizeJob({ ...currentJob, convenienceFee: conv }, "materials_declined", { backendStatus, backendRow: row });
           if (!record) return;
           setActiveJobs((prev) => prev.filter((j) => j.id !== job.id));
-          showToast(`Customer declined materials, so the job couldn't be finished. You're paid a $${conv} convenience fee.`);
+          showToast(`Customer declined materials, so the job couldn't be finished. A $${conv} convenience fee applies. Payments aren't processed in the app yet.`);
           setMyJobsStack([{ view: "list" }]);
         } else if ((backendStatus === "in_progress" || backendStatus === "complete") && (currentJob.status === "materials_requested" || currentJob.status === "materials_approved")) {
           if (backendStatus === "in_progress") {
@@ -3103,6 +3137,8 @@ function HavenProApp() {
     }
   }
   async function startDiagnosis(jobId) {
+    const current = activeJobsRef.current.find((j) => j.id === jobId);
+    if (!current || current.status !== "arrived" || !jobRequiresDiagnosis(current)) return;
     await advanceClaimedStatus(jobId, {
       fromStatuses: ["arrived"],
       toStatus: "diagnosing",
@@ -3156,11 +3192,22 @@ function HavenProApp() {
       materialsTimers.current[jobId] = timer;
     }
   }
+  function formatCapDollars(cents) {
+    const d = Math.max(0, Number(cents) || 0) / 100;
+    return Number.isInteger(d) ? String(d) : d.toFixed(2);
+  }
   function openReceiptForm(jobId) {
     const job = activeJobs.find((j) => j.id === jobId);
     const estimate = job && job.pendingMaterialsRequest ? job.pendingMaterialsRequest.totalCost : "";
-    setReceiptDraft({ jobId, cost: estimate ? String(estimate) : "", photo: null });
+    const localCap = job && !isBackendClaimedJob(job) && job.pendingMaterialsRequest && Number(job.pendingMaterialsRequest.totalCost) > 0 ? { maxCents: Math.round(Number(job.pendingMaterialsRequest.totalCost) * 100), source: "request" } : null;
+    const backend = !!job && isBackendClaimedJob(job);
+    setReceiptDraft({ jobId, cost: estimate ? String(estimate) : "", photo: null, cap: backend ? { status: "loading" } : localCap ? { status: "known", ...localCap } : { status: "unknown" } });
     pushMyJobs({ view: "receipt", jobId });
+    if (backend) {
+      fetchMaterialsReimbursementCap(jobId).then((cap) => {
+        setReceiptDraft((prev) => prev && prev.jobId === jobId ? { ...prev, cap: cap ? { status: "known", ...cap } : { status: "unknown" } } : prev);
+      });
+    }
   }
   function cancelReceiptForm() {
     setReceiptDraft(null);
@@ -3172,6 +3219,11 @@ function HavenProApp() {
     const { jobId, cost, photo } = receiptDraft;
     if (!(Number(cost) > 0)) {
       showToast("Enter the actual amount you paid");
+      return;
+    }
+    const cap = receiptDraft.cap;
+    if (cap && cap.status === "known" && Math.round(Number(cost) * 100) > cap.maxCents) {
+      showToast(`That's more than the $${formatCapDollars(cap.maxCents)} the customer approved. Enter $${formatCapDollars(cap.maxCents)} or less.`);
       return;
     }
     if (!photo) {
@@ -3206,7 +3258,7 @@ function HavenProApp() {
       updateActiveJob(jobId, localUpdates);
       setReceiptDraft(null);
       popMyJobs();
-      showToast("Receipt added. Your materials will be reimbursed in full. You can keep working on the job.");
+      showToast("Receipt added. You can keep working on the job.");
     } finally {
       submittingReceiptRef.current = false;
     }
@@ -3904,7 +3956,12 @@ function HavenProApp() {
       reader.onload = () => set("photo", reader.result);
       reader.readAsDataURL(file);
     }
-    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelReceiptForm) }, backHeader("Submit Receipt", cancelReceiptForm), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 } }, "For ", job.title, ". Enter what you actually paid (it can differ from the estimate) and add a photo of the receipt. The customer covers this cost, and you're reimbursed in full with no fee taken out."), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "Actual Cost Paid"), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(cancelReceiptForm) }, backHeader("Submit Receipt", cancelReceiptForm), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 16, lineHeight: 1.5 } }, "For ", job.title, ". Enter what you actually paid and add a photo of the receipt. You can claim up to the amount the customer approved."), (() => {
+      const cap = receiptDraft.cap || { status: "unknown" };
+      const over = cap.status === "known" && Number(receiptDraft.cost) > 0 && Math.round(Number(receiptDraft.cost) * 100) > cap.maxCents;
+      const text = cap.status === "loading" ? "Checking the amount the customer approved…" : cap.status === "known" ? `Customer approved: up to $${formatCapDollars(cap.maxCents)}` : "The amount the customer approved isn't available right now, so the limit can't be shown here.";
+      return /* @__PURE__ */ React.createElement("div", { "data-testid": "receipt-cap", "data-cap-status": cap.status, style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: cap.status === "known" ? T.tx : T.ts, fontFamily: FONT, lineHeight: 1.45 } }, text), over && /* @__PURE__ */ React.createElement("div", { role: "alert", style: { fontSize: 12.5, fontWeight: 700, color: T.emTx, fontFamily: FONT, marginTop: 6 } }, `That's more than the $${formatCapDollars(cap.maxCents)} the customer approved. Enter $${formatCapDollars(cap.maxCents)} or less.`));
+    })(), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 } }, "Actual Cost Paid"), /* @__PURE__ */ React.createElement(
       "input",
       {
         value: receiptDraft.cost,
@@ -3913,7 +3970,11 @@ function HavenProApp() {
         inputMode: "decimal",
         style: { width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 16, fontFamily: FONT, outline: "none" }
       }
-    )), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 } }, "Receipt Photo"), receiptDraft.photo ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } }, /* @__PURE__ */ React.createElement("img", { src: receiptDraft.photo, alt: "Receipt", style: { width: 64, height: 64, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.bd}` } }), /* @__PURE__ */ React.createElement("label", { style: { padding: "9px 14px", borderRadius: 10, border: `1px solid ${T.pg}`, color: T.pg, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Replace", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))) : /* @__PURE__ */ React.createElement("label", { style: { display: "block", textAlign: "center", padding: "18px 0", borderRadius: 14, border: `1.5px dashed ${T.bd}`, color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "📷 Attach Receipt Photo", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))), /* @__PURE__ */ React.createElement("button", { onClick: submitReceipt, style: { width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: "pointer" } }, "Submit Receipt")));
+    )), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: T.ts, fontFamily: FONT, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 } }, "Receipt Photo"), receiptDraft.photo ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } }, /* @__PURE__ */ React.createElement("img", { src: receiptDraft.photo, alt: "Receipt", style: { width: 64, height: 64, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.bd}` } }), /* @__PURE__ */ React.createElement("label", { style: { padding: "9px 14px", borderRadius: 10, border: `1px solid ${T.pg}`, color: T.pg, fontSize: 12.5, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "Replace", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))) : /* @__PURE__ */ React.createElement("label", { style: { display: "block", textAlign: "center", padding: "18px 0", borderRadius: 14, border: `1.5px dashed ${T.bd}`, color: T.ts, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" } }, "📷 Attach Receipt Photo", /* @__PURE__ */ React.createElement("input", { type: "file", accept: "image/*", onChange: handleReceiptUpload, style: { display: "none" } }))), (() => {
+      const cap = receiptDraft.cap || { status: "unknown" };
+      const over = cap.status === "known" && Number(receiptDraft.cost) > 0 && Math.round(Number(receiptDraft.cost) * 100) > cap.maxCents;
+      return /* @__PURE__ */ React.createElement("button", { onClick: submitReceipt, disabled: over, "aria-disabled": over ? "true" : "false", style: { width: "100%", padding: "13px 0", borderRadius: 14, border: "none", background: T.cta, color: "#fff", fontSize: 14.5, fontWeight: 800, fontFamily: FONT, cursor: over ? "not-allowed" : "pointer", opacity: over ? 0.55 : 1 } }, "Submit Receipt");
+    })()));
   }
   function jobCompleteScreen(jobId) {
     const job = completedJobsHistory.find((j) => j.id === jobId);
@@ -4624,7 +4685,7 @@ function HavenProApp() {
   }
   const FAQ_ITEMS = [
     { q: "How is my payout calculated?", a: "Your labor payout is fixed and shown before you accept a job. It's exactly what you receive, with no fee taken out. Tips are 100% yours, and materials you purchase are reimbursed in full. Reimbursement repays what you spent; it isn't extra earnings." },
-    { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and you're paid the $${INSPECTION_VISIT_FEE} inspection fee. If it was a standard job, it ends as not completed and you're paid a $${CONVENIENCE_FEE} convenience fee. Haven keeps nothing either way.` },
+    { q: "What happens if a customer declines materials?", a: `If you were diagnosing the problem, the job ends as an inspection and the $${INSPECTION_VISIT_FEE} inspection fee applies. If it was a standard job, it ends as not completed and a $${CONVENIENCE_FEE} convenience fee applies. Haven keeps nothing either way. Payments aren't processed in the app yet.` },
     { q: "How do I get reimbursed for materials?", a: "After the customer approves your materials request, buy what's listed, then enter what you actually paid and add a photo of the receipt. You're reimbursed the full amount with no fee taken out, even if it differs from your estimate." },
     { q: "Why can't I see certain job categories on my board?", a: "Only jobs in your enabled Work Categories appear. Update them anytime from Profile → Work Categories." }
   ];

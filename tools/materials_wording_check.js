@@ -14,8 +14,10 @@ try {
   ok(!/Materials (reimbursement )?and tips are 100% yours/.test(src), "materials are no longer called 100% yours like tips");
   ok(/Reimbursement repays what you spent; it isn't extra earnings\./.test(src), "Help says reimbursement is repayment, not earnings");
   ok(!/reimbursed (to you )?100%|100% of approved cost|no platform fee|\(Haven \$0\)|reimbursement added, job continues/.test(src), "engineering-style phrases are gone");
-  ok(/you're paid the \$\$\{INSPECTION_VISIT_FEE\} inspection fee/.test(src) && /you're paid a \$\$\{CONVENIENCE_FEE\} convenience fee\. Haven keeps nothing either way\./.test(src), "declined-materials Help answer uses the existing fee constants");
-  ok(/Customer declined materials, so the job couldn't be finished\. You're paid a \$\$\{conv\} convenience fee\./.test(src), "declined toast (backend path) is plain and keeps the backend amount");
+  // FE-07 (founder 2026-10-24): fees are never described as paid while payments don't exist.
+  ok(/the \$\$\{INSPECTION_VISIT_FEE\} inspection fee applies/.test(src) && /a \$\$\{CONVENIENCE_FEE\} convenience fee applies\. Haven keeps nothing either way\. Payments aren't processed in the app yet\./.test(src), "declined-materials Help answer uses the existing fee constants and says fees apply (not paid)");
+  ok(/Customer declined materials, so the job couldn't be finished\. A \$\$\{conv\} convenience fee applies\. Payments aren't processed in the app yet\./.test(src), "declined toast (backend path) is plain, keeps the backend amount, and doesn't say paid");
+  ok(!/You're paid a \$|you're paid (the|a) \$/.test(src), "no 'you're paid' fee wording anywhere");
   ok(/Materials approved for \$\{currentJob\.title\}\. Buy them, then add your receipt to be reimbursed\./.test(src), "approved toast (backend path) is plain");
   ok(/convenience_fee_cents : CONVENIENCE_FEE \* 100/.test(src) && /inspection_fee_cents : Math\.round/.test(src), "fee calculations untouched");
   console.log("OK: materials wording checks passed (" + passed + " assertions).");
