@@ -218,7 +218,8 @@ async function boardAndAcceptCheck(rpcBody, label) {
     const accept = button(w, /^Accept Job$/);
     ok(!!accept, label + ": board job is acceptable without client-side coordinates");
     accept.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
-    await waitFor(w, t => /Open in Maps|Get Directions|city only/.test(t), "en-route view");
+    // Shipped flag on: map panel buttons; flag off: the plain panel. Either way the en-route view.
+    await waitFor(w, t => /Open in Maps|Get Directions|Open in Apple Maps|Google Maps directions|Open in Google Maps|city only/.test(t), "en-route view");
     await sleep(50);
     return { w, calls, href: decodeURIComponent(mapsHref(w)) };
   } catch (e) { w.close(); throw e; }

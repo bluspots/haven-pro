@@ -1912,9 +1912,10 @@ function subscribeHavenAuth(onChange) {
 //   error (Try again), image error (Try again), offline.
 // - No geocoding here (HB-23 open). The static image URL is stable per point.
 //
-// HAVEN_ASSIGNED_JOB_MAP_ENABLED stays false in every committed file. The
-// founder approves turning it on separately after QA.
-const HAVEN_ASSIGNED_JOB_MAP_ENABLED = false;
+// HAVEN_ASSIGNED_JOB_MAP_ENABLED is on: founder approved showing the assigned-job
+// map 2026-11-06 (draft; merge needs separate approval). It shows only the
+// assigned job's destination. No live Pro location, no Customer tracking.
+const HAVEN_ASSIGNED_JOB_MAP_ENABLED = true;
 
 const HAVEN_STATIC_MAP_W = 600;   // CSS px requested (@2x); fixed so the URL is cacheable
 const HAVEN_STATIC_MAP_H = 300;
