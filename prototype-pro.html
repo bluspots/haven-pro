@@ -2061,7 +2061,8 @@ function HavenEnRouteNavigation(props) {
     mapArea,
     h("div", { style: { display: "flex", gap: 8, padding: 12, flexWrap: "wrap" } },
       apple && h("a", { href: apple, target: "_blank", rel: "noopener noreferrer", style: btn(true) }, "Open in Apple Maps"),
-      (point || city) && h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!apple) }, googleLabel)));
+      // Without a point the city search is secondary styling: it is not navigation to the job.
+      (point || city) && h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!!point && !apple) }, googleLabel)));
 }
 
 const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
