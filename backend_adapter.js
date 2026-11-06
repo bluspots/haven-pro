@@ -97,8 +97,11 @@ function mapSupabaseRowToJob(row) {
     radiusCheckedOnServer: true,
     durationMin: undefined,
     city: row.city_label || "",
-    lat: row.lat ?? null,
-    lng: row.lng ?? null,
+    // MAP-05 / contract mapbox-assigned-destination-0030: no table or board row
+    // supplies coordinates. The only exact point is get_assigned_job_destination
+    // (fetchAssignedJobDestination), held in memory by the app per job.
+    lat: null,
+    lng: null,
     requested: "ASAP",
     emergency: !!row.emergency,
     postedAt: row.posted_at ? Date.parse(row.posted_at) : Date.now(),
@@ -109,9 +112,10 @@ function mapSupabaseRowToJob(row) {
 // shown by city + server-provided distance only. Exact lat/lng are never kept
 // for jobs this Pro isn't assigned to, even while the RPC still returns them,
 // so nothing can compute a distance, pin or route from them. The exact point
-// comes only from the assigned-job row after acceptance (see
-// resolveAssignedJobLocation). An approximate-area field is not read until the
-// backend deploys it.
+// comes only from get_assigned_job_destination after acceptance (see
+// fetchAssignedJobDestination). After 0030 the board RPC returns null lat/lng
+// and distance_mi rounded to 0.5 mi from a grid-cell centre; that rounding is
+// intended and is not corrected here.
 function mapBoardRowToJob(row) {
   const job = mapSupabaseRowToJob(row);
   job.lat = null;
@@ -448,38 +452,62 @@ function isBackendClaimedJob(job) {
   return !!job && !!getSupabaseConfig() && looksLikeUuid(job.id) && !!job.backendClaimed;
 }
 
-// PRO-B30 / contract §2: the exact service point is read only for a job this Pro
-// is assigned to: from pro_claim_job's returned row, else from the assigned
-// jobs row (jobs?id=..&pro_id=<me>). Returns { lat, lng, city } with nulls when
-// the server doesn't provide them (never invented).
-function locationFieldsFromRow(row) {
-  if (!row) return null;
-  const lat = row.lat != null && row.lat !== "" && Number.isFinite(Number(row.lat)) ? Number(row.lat) : null;
-  const lng = row.lng != null && row.lng !== "" && Number.isFinite(Number(row.lng)) ? Number(row.lng) : null;
-  const out = { lat: lat != null && lng != null ? lat : null, lng: lat != null && lng != null ? lng : null };
-  if (row.city_label) out.city = row.city_label;
+// MAP-05 (contract backend/contracts/mapbox-assigned-destination-0030.md, live
+// 2026-11-05): the ONLY source of a job's exact destination for navigation is
+//   POST /rest/v1/rpc/get_assigned_job_destination { p_job_id }
+// with the signed-in user's JWT. The server checks the caller is the assigned
+// Pro and the job is active, and returns the stored point unrounded.
+// No session -> no call. Results are normalised to:
+//   { state: "ok", point: { lat, lng }, address: { line, unit, access_notes }, city }
+//   { state: "error", error: "not_authenticated" | "not_found" | "status_not_active" | "no_coordinates" | "network", city? }
+// Never cached to storage; the app keeps it in memory per job id.
+const HAVEN_DESTINATION_ERRORS = ["not_authenticated", "not_found", "status_not_active", "no_coordinates"];
+function normaliseAssignedDestination(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { state: "error", error: "network" };
+  if (body.ok === true) {
+    const d = body.destination || {};
+    const lat = typeof d.lat === "number" ? d.lat : (d.lat != null && d.lat !== "" ? Number(d.lat) : NaN);
+    const lng = typeof d.lng === "number" ? d.lng : (d.lng != null && d.lng !== "" ? Number(d.lng) : NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return { state: "error", error: "no_coordinates", city: body.city_label || "" };
+    }
+    const a = body.address && typeof body.address === "object" ? body.address : {};
+    const text = v => (typeof v === "string" && v.trim() ? v.trim() : null);
+    return {
+      state: "ok",
+      point: { lat: lat, lng: lng },
+      address: { line: text(a.line), unit: text(a.unit), access_notes: text(a.access_notes) },
+      city: body.city_label || "",
+    };
+  }
+  const code = HAVEN_DESTINATION_ERRORS.includes(body.error) ? body.error : "network";
+  const out = { state: "error", error: code };
+  if (body.city_label) out.city = body.city_label;
   return out;
 }
-async function resolveAssignedJobLocation(jobId, claimRow) {
-  const fromClaim = locationFieldsFromRow(claimRow);
-  if (fromClaim && fromClaim.lat != null) return fromClaim;
+async function fetchAssignedJobDestination(jobId) {
   const cfg = getSupabaseConfig();
-  if (!cfg || !looksLikeUuid(jobId)) return fromClaim || { lat: null, lng: null };
+  if (!cfg || !looksLikeUuid(jobId)) return { state: "error", error: "not_found" };
   const actor = await resolveHavenJobWriteAuth(cfg);
-  if (!actor.ok) return fromClaim || { lat: null, lng: null };
-  const url =
-    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}` +
-    `&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,lat,lng,city_label`;
+  if (!actor.ok || actor.mode !== "session") return { state: "error", error: "not_authenticated" };
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" },
+    const res = await fetch(`${cfg.url}/rest/v1/rpc/get_assigned_job_destination`, {
+      method: "POST",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ p_job_id: jobId }),
     });
-    if (!res.ok) return fromClaim || { lat: null, lng: null };
-    const rows = await res.json();
-    return locationFieldsFromRow(Array.isArray(rows) ? rows[0] : null) || fromClaim || { lat: null, lng: null };
+    if (res.status === 401 || res.status === 403) return { state: "error", error: "not_authenticated" };
+    if (!res.ok) return { state: "error", error: "network" };
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    return normaliseAssignedDestination(body);
   } catch (e) {
-    return fromClaim || { lat: null, lng: null };
+    return { state: "error", error: "network" };
   }
 }
 

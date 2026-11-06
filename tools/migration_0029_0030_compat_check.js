@@ -8,8 +8,9 @@
  *
  * PRO-B30 (before 0030): the job board needs only the server's distance_mi.
  *   Board rows never keep exact lat/lng in app state, even while the RPC still
- *   sends them. After accepting, the exact point comes only from the assigned
- *   row: pro_claim_job's returned row, else jobs?id=..&pro_id=<me>.
+ *   sends them. After accepting, the exact point comes only from the
+ *   get_assigned_job_destination RPC (MAP-05 / 0030, live 2026-11-05): never
+ *   the board row, the claim row or a jobs table read.
  * PRO-S29 (before 0029): the terminal sync never sends fee fields; it skips the
  *   PATCH when the server already shows the terminal status, and after an
  *   unconfirmed write it re-reads the server status.
@@ -56,7 +57,7 @@ function loadAdapter(fetchImpl) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  const names = ["fetchPostedJobsFromSupabase", "claimJobOnSupabase", "resolveAssignedJobLocation", "bestEffortPatchTerminalStatus"];
+  const names = ["fetchPostedJobsFromSupabase", "claimJobOnSupabase", "fetchAssignedJobDestination", "bestEffortPatchTerminalStatus"];
   vm.runInContext(read("backend_adapter.js") + "\n;globalThis.__api = { " + names.join(", ") + " };", sandbox, { filename: "backend_adapter.js" });
   return sandbox.__api;
 }
@@ -90,29 +91,16 @@ async function adapterChecks() {
   }
   console.log("PRO-B30 assigned location (adapter):");
   {
-    const { hits, fetchImpl } = recorder(h => h.url.includes("/rpc/pro_claim_job")
-      ? json(200, [{ id: JOB, status: "en_route", pro_id: PRO_ID, lat: 28.54, lng: -81.38, city_label: "Orlando" }])
-      : json(200, []));
+    const { hits, fetchImpl } = recorder(h => h.url.includes("/rpc/get_assigned_job_destination")
+      ? json(200, { ok: true, job_id: JOB, status: "en_route", destination: { lat: 28.538336, lng: -81.379234, source: "stored_job_point" }, address: { line: null, unit: null, access_notes: null }, city_label: "Orlando, FL" })
+      : json(200, [{ id: JOB, status: "en_route", pro_id: PRO_ID, lat: 10.5, lng: 20.5, city_label: "Orlando" }]));
     const api = loadAdapter(fetchImpl);
     const claim = await api.claimJobOnSupabase({ id: JOB });
-    ok(claim.ok && claim.row && claim.row.lat === 28.54, "pro_claim_job's returned row is kept on the claim result");
+    ok(claim.ok, "claim still succeeds");
     hits.length = 0;
-    const loc = await api.resolveAssignedJobLocation(JOB, claim.row);
-    ok(loc.lat === 28.54 && loc.lng === -81.38 && hits.length === 0, "exact point comes from the claimed row (no extra read)");
-  }
-  {
-    const { hits, fetchImpl } = recorder(h => json(200, [{ id: JOB, lat: "28.55", lng: "-81.37", city_label: "Orlando" }]));
-    const api = loadAdapter(fetchImpl);
-    const loc = await api.resolveAssignedJobLocation(JOB, { id: JOB, status: "en_route", pro_id: PRO_ID });
-    ok(hits.length === 1 && hits[0].url.includes("id=eq." + JOB) && hits[0].url.includes("pro_id=eq." + PRO_ID) && hits[0].url.includes("select=id,lat,lng,city_label"),
-      "without coordinates on the claim row, the assigned jobs row is read (scoped to this Pro)");
-    ok(loc.lat === 28.55 && loc.lng === -81.37, "assigned-row coordinates are used");
-  }
-  {
-    const { fetchImpl } = recorder(() => json(200, [{ id: JOB, lat: null, lng: null }]));
-    const api = loadAdapter(fetchImpl);
-    const loc = await api.resolveAssignedJobLocation(JOB, null);
-    ok(loc.lat === null && loc.lng === null, "no server coordinates → none invented");
+    const d = await api.fetchAssignedJobDestination(JOB);
+    ok(d.state === "ok" && d.point.lat === 28.538336 && d.point.lng === -81.379234 && hits.length === 1 && hits[0].method === "POST" && /\/rpc\/get_assigned_job_destination$/.test(hits[0].url),
+      "the exact point comes only from get_assigned_job_destination (one POST; never the claim row)");
   }
 
   console.log("PRO-S29 terminal sync (adapter):");
@@ -213,14 +201,15 @@ async function waitFor(w, pred, label, tries) {
 function button(w, re) { return Array.from(w.document.querySelectorAll("button")).find(b => re.test((b.textContent || "").trim())); }
 function mapsHref(w) { const a = Array.from(w.document.querySelectorAll("a")).find(x => /google\.com\/maps|maps\.apple\.com/.test(x.href)); return a ? a.href : ""; }
 
-async function boardAndAcceptCheck(claimRowCoords, assignedRowCoords, label) {
+async function boardAndAcceptCheck(rpcBody, label) {
   const { window: w, calls } = await renderApp(c => {
     if (c.url.includes("/rpc/jobs_posted_within_radius")) {
-      // Pre-0030 server shape on purpose: the board row still carries (different) exact coordinates.
+      // Coordinates on the board row on purpose: they must never be used.
       return json(200, [boardRow({ distance_mi: 2.5, lat: 10.111, lng: 20.222 })]);
     }
-    if (c.url.includes("/rpc/pro_claim_job")) return json(200, [Object.assign({ id: JOB, status: "en_route", pro_id: PRO_ID, city_label: "Orlando" }, claimRowCoords)]);
-    if (c.url.includes("select=id,lat,lng,city_label")) return json(200, [Object.assign({ id: JOB, city_label: "Orlando" }, assignedRowCoords)]);
+    // ...nor the claim row's.
+    if (c.url.includes("/rpc/pro_claim_job")) return json(200, [{ id: JOB, status: "en_route", pro_id: PRO_ID, city_label: "Orlando", lat: 30.333, lng: -80.444 }]);
+    if (c.url.includes("/rpc/get_assigned_job_destination")) return json(200, rpcBody);
     return null;
   });
   try {
@@ -229,7 +218,7 @@ async function boardAndAcceptCheck(claimRowCoords, assignedRowCoords, label) {
     const accept = button(w, /^Accept Job$/);
     ok(!!accept, label + ": board job is acceptable without client-side coordinates");
     accept.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
-    await waitFor(w, t => t.includes("Open in Maps"), "en-route view");
+    await waitFor(w, t => /Open in Maps|Get Directions|city only/.test(t), "en-route view");
     await sleep(50);
     return { w, calls, href: decodeURIComponent(mapsHref(w)) };
   } catch (e) { w.close(); throw e; }
@@ -238,20 +227,15 @@ async function boardAndAcceptCheck(claimRowCoords, assignedRowCoords, label) {
 async function appChecks() {
   console.log("PRO-B30 accept flow (app):");
   {
-    const { w, href } = await boardAndAcceptCheck({ lat: 28.54, lng: -81.38 }, {}, "claim row has the point");
-    ok(href.includes("28.54,-81.38"), "Open in Maps uses the claimed row's exact point");
-    ok(!href.includes("10.111") && !href.includes("20.222"), "the board row's coordinates are never used");
+    const { w, calls, href } = await boardAndAcceptCheck({ ok: true, job_id: JOB, status: "en_route", destination: { lat: 28.538336, lng: -81.379234, source: "stored_job_point" }, address: { line: null, unit: null, access_notes: null }, city_label: "Orlando, FL" }, "RPC has the point");
+    ok(calls.filter(c => c.url.includes("/rpc/get_assigned_job_destination")).length === 1, "one destination lookup after the claim");
+    ok(href.includes("28.538336,-81.379234"), "Open in Maps uses the RPC's exact point");
+    ok(!href.includes("10.111") && !href.includes("20.222") && !href.includes("30.333"), "the board row's and the claim row's coordinates are never used");
     w.close();
   }
   {
-    const { w, calls, href } = await boardAndAcceptCheck({}, { lat: 28.55, lng: -81.37 }, "assigned row has the point");
-    ok(calls.some(c => c.method === "GET" && c.url.includes("select=id,lat,lng,city_label") && c.url.includes("pro_id=eq." + PRO_ID)), "accept re-reads the assigned row when the claim row has no point");
-    ok(href.includes("28.55,-81.37") && !href.includes("10.111"), "Open in Maps uses the assigned row's point");
-    w.close();
-  }
-  {
-    const { w, href } = await boardAndAcceptCheck({}, { lat: null, lng: null }, "no point anywhere");
-    ok(!/\d+\.\d+,-?\d+\.\d+/.test(href) && !href.includes("10.111"), "no exact point from the server → Maps falls back to the city, nothing invented");
+    const { w, href } = await boardAndAcceptCheck({ ok: false, error: "no_coordinates", city_label: "Orlando, FL" }, "no point from the RPC");
+    ok(!/\d+\.\d+,-?\d+\.\d+/.test(href) && !href.includes("30.333"), "no exact point from the RPC → city-only search, nothing invented");
     w.close();
   }
 
@@ -292,7 +276,7 @@ function sourceChecks() {
   ok(/j\.status === "diagnosing" \|\| j\.status === "materials_requested" \|\| j\.status === "materials_approved"/.test(jsx), "active-job poll includes diagnosing");
   for (const built of ["prototype-pro.html", "index.html"]) {
     const html = read(built);
-    ok(/mapBoardRowToJob/.test(html) && /resolveAssignedJobLocation/.test(html), built + " is rebuilt with these changes");
+    ok(/mapBoardRowToJob/.test(html) && /get_assigned_job_destination/.test(html) && !/resolveAssignedJobLocation/.test(html), built + " is rebuilt with these changes");
   }
 }
 
