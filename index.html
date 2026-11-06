@@ -1680,6 +1680,20 @@ function havenDestinationMessage(dest) {
 function havenCityOnlyLinkLabel(city) {
   return "Search " + city + " in Google Maps (city only, not the job location)";
 }
+const HAVEN_DESTINATION_ACTIVE = ["en_route", "arrived", "diagnosing", "materials_requested", "materials_approved", "in_progress"];
+function havenDestinationEligible(job, backendConfigured) {
+  return !!backendConfigured && !!job && !!job.backendClaimed && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(job.id || "")) && HAVEN_DESTINATION_ACTIVE.indexOf(job.status) !== -1;
+}
+function havenPruneDestinations(entries, activeJobs, backendConfigured) {
+  const keep = new Set((activeJobs || []).filter((j) => havenDestinationEligible(j, backendConfigured)).map((j) => String(j.id)));
+  const out = {};
+  let changed = false;
+  Object.keys(entries || {}).forEach((id) => {
+    if (keep.has(id)) out[id] = entries[id];
+    else changed = true;
+  });
+  return changed ? out : entries;
+}
 function havenIsOnline() {
   try {
     return typeof navigator === "undefined" || navigator.onLine !== false;
@@ -2110,7 +2124,7 @@ function HavenProApp() {
     setDestinations({});
   }
   function destinationEligible(job) {
-    return !!job && !!job.backendClaimed && looksLikeUuid(job.id) && ACTIVE_BLOCK_STATUSES.has(job.status) && !!getSupabaseConfig();
+    return havenDestinationEligible(job, !!getSupabaseConfig());
   }
   function destinationKey(job) {
     return `${job.id}:${job.status}`;
@@ -2138,13 +2152,8 @@ function HavenProApp() {
     if (result.state === "error" && result.error === "not_found") reloadActiveJobs();
   }
   useEffect(() => {
-    const keep = new Set(activeJobs.filter(destinationEligible).map((j) => j.id));
-    const stale = Object.keys(destinationsRef.current).filter((id) => !keep.has(id));
-    if (stale.length) {
-      const next = { ...destinationsRef.current };
-      stale.forEach((id) => {
-        delete next[id];
-      });
+    const next = havenPruneDestinations(destinationsRef.current, activeJobs, !!getSupabaseConfig());
+    if (next !== destinationsRef.current) {
       destinationsRef.current = next;
       setDestinations(next);
     }

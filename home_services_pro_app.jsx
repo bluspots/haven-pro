@@ -453,7 +453,7 @@ export default function HavenProApp() {
     setDestinations({});
   }
   function destinationEligible(job) {
-    return !!job && !!job.backendClaimed && looksLikeUuid(job.id) && ACTIVE_BLOCK_STATUSES.has(job.status) && !!getSupabaseConfig();
+    return havenDestinationEligible(job, !!getSupabaseConfig());
   }
   function destinationKey(job) { return `${job.id}:${job.status}`; }
   // The point for this job's CURRENT status, or null. Nothing else is ever a destination.
@@ -481,11 +481,8 @@ export default function HavenProApp() {
   }
   // Leaving the active set (or SIM jobs) clears any stored point; so does signing out.
   useEffect(() => {
-    const keep = new Set(activeJobs.filter(destinationEligible).map(j => j.id));
-    const stale = Object.keys(destinationsRef.current).filter(id => !keep.has(id));
-    if (stale.length) {
-      const next = { ...destinationsRef.current };
-      stale.forEach(id => { delete next[id]; });
+    const next = havenPruneDestinations(destinationsRef.current, activeJobs, !!getSupabaseConfig());
+    if (next !== destinationsRef.current) {
       destinationsRef.current = next;
       setDestinations(next);
     }

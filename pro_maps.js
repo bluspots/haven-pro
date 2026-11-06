@@ -72,6 +72,24 @@ function havenCityOnlyLinkLabel(city) {
   return "Search " + city + " in Google Maps (city only, not the job location)";
 }
 
+// Which jobs may have an exact destination at all: server-assigned (backendClaimed),
+// a real job uuid, and an active status (the Pro active set). SIM/demo jobs and
+// posted / complete / cancelled / inspection_completed / materials_declined never.
+const HAVEN_DESTINATION_ACTIVE = ["en_route", "arrived", "diagnosing", "materials_requested", "materials_approved", "in_progress"];
+function havenDestinationEligible(job, backendConfigured) {
+  return !!backendConfigured && !!job && !!job.backendClaimed
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(job.id || ""))
+    && HAVEN_DESTINATION_ACTIVE.indexOf(job.status) !== -1;
+}
+// Entries kept only for jobs still eligible; everything else is dropped.
+function havenPruneDestinations(entries, activeJobs, backendConfigured) {
+  const keep = new Set((activeJobs || []).filter(j => havenDestinationEligible(j, backendConfigured)).map(j => String(j.id)));
+  const out = {};
+  let changed = false;
+  Object.keys(entries || {}).forEach(id => { if (keep.has(id)) out[id] = entries[id]; else changed = true; });
+  return changed ? out : entries;
+}
+
 function havenIsOnline() {
   try { return typeof navigator === "undefined" || navigator.onLine !== false; } catch (e) { return true; }
 }
