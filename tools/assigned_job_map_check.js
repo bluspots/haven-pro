@@ -16,7 +16,7 @@
  *  6. Board rows and table (select=*) / claim rows with lat/lng are never the point.
  *  7. The arrival gate works with the RPC point and stays locked without one.
  *  8. No RPC or Mapbox request at startup.
- *  9. HAVEN_ASSIGNED_JOB_MAP_ENABLED is false in the source and both built pages.
+ *  9. HAVEN_ASSIGNED_JOB_MAP_ENABLED is true in the source and both built pages (founder 2026-11-06).
  * 10. The shipped bundle contains no service-role key.
  *
  * fetch is mocked here (local fixtures, public landmark coordinates). A mocked
@@ -117,7 +117,7 @@ async function unitChecks() {
 
   console.log("Map helpers (pro_maps.js):");
   const m = loadMaps();
-  ok(m.HAVEN_ASSIGNED_JOB_MAP_ENABLED === false, "9. the flag is false in the source");
+  ok(m.HAVEN_ASSIGNED_JOB_MAP_ENABLED === true, "9. the flag is true in the source");
   const p = m.havenAssignedJobPoint({ state: "ok", point: POINT });
   const pin = m.havenStaticMapUrl(p, false);
   ok(/pin-l\+0f6e4e\(-81\.379234,28\.538336\)\/-81\.379234,28\.538336,15,0\/600x300@2x/.test(pin) && !/path-|geojson|polyline/.test(pin), "1. the pin uses the exact point (6 dp); no route overlay");
@@ -145,7 +145,8 @@ async function renderApp({ flag, rows, rpc, geo }) {
   let ReactDOMLegacy = {};
   try { ReactDOMLegacy = require("react-dom"); } catch (e) { ReactDOMLegacy = {}; }
   let html = read("prototype-pro.html");
-  if (flag) html = html.replace("const HAVEN_ASSIGNED_JOB_MAP_ENABLED = false;", "const HAVEN_ASSIGNED_JOB_MAP_ENABLED = true;");
+  // Shipped pages have the flag on; the flag-off regression suite forces it off.
+  if (!flag) { const forced = html.replace("const HAVEN_ASSIGNED_JOB_MAP_ENABLED = true;", "const HAVEN_ASSIGNED_JOB_MAP_ENABLED = false;"); if (forced === html) throw new Error("flag-off build: shipped flag line not found"); html = forced; }
   const dom = new JSDOM(html, { url: "https://localhost/", runScripts: "outside-only", pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
   const { window } = dom;
   window.requestAnimationFrame = window.requestAnimationFrame || (cb => setTimeout(cb, 0));
@@ -218,7 +219,7 @@ async function openJob(app) {
 }
 
 async function appChecks() {
-  console.log("App, flag on (test-only build):");
+  console.log("App, flag on (as shipped):");
   {
     const app = await start({ flag: true, rows: [row()], rpc: () => json(200, OK_BODY) });
     const w = app.window;
@@ -261,7 +262,7 @@ async function appChecks() {
     w.close();
   }
 
-  console.log("App, flag off (as shipped):");
+  console.log("App, flag off (forced off for regression):");
   {
     const app = await start({ flag: false, rows: [row()], rpc: () => json(200, OK_BODY), geo: { lat: POINT.lat + 0.0005, lng: POINT.lng } });
     const w = app.window;
@@ -296,7 +297,7 @@ function shippedChecks() {
   console.log("Shipped files:");
   for (const f of ["index.html", "prototype-pro.html"]) {
     const html = read(f);
-    ok(/HAVEN_ASSIGNED_JOB_MAP_ENABLED\s*=\s*false/.test(html) && !/HAVEN_ASSIGNED_JOB_MAP_ENABLED\s*=\s*true/.test(html), "9. " + f + ": flag is false");
+    ok(/const HAVEN_ASSIGNED_JOB_MAP_ENABLED = true;/.test(html) && !/HAVEN_ASSIGNED_JOB_MAP_ENABLED\s*=\s*false/.test(html), "9. " + f + ": flag is true");
     const jwts = html.match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g) || [];
     const roles = jwts.map(t => { try { return JSON.parse(Buffer.from(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")).role; } catch (e) { return "unparseable"; } });
     ok(roles.length > 0 && roles.every(r => r === "anon"), "10. " + f + ": every embedded key is the anon key (no service-role key)");
