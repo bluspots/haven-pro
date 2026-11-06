@@ -448,8 +448,11 @@ function mapSupabaseRowToJob(row) {
     radiusCheckedOnServer: true,
     durationMin: undefined,
     city: row.city_label || "",
-    lat: row.lat ?? null,
-    lng: row.lng ?? null,
+    // MAP-05 / contract mapbox-assigned-destination-0030: no table or board row
+    // supplies coordinates. The only exact point is get_assigned_job_destination
+    // (fetchAssignedJobDestination), held in memory by the app per job.
+    lat: null,
+    lng: null,
     requested: "ASAP",
     emergency: !!row.emergency,
     postedAt: row.posted_at ? Date.parse(row.posted_at) : Date.now(),
@@ -460,9 +463,10 @@ function mapSupabaseRowToJob(row) {
 // shown by city + server-provided distance only. Exact lat/lng are never kept
 // for jobs this Pro isn't assigned to, even while the RPC still returns them,
 // so nothing can compute a distance, pin or route from them. The exact point
-// comes only from the assigned-job row after acceptance (see
-// resolveAssignedJobLocation). An approximate-area field is not read until the
-// backend deploys it.
+// comes only from get_assigned_job_destination after acceptance (see
+// fetchAssignedJobDestination). After 0030 the board RPC returns null lat/lng
+// and distance_mi rounded to 0.5 mi from a grid-cell centre; that rounding is
+// intended and is not corrected here.
 function mapBoardRowToJob(row) {
   const job = mapSupabaseRowToJob(row);
   job.lat = null;
@@ -799,38 +803,62 @@ function isBackendClaimedJob(job) {
   return !!job && !!getSupabaseConfig() && looksLikeUuid(job.id) && !!job.backendClaimed;
 }
 
-// PRO-B30 / contract §2: the exact service point is read only for a job this Pro
-// is assigned to: from pro_claim_job's returned row, else from the assigned
-// jobs row (jobs?id=..&pro_id=<me>). Returns { lat, lng, city } with nulls when
-// the server doesn't provide them (never invented).
-function locationFieldsFromRow(row) {
-  if (!row) return null;
-  const lat = row.lat != null && row.lat !== "" && Number.isFinite(Number(row.lat)) ? Number(row.lat) : null;
-  const lng = row.lng != null && row.lng !== "" && Number.isFinite(Number(row.lng)) ? Number(row.lng) : null;
-  const out = { lat: lat != null && lng != null ? lat : null, lng: lat != null && lng != null ? lng : null };
-  if (row.city_label) out.city = row.city_label;
+// MAP-05 (contract backend/contracts/mapbox-assigned-destination-0030.md, live
+// 2026-11-05): the ONLY source of a job's exact destination for navigation is
+//   POST /rest/v1/rpc/get_assigned_job_destination { p_job_id }
+// with the signed-in user's JWT. The server checks the caller is the assigned
+// Pro and the job is active, and returns the stored point unrounded.
+// No session -> no call. Results are normalised to:
+//   { state: "ok", point: { lat, lng }, address: { line, unit, access_notes }, city }
+//   { state: "error", error: "not_authenticated" | "not_found" | "status_not_active" | "no_coordinates" | "network", city? }
+// Never cached to storage; the app keeps it in memory per job id.
+const HAVEN_DESTINATION_ERRORS = ["not_authenticated", "not_found", "status_not_active", "no_coordinates"];
+function normaliseAssignedDestination(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { state: "error", error: "network" };
+  if (body.ok === true) {
+    const d = body.destination || {};
+    const lat = typeof d.lat === "number" ? d.lat : (d.lat != null && d.lat !== "" ? Number(d.lat) : NaN);
+    const lng = typeof d.lng === "number" ? d.lng : (d.lng != null && d.lng !== "" ? Number(d.lng) : NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return { state: "error", error: "no_coordinates", city: body.city_label || "" };
+    }
+    const a = body.address && typeof body.address === "object" ? body.address : {};
+    const text = v => (typeof v === "string" && v.trim() ? v.trim() : null);
+    return {
+      state: "ok",
+      point: { lat: lat, lng: lng },
+      address: { line: text(a.line), unit: text(a.unit), access_notes: text(a.access_notes) },
+      city: body.city_label || "",
+    };
+  }
+  const code = HAVEN_DESTINATION_ERRORS.includes(body.error) ? body.error : "network";
+  const out = { state: "error", error: code };
+  if (body.city_label) out.city = body.city_label;
   return out;
 }
-async function resolveAssignedJobLocation(jobId, claimRow) {
-  const fromClaim = locationFieldsFromRow(claimRow);
-  if (fromClaim && fromClaim.lat != null) return fromClaim;
+async function fetchAssignedJobDestination(jobId) {
   const cfg = getSupabaseConfig();
-  if (!cfg || !looksLikeUuid(jobId)) return fromClaim || { lat: null, lng: null };
+  if (!cfg || !looksLikeUuid(jobId)) return { state: "error", error: "not_found" };
   const actor = await resolveHavenJobWriteAuth(cfg);
-  if (!actor.ok) return fromClaim || { lat: null, lng: null };
-  const url =
-    `${cfg.url}/rest/v1/jobs?id=eq.${encodeURIComponent(jobId)}` +
-    `&pro_id=eq.${encodeURIComponent(actor.proId)}&select=id,lat,lng,city_label`;
+  if (!actor.ok || actor.mode !== "session") return { state: "error", error: "not_authenticated" };
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { apikey: actor.headers.apikey, Authorization: actor.headers.Authorization, Accept: "application/json" },
+    const res = await fetch(`${cfg.url}/rest/v1/rpc/get_assigned_job_destination`, {
+      method: "POST",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ p_job_id: jobId }),
     });
-    if (!res.ok) return fromClaim || { lat: null, lng: null };
-    const rows = await res.json();
-    return locationFieldsFromRow(Array.isArray(rows) ? rows[0] : null) || fromClaim || { lat: null, lng: null };
+    if (res.status === 401 || res.status === 403) return { state: "error", error: "not_authenticated" };
+    if (!res.ok) return { state: "error", error: "network" };
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    return normaliseAssignedDestination(body);
   } catch (e) {
-    return fromClaim || { lat: null, lng: null };
+    return { state: "error", error: "network" };
   }
 }
 
@@ -1867,45 +1895,48 @@ function subscribeHavenAuth(onChange) {
 }
 
 // MAP-05 M5-1 / M5-2 — assigned-job map (Pro). Isolated map code; the app
-// file only calls HavenEnRouteNavigation from mapPanel when the flag is on.
+// file calls HavenEnRouteNavigation from mapPanel only when the flag is on, and
+// uses havenDestinationMessage / havenCityOnlyLinkLabel for the flag-off panel.
 //
-// Rules (founder 2026-10-23, Hub handoffs/MAP-05.md):
-// - Only for a job this Pro has been ASSIGNED (backendClaimed) and only from
-//   the exact point the assigned-job flow returned (PR #70: pro_claim_job's
-//   row or the assigned jobs row). Never from an unassigned board row (board
-//   rows carry no lat/lng at all after #70).
+// Source of the destination (contract backend/contracts/mapbox-assigned-destination-0030.md,
+// 0027 + 0030 live 2026-11-05): ONLY public.get_assigned_job_destination, called by
+// fetchAssignedJobDestination (backend_adapter.js) and held by the app in memory per
+// job id. Never a board row, a claim row, a jobs table read, a fixture or a city centre.
+//
+// Rules (founder; Hub handoffs/MAP-05.md):
 // - One static Mapbox image of the destination. No route, ETA, travel time,
 //   extra markers or invented address. Road routing comes from Apple/Google Maps.
-// - Nothing loads at startup: the image is requested only when the en-route
-//   job screen renders, once per job point and theme (stable URL, browser cache).
-// - Honest states: loading, offline, no location, error (with Try again).
+// - Nothing loads at startup: the RPC and the image are requested only when the
+//   active job's screen is open (or right after a claim), once per job + status.
+// - Honest states, no fabricated location: loading, each server error, network
+//   error (Try again), image error (Try again), offline.
+// - No geocoding here (HB-23 open). The static image URL is stable per point.
 //
-// Backend gate: HAVEN_ASSIGNED_JOB_MAP_ENABLED stays false until Grokbot's
-// assigned-only access control (0027/0030, Hub REQ-01) is verified and the
-// founder approves deployment. While false, mapPanel renders exactly as before.
+// HAVEN_ASSIGNED_JOB_MAP_ENABLED stays false in every committed file. The
+// founder approves turning it on separately after QA.
 const HAVEN_ASSIGNED_JOB_MAP_ENABLED = false;
 
 const HAVEN_STATIC_MAP_W = 600;   // CSS px requested (@2x); fixed so the URL is cacheable
 const HAVEN_STATIC_MAP_H = 300;
 const HAVEN_MAP_PIN_COLOR = "0f6e4e"; // Haven Pro green
 
-// Exact point for an assigned job, or null. Requires a server-assigned job and finite coordinates.
-function havenAssignedJobPoint(job) {
-  if (!job || !job.backendClaimed) return null;
-  const lat = job.lat != null && job.lat !== "" ? Number(job.lat) : NaN;
-  const lng = job.lng != null && job.lng !== "" ? Number(job.lng) : NaN;
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+// The exact point from a destination entry ({ state: "ok", point }), else null.
+function havenAssignedJobPoint(dest) {
+  if (!dest || dest.state !== "ok" || !dest.point) return null;
+  const lat = dest.point.lat, lng = dest.point.lng;
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
   return { lat, lng };
 }
 
-function havenFixed5(n) { return Number(n).toFixed(5); }
+// 6 decimal places = the stored jobs.lat/lng precision (numeric(9,6)).
+function havenFixed6(n) { return Number(n).toFixed(6); }
 
 // Mapbox Static Images API: one pin at the destination, no path overlays.
 function havenStaticMapUrl(point, dark) {
   if (!point || typeof HAVEN_MAPBOX_PUBLIC_TOKEN === "undefined" || !HAVEN_MAPBOX_PUBLIC_TOKEN) return null;
   const style = dark ? "mapbox/dark-v11" : "mapbox/streets-v12";
-  const lng = havenFixed5(point.lng), lat = havenFixed5(point.lat);
+  const lng = havenFixed6(point.lng), lat = havenFixed6(point.lat);
   return "https://api.mapbox.com/styles/v1/" + style + "/static/"
     + "pin-l+" + HAVEN_MAP_PIN_COLOR + "(" + lng + "," + lat + ")/"
     + lng + "," + lat + ",15,0/"
@@ -1916,20 +1947,38 @@ function havenStaticMapUrl(point, dark) {
 // Apple Maps driving directions to the exact point (opens the Maps app on iPhone).
 function havenAppleMapsUrl(point) {
   if (!point) return null;
-  return "https://maps.apple.com/?daddr=" + havenFixed5(point.lat) + "," + havenFixed5(point.lng) + "&dirflg=d";
+  return "https://maps.apple.com/?daddr=" + havenFixed6(point.lat) + "," + havenFixed6(point.lng) + "&dirflg=d";
+}
+
+// What to say when there is no exact point (contract §5 of the Pro #71 brief).
+function havenDestinationMessage(dest) {
+  if (!dest || dest.state === "loading") return { text: "Loading location…", retry: false };
+  if (dest.state === "ok") return { text: "", retry: false };
+  switch (dest.error) {
+    case "not_authenticated": return { text: "Sign in again to see the job location.", retry: false };
+    case "not_found": return { text: "This job is no longer assigned to you.", retry: false };
+    case "status_not_active": return { text: "Navigation is closed for this job.", retry: false };
+    case "no_coordinates": return { text: "Exact location not available yet.", retry: false };
+    default: return { text: "Couldn't load the location.", retry: true };
+  }
+}
+
+// A city-level search is never presented as the job's location.
+function havenCityOnlyLinkLabel(city) {
+  return "Search " + city + " in Google Maps (city only, not the job location)";
 }
 
 function havenIsOnline() {
   try { return typeof navigator === "undefined" || navigator.onLine !== false; } catch (e) { return true; }
 }
 
-// En-route navigation card: static map (M5-1) with honest states (M5-2), plus
-// Open in Apple Maps and the existing Google Maps link (mapsUrl from mapPanel,
-// unchanged logic). Plain React.createElement so this file needs no JSX step.
+// En-route navigation card. Plain React.createElement so this file needs no JSX step.
+// props: job, dest (destination entry), mapsUrl (mapPanel's Google URL: the exact
+// point when dest is ok, else the city), hasOrigin, onRetry, T, dark, font.
 function HavenEnRouteNavigation(props) {
-  const { job, mapsUrl, hasOrigin, T, dark, font } = props;
+  const { job, dest, mapsUrl, hasOrigin, onRetry, T, dark, font } = props;
   const h = React.createElement;
-  const point = havenAssignedJobPoint(job);
+  const point = havenAssignedJobPoint(dest);
   const src = havenStaticMapUrl(point, dark);
   const [online, setOnline] = React.useState(havenIsOnline());
   const [attempt, setAttempt] = React.useState(0);
@@ -1947,13 +1996,17 @@ function HavenEnRouteNavigation(props) {
   }, []);
 
   const city = job && job.city ? job.city : "";
-  const boxStyle = { position: "relative", width: "100%", aspectRatio: "2 / 1", background: dark ? "#16211d" : "#e8ece9", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" };
+  const boxStyle = { position: "relative", width: "100%", aspectRatio: "2 / 1", background: dark ? "#16211d" : "#e8ece9", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", justifyContent: "center", overflow: "hidden" };
   const noteStyle = { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: font, textAlign: "center", padding: "0 16px", lineHeight: 1.4 };
+  const retryStyle = { minHeight: 44, padding: "0 18px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" };
 
   let mapArea;
   if (!point) {
-    mapArea = h("div", { style: boxStyle, "data-map-state": "no-location", role: "note" },
-      h("div", { style: noteStyle }, "Exact location not available yet. Use the city directions below."));
+    const msg = havenDestinationMessage(dest);
+    const code = !dest || dest.state === "loading" ? "loading" : dest.error;
+    mapArea = h("div", { style: boxStyle, "data-map-state": "no-point", "data-dest-state": code, role: "status", "aria-busy": code === "loading" ? "true" : "false" },
+      h("div", { style: noteStyle }, msg.text),
+      msg.retry && typeof onRetry === "function" && h("button", { type: "button", onClick: onRetry, style: retryStyle }, "Try again"));
   } else if (!online && state !== "loaded") {
     mapArea = h("div", { style: boxStyle, "data-map-state": "offline", role: "note" },
       h("div", { style: noteStyle }, "Map unavailable offline. The directions buttons still work once you're connected."));
@@ -1965,7 +2018,7 @@ function HavenEnRouteNavigation(props) {
       state !== "loaded" && h("div", { style: noteStyle }, state === "error" ? "Map unavailable right now." : "Loading map…"),
       state === "error" && h("button", {
         type: "button", onClick: () => setAttempt(a => a + 1),
-        style: { position: "absolute", bottom: 12, left: "50%", transform: "translateX(-50%)", minHeight: 44, padding: "0 18px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" },
+        style: { ...retryStyle, position: "absolute", bottom: 12, left: "50%", transform: "translateX(-50%)" },
       }, "Try again"),
       state !== "error" && h("img", {
         key: imgKey, src: src, alt: "Map of the job location" + (city ? " in " + city : ""),
@@ -1977,15 +2030,20 @@ function HavenEnRouteNavigation(props) {
 
   const apple = havenAppleMapsUrl(point);
   const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center" });
+  // Address is shown only when the server sends it (today it is always null; REQ-04 open).
+  const addressLine = point && dest.address && dest.address.line ? dest.address.line : null;
+  const googleLabel = point ? "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps") : "🗺️ " + havenCityOnlyLinkLabel(city);
 
   return h("div", { "data-testid": "assigned-job-map", style: { borderRadius: 18, overflow: "hidden", marginBottom: 16, border: "1px solid " + T.bd, background: T.w } },
-    h("div", { style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px" } },
+    h("div", { style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px" } },
       h("span", { "aria-hidden": "true", style: { fontSize: 18 } }, "📍"),
-      h("span", { style: { fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: font } }, point ? (city ? "Job location · " + city : "Job location") : (hasOrigin ? "Directions to " + city : "Navigating to " + city))),
+      h("div", null,
+        h("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: font } }, point ? (city ? "Job location · " + city : "Job location") : (city ? "Job in " + city : "Job location")),
+        addressLine && h("div", { "data-testid": "assigned-address", style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: font, marginTop: 2 } }, addressLine))),
     mapArea,
-    h("div", { style: { display: "flex", gap: 8, padding: 12 } },
+    h("div", { style: { display: "flex", gap: 8, padding: 12, flexWrap: "wrap" } },
       apple && h("a", { href: apple, target: "_blank", rel: "noopener noreferrer", style: btn(true) }, "Open in Apple Maps"),
-      h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!apple) }, "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps"))));
+      (point || city) && h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!apple) }, googleLabel)));
 }
 
 const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
@@ -2424,6 +2482,61 @@ function HavenProApp() {
   // ref always holds the latest value for exactly that kind of read.
   const activeJobsRef = useRef(activeJobs);
   useEffect(() => { activeJobsRef.current = activeJobs; }, [activeJobs]);
+
+  // MAP-05: exact destinations from get_assigned_job_destination only, kept in
+  // memory per job id for this session (never localStorage). Entry:
+  // { key: "<id>:<status>", state: "loading"|"ok"|"error", error?, point?, address?, city? }
+  const [destinations, setDestinations] = useState({});
+  const destinationsRef = useRef({});
+  function writeDestination(jobId, entry) {
+    const next = { ...destinationsRef.current };
+    if (entry) next[jobId] = entry; else delete next[jobId];
+    destinationsRef.current = next;
+    setDestinations(next);
+  }
+  function clearAllDestinations() {
+    destinationsRef.current = {};
+    setDestinations({});
+  }
+  function destinationEligible(job) {
+    return !!job && !!job.backendClaimed && looksLikeUuid(job.id) && ACTIVE_BLOCK_STATUSES.has(job.status) && !!getSupabaseConfig();
+  }
+  function destinationKey(job) { return `${job.id}:${job.status}`; }
+  // The point for this job's CURRENT status, or null. Nothing else is ever a destination.
+  function assignedPoint(job) {
+    if (!destinationEligible(job)) return null;
+    const e = destinations[job.id];
+    return e && e.state === "ok" && e.key === destinationKey(job) ? e.point : null;
+  }
+  function destinationEntry(job) {
+    if (!destinationEligible(job)) return null;
+    const e = destinations[job.id];
+    return e && e.key === destinationKey(job) ? e : null;
+  }
+  async function requestDestination(job, force) {
+    if (!destinationEligible(job)) return;
+    const key = destinationKey(job);
+    const cur = destinationsRef.current[job.id];
+    if (!force && cur && cur.key === key) return; // cached for this status (or already loading)
+    writeDestination(job.id, { key, state: "loading" });
+    const result = await fetchAssignedJobDestination(job.id);
+    const latest = destinationsRef.current[job.id];
+    if (!latest || latest.key !== key) return; // job moved on, left the active set or signed out meanwhile
+    writeDestination(job.id, { key, ...result });
+    if (result.state === "error" && result.error === "not_found") reloadActiveJobs();
+  }
+  // Leaving the active set (or SIM jobs) clears any stored point; so does signing out.
+  useEffect(() => {
+    const keep = new Set(activeJobs.filter(destinationEligible).map(j => j.id));
+    const stale = Object.keys(destinationsRef.current).filter(id => !keep.has(id));
+    if (stale.length) {
+      const next = { ...destinationsRef.current };
+      stale.forEach(id => { delete next[id]; });
+      destinationsRef.current = next;
+      setDestinations(next);
+    }
+  }, [activeJobs]);
+  useEffect(() => { if (!authSession || !authSession.id) clearAllDestinations(); }, [authSession && authSession.id]);
   const arrivingJobIdRef = useRef(null);
   const advancingJobIdRef = useRef(null);
   const submittingReceiptRef = useRef(false);
@@ -2832,6 +2945,7 @@ function HavenProApp() {
     }
     setAuthNotice("");
     setSettingsAuthOpen(false);
+    clearAllDestinations(); // MAP-05: no exact destination survives sign-out
     clearAuthLinkedAccount();
     // Signing out never leaves a sessionless (local) account behind.
     if (accountSourceRef.current === "local") dropSessionlessAccount();
@@ -3167,26 +3281,27 @@ function HavenProApp() {
   // refresh with a real profile also restores the active job.
   // An assigned active job means this Pro already passed onboarding — never
   // drop them back on Create Your Profile just because local state was blank.
-  useEffect(() => {
-    let cancelled = false;
-    async function loadActive() {
-      const rows = await fetchActiveJobsFromSupabase();
-      if (cancelled) return;
-      if (rows) {
-        setActiveJobs(rows);
-        const activeIds = new Set(rows.map(j => j.id));
-        setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
-        if (rows.length > 0) {
-          setOnboardingStatus(prev => (prev === "completed" ? prev : "completed"));
-          setOnboardingStep("done");
-          setAccountStatus("signed_in");
-        }
+  const activeLoadSeq = useRef(0);
+  async function reloadActiveJobs() {
+    const seq = ++activeLoadSeq.current;
+    const rows = await fetchActiveJobsFromSupabase();
+    if (seq !== activeLoadSeq.current) return;
+    if (rows) {
+      setActiveJobs(rows);
+      const activeIds = new Set(rows.map(j => j.id));
+      setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
+      if (rows.length > 0) {
+        setOnboardingStatus(prev => (prev === "completed" ? prev : "completed"));
+        setOnboardingStep("done");
+        setAccountStatus("signed_in");
       }
     }
+  }
+  useEffect(() => {
     if (getSupabaseConfig() && authSession && authSession.id) {
-      loadActive();
+      reloadActiveJobs();
     }
-    return () => { cancelled = true; };
+    return () => { activeLoadSeq.current++; };
   }, [authSession && authSession.id]);
 
   function pushEarnings(view) { setEarningsStack(prev => [...prev, view]); }
@@ -3196,6 +3311,16 @@ function HavenProApp() {
   function pushMyJobs(view) { setMyJobsStack(prev => [...prev, view]); }
   function popMyJobs() { setMyJobsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
   const currentMyJobsView = myJobsStack[myJobsStack.length - 1];
+
+  // MAP-05: fetch the exact destination lazily, only while that active job's
+  // screen is open (never at startup). The key includes the status, so a
+  // status change while the screen is open fetches again.
+  const openDetailJob = tab === "jobs" && currentMyJobsView && currentMyJobsView.view === "detail"
+    ? activeJobs.find(j => j.id === currentMyJobsView.jobId) : null;
+  const openDetailKey = openDetailJob ? `${openDetailJob.id}:${openDetailJob.status}:${openDetailJob.backendClaimed ? 1 : 0}` : "";
+  useEffect(() => {
+    if (openDetailJob) requestDestination(openDetailJob);
+  }, [openDetailKey]);
 
   function pushMessages(view) { setMessagesStack(prev => [...prev, view]); }
   function popMessages() { setMessagesStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
@@ -3484,8 +3609,10 @@ function HavenProApp() {
   }, []);
 
   function isNearJob(job) {
-    if (!proLiveLocation || job.lat == null || job.lng == null) return false;
-    return haversineMiles(proLiveLocation.lat, proLiveLocation.lng, job.lat, job.lng) <= ARRIVAL_THRESHOLD_MI;
+    // Arrival uses only the assigned-destination point; locked without one.
+    const point = assignedPoint(job);
+    if (!proLiveLocation || !point) return false;
+    return haversineMiles(proLiveLocation.lat, proLiveLocation.lng, point.lat, point.lng) <= ARRIVAL_THRESHOLD_MI;
   }
 
   /* ── Eligibility pipeline: geography (unconditional) -> work categories
@@ -3602,7 +3729,6 @@ function HavenProApp() {
     // If a backend is configured, claim there first and handle conflicts clearly
     const cfg = getSupabaseConfig();
     let backendClaimed = false;
-    let assignedLocation = null;
     if (cfg && looksLikeUuid(job.id)) {
       if (acceptingJobId === job.id) return;
       setAcceptingJobId(job.id);
@@ -3627,18 +3753,17 @@ function HavenProApp() {
           return;
         }
         backendClaimed = true;
-        // PRO-B30: the board row carries no exact point; take it from the assigned row.
-        assignedLocation = await resolveAssignedJobLocation(job.id, result.row);
       } finally {
         setAcceptingJobId(null);
       }
     }
     // Local accept (SIM-only or after successful backend claim)
     setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
-    setActiveJobs(prev => [
-      ...prev,
-      { ...job, ...(assignedLocation || {}), status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed },
-    ]);
+    // No coordinates are copied from the board or the claim row (MAP-05 / 0030).
+    const accepted = { ...job, lat: null, lng: null, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed };
+    setActiveJobs(prev => [...prev, accepted]);
+    // Exact destination: once after a successful claim, from the assigned-destination RPC only.
+    if (backendClaimed) requestDestination(accepted);
     setTab("jobs");
     setMyJobsStack([{ view: "detail", jobId: job.id }]);
     showToast(`Accepted — ${job.title}`);
@@ -4465,7 +4590,8 @@ function HavenProApp() {
           </button>
         );
       }
-      const dist = proLiveLocation && job.lat != null ? haversineMiles(proLiveLocation.lat, proLiveLocation.lng, job.lat, job.lng) : null;
+      const point = assignedPoint(job);
+      const dist = proLiveLocation && point ? haversineMiles(proLiveLocation.lat, proLiveLocation.lng, point.lat, point.lng) : null;
       return (
         <div style={{ textAlign: "center", padding: "10px 0", fontSize: 12.5, fontWeight: 700, color: T.tm, fontFamily: FONT }}>
           🚗 {dist != null ? `${dist.toFixed(1)} mi to go — ` : ""}keep driving to confirm arrival
@@ -4548,15 +4674,41 @@ function HavenProApp() {
      real. A real job-location map waits for HB-22 (server-enforced access
      to customer locations). ── */
   function mapPanel(job) {
-    const hasDestCoords = job.lat != null && job.lng != null;
-    const destination = hasDestCoords ? `${job.lat},${job.lng}` : job.city;
+    // MAP-05: the only exact destination is the assigned-destination RPC point.
+    const dest = destinationEntry(job);
+    const point = dest && dest.state === "ok" ? dest.point : null;
+    const hasDestCoords = !!point;
+    const destination = hasDestCoords ? `${point.lat},${point.lng}` : job.city;
     const hasOrigin = !!proLiveLocation;
     const mapsUrl = hasOrigin
       ? `https://www.google.com/maps/dir/?api=1&origin=${proLiveLocation.lat},${proLiveLocation.lng}&destination=${encodeURIComponent(destination)}&travelmode=driving`
       : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination)}`;
-    // MAP-05 M5-1/M5-2 (pro_maps.js): assigned-job map + Apple Maps. Off until the backend gate is verified.
+    const retry = () => requestDestination(job, true);
+    // MAP-05 M5-1/M5-2 (pro_maps.js): assigned-job map + Apple Maps. Off until the founder approves.
     if (HAVEN_ASSIGNED_JOB_MAP_ENABLED) {
-      return <HavenEnRouteNavigation job={job} mapsUrl={mapsUrl} hasOrigin={hasOrigin} T={T} dark={theme === "dark"} font={FONT} />;
+      return <HavenEnRouteNavigation job={job} dest={dest} mapsUrl={mapsUrl} hasOrigin={hasOrigin} onRetry={retry} T={T} dark={theme === "dark"} font={FONT} />;
+    }
+    if (!hasDestCoords) {
+      // No exact point: say why, and offer only a city-level search labelled as such.
+      const msg = havenDestinationMessage(dest);
+      return (
+        <div data-testid="destination-status" data-dest-state={dest ? (dest.state === "error" ? dest.error : dest.state) : "loading"} style={{ borderRadius: 18, overflow: "hidden", marginBottom: 16, border: `1px solid ${T.bd}`, background: T.w }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px" }}>
+            <span aria-hidden="true" style={{ fontSize: 18 }}>📍</span>
+            <span role="status" style={{ fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: FONT }}>{msg.text}</span>
+          </div>
+          {msg.retry && (
+            <div style={{ padding: "0 14px 12px" }}>
+              <button type="button" onClick={retry} style={{ minHeight: 44, padding: "0 18px", borderRadius: 12, border: `1px solid ${T.bd}`, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: FONT, cursor: "pointer" }}>Try again</button>
+            </div>
+          )}
+          {job.city && (
+            <a href={mapsUrl} target="_blank" rel="noopener noreferrer" style={{ display: "block", textAlign: "center", padding: "12px 0", background: T.pgt, color: T.pgd, fontSize: 13, fontWeight: 800, fontFamily: FONT, textDecoration: "none" }}>
+              🗺️ {havenCityOnlyLinkLabel(job.city)}
+            </a>
+          )}
+        </div>
+      );
     }
     return (
       <a
@@ -4575,6 +4727,7 @@ function HavenProApp() {
       </a>
     );
   }
+
 
   function formatElapsed(ms) {
     const totalSec = Math.max(0, Math.floor(ms / 1000));

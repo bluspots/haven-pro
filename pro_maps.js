@@ -1,43 +1,46 @@
 // MAP-05 M5-1 / M5-2 — assigned-job map (Pro). Isolated map code; the app
-// file only calls HavenEnRouteNavigation from mapPanel when the flag is on.
+// file calls HavenEnRouteNavigation from mapPanel only when the flag is on, and
+// uses havenDestinationMessage / havenCityOnlyLinkLabel for the flag-off panel.
 //
-// Rules (founder 2026-10-23, Hub handoffs/MAP-05.md):
-// - Only for a job this Pro has been ASSIGNED (backendClaimed) and only from
-//   the exact point the assigned-job flow returned (PR #70: pro_claim_job's
-//   row or the assigned jobs row). Never from an unassigned board row (board
-//   rows carry no lat/lng at all after #70).
+// Source of the destination (contract backend/contracts/mapbox-assigned-destination-0030.md,
+// 0027 + 0030 live 2026-11-05): ONLY public.get_assigned_job_destination, called by
+// fetchAssignedJobDestination (backend_adapter.js) and held by the app in memory per
+// job id. Never a board row, a claim row, a jobs table read, a fixture or a city centre.
+//
+// Rules (founder; Hub handoffs/MAP-05.md):
 // - One static Mapbox image of the destination. No route, ETA, travel time,
 //   extra markers or invented address. Road routing comes from Apple/Google Maps.
-// - Nothing loads at startup: the image is requested only when the en-route
-//   job screen renders, once per job point and theme (stable URL, browser cache).
-// - Honest states: loading, offline, no location, error (with Try again).
+// - Nothing loads at startup: the RPC and the image are requested only when the
+//   active job's screen is open (or right after a claim), once per job + status.
+// - Honest states, no fabricated location: loading, each server error, network
+//   error (Try again), image error (Try again), offline.
+// - No geocoding here (HB-23 open). The static image URL is stable per point.
 //
-// Backend gate: HAVEN_ASSIGNED_JOB_MAP_ENABLED stays false until Grokbot's
-// assigned-only access control (0027/0030, Hub REQ-01) is verified and the
-// founder approves deployment. While false, mapPanel renders exactly as before.
+// HAVEN_ASSIGNED_JOB_MAP_ENABLED stays false in every committed file. The
+// founder approves turning it on separately after QA.
 const HAVEN_ASSIGNED_JOB_MAP_ENABLED = false;
 
 const HAVEN_STATIC_MAP_W = 600;   // CSS px requested (@2x); fixed so the URL is cacheable
 const HAVEN_STATIC_MAP_H = 300;
 const HAVEN_MAP_PIN_COLOR = "0f6e4e"; // Haven Pro green
 
-// Exact point for an assigned job, or null. Requires a server-assigned job and finite coordinates.
-function havenAssignedJobPoint(job) {
-  if (!job || !job.backendClaimed) return null;
-  const lat = job.lat != null && job.lat !== "" ? Number(job.lat) : NaN;
-  const lng = job.lng != null && job.lng !== "" ? Number(job.lng) : NaN;
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+// The exact point from a destination entry ({ state: "ok", point }), else null.
+function havenAssignedJobPoint(dest) {
+  if (!dest || dest.state !== "ok" || !dest.point) return null;
+  const lat = dest.point.lat, lng = dest.point.lng;
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
   return { lat, lng };
 }
 
-function havenFixed5(n) { return Number(n).toFixed(5); }
+// 6 decimal places = the stored jobs.lat/lng precision (numeric(9,6)).
+function havenFixed6(n) { return Number(n).toFixed(6); }
 
 // Mapbox Static Images API: one pin at the destination, no path overlays.
 function havenStaticMapUrl(point, dark) {
   if (!point || typeof HAVEN_MAPBOX_PUBLIC_TOKEN === "undefined" || !HAVEN_MAPBOX_PUBLIC_TOKEN) return null;
   const style = dark ? "mapbox/dark-v11" : "mapbox/streets-v12";
-  const lng = havenFixed5(point.lng), lat = havenFixed5(point.lat);
+  const lng = havenFixed6(point.lng), lat = havenFixed6(point.lat);
   return "https://api.mapbox.com/styles/v1/" + style + "/static/"
     + "pin-l+" + HAVEN_MAP_PIN_COLOR + "(" + lng + "," + lat + ")/"
     + lng + "," + lat + ",15,0/"
@@ -48,20 +51,38 @@ function havenStaticMapUrl(point, dark) {
 // Apple Maps driving directions to the exact point (opens the Maps app on iPhone).
 function havenAppleMapsUrl(point) {
   if (!point) return null;
-  return "https://maps.apple.com/?daddr=" + havenFixed5(point.lat) + "," + havenFixed5(point.lng) + "&dirflg=d";
+  return "https://maps.apple.com/?daddr=" + havenFixed6(point.lat) + "," + havenFixed6(point.lng) + "&dirflg=d";
+}
+
+// What to say when there is no exact point (contract §5 of the Pro #71 brief).
+function havenDestinationMessage(dest) {
+  if (!dest || dest.state === "loading") return { text: "Loading location…", retry: false };
+  if (dest.state === "ok") return { text: "", retry: false };
+  switch (dest.error) {
+    case "not_authenticated": return { text: "Sign in again to see the job location.", retry: false };
+    case "not_found": return { text: "This job is no longer assigned to you.", retry: false };
+    case "status_not_active": return { text: "Navigation is closed for this job.", retry: false };
+    case "no_coordinates": return { text: "Exact location not available yet.", retry: false };
+    default: return { text: "Couldn't load the location.", retry: true };
+  }
+}
+
+// A city-level search is never presented as the job's location.
+function havenCityOnlyLinkLabel(city) {
+  return "Search " + city + " in Google Maps (city only, not the job location)";
 }
 
 function havenIsOnline() {
   try { return typeof navigator === "undefined" || navigator.onLine !== false; } catch (e) { return true; }
 }
 
-// En-route navigation card: static map (M5-1) with honest states (M5-2), plus
-// Open in Apple Maps and the existing Google Maps link (mapsUrl from mapPanel,
-// unchanged logic). Plain React.createElement so this file needs no JSX step.
+// En-route navigation card. Plain React.createElement so this file needs no JSX step.
+// props: job, dest (destination entry), mapsUrl (mapPanel's Google URL: the exact
+// point when dest is ok, else the city), hasOrigin, onRetry, T, dark, font.
 function HavenEnRouteNavigation(props) {
-  const { job, mapsUrl, hasOrigin, T, dark, font } = props;
+  const { job, dest, mapsUrl, hasOrigin, onRetry, T, dark, font } = props;
   const h = React.createElement;
-  const point = havenAssignedJobPoint(job);
+  const point = havenAssignedJobPoint(dest);
   const src = havenStaticMapUrl(point, dark);
   const [online, setOnline] = React.useState(havenIsOnline());
   const [attempt, setAttempt] = React.useState(0);
@@ -79,13 +100,17 @@ function HavenEnRouteNavigation(props) {
   }, []);
 
   const city = job && job.city ? job.city : "";
-  const boxStyle = { position: "relative", width: "100%", aspectRatio: "2 / 1", background: dark ? "#16211d" : "#e8ece9", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" };
+  const boxStyle = { position: "relative", width: "100%", aspectRatio: "2 / 1", background: dark ? "#16211d" : "#e8ece9", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", justifyContent: "center", overflow: "hidden" };
   const noteStyle = { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: font, textAlign: "center", padding: "0 16px", lineHeight: 1.4 };
+  const retryStyle = { minHeight: 44, padding: "0 18px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" };
 
   let mapArea;
   if (!point) {
-    mapArea = h("div", { style: boxStyle, "data-map-state": "no-location", role: "note" },
-      h("div", { style: noteStyle }, "Exact location not available yet. Use the city directions below."));
+    const msg = havenDestinationMessage(dest);
+    const code = !dest || dest.state === "loading" ? "loading" : dest.error;
+    mapArea = h("div", { style: boxStyle, "data-map-state": "no-point", "data-dest-state": code, role: "status", "aria-busy": code === "loading" ? "true" : "false" },
+      h("div", { style: noteStyle }, msg.text),
+      msg.retry && typeof onRetry === "function" && h("button", { type: "button", onClick: onRetry, style: retryStyle }, "Try again"));
   } else if (!online && state !== "loaded") {
     mapArea = h("div", { style: boxStyle, "data-map-state": "offline", role: "note" },
       h("div", { style: noteStyle }, "Map unavailable offline. The directions buttons still work once you're connected."));
@@ -97,7 +122,7 @@ function HavenEnRouteNavigation(props) {
       state !== "loaded" && h("div", { style: noteStyle }, state === "error" ? "Map unavailable right now." : "Loading map…"),
       state === "error" && h("button", {
         type: "button", onClick: () => setAttempt(a => a + 1),
-        style: { position: "absolute", bottom: 12, left: "50%", transform: "translateX(-50%)", minHeight: 44, padding: "0 18px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" },
+        style: { ...retryStyle, position: "absolute", bottom: 12, left: "50%", transform: "translateX(-50%)" },
       }, "Try again"),
       state !== "error" && h("img", {
         key: imgKey, src: src, alt: "Map of the job location" + (city ? " in " + city : ""),
@@ -109,13 +134,18 @@ function HavenEnRouteNavigation(props) {
 
   const apple = havenAppleMapsUrl(point);
   const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center" });
+  // Address is shown only when the server sends it (today it is always null; REQ-04 open).
+  const addressLine = point && dest.address && dest.address.line ? dest.address.line : null;
+  const googleLabel = point ? "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps") : "🗺️ " + havenCityOnlyLinkLabel(city);
 
   return h("div", { "data-testid": "assigned-job-map", style: { borderRadius: 18, overflow: "hidden", marginBottom: 16, border: "1px solid " + T.bd, background: T.w } },
-    h("div", { style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px" } },
+    h("div", { style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px" } },
       h("span", { "aria-hidden": "true", style: { fontSize: 18 } }, "📍"),
-      h("span", { style: { fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: font } }, point ? (city ? "Job location · " + city : "Job location") : (hasOrigin ? "Directions to " + city : "Navigating to " + city))),
+      h("div", null,
+        h("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: font } }, point ? (city ? "Job location · " + city : "Job location") : (city ? "Job in " + city : "Job location")),
+        addressLine && h("div", { "data-testid": "assigned-address", style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: font, marginTop: 2 } }, addressLine))),
     mapArea,
-    h("div", { style: { display: "flex", gap: 8, padding: 12 } },
+    h("div", { style: { display: "flex", gap: 8, padding: 12, flexWrap: "wrap" } },
       apple && h("a", { href: apple, target: "_blank", rel: "noopener noreferrer", style: btn(true) }, "Open in Apple Maps"),
-      h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!apple) }, "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps"))));
+      (point || city) && h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!apple) }, googleLabel)));
 }
