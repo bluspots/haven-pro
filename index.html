@@ -750,8 +750,9 @@ async function sendProLiveLocation(jobId, fix) {
   }
   if (!out || typeof out !== "object" || Array.isArray(out)) return { state: "retry" };
   if (out.ok === true) return { state: "ok" };
+  if (out.ok !== false || typeof out.error !== "string" || !out.error) return { state: "retry" };
   if (out.error === "rate_limited") return { state: "rate_limited", retryAfterS: out.retry_after_s };
-  return { state: "stop", error: typeof out.error === "string" ? out.error : "refused" };
+  return { state: "stop", error: out.error };
 }
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();
@@ -1840,6 +1841,7 @@ const HAVEN_LIVE_HEARTBEAT_MS = 3e4;
 const HAVEN_LIVE_MOVE_M = 25;
 const HAVEN_LIVE_MAX_ACCURACY_M = 100;
 const HAVEN_LIVE_RATE_LIMIT_DEFAULT_S = 4;
+const HAVEN_LIVE_RETRY_WAITS_MS = [1e4, 2e4, 3e4];
 const HAVEN_LIVE_MAX_FIX_AGE_MS = 12e4;
 const HAVEN_LIVE_NOTICE = "Sharing your location with this customer until you arrive.";
 const HAVEN_LIVE_NO_PERMISSION = "Your location isn't being shared with this customer because Haven Pro doesn't have location permission.";
@@ -1869,7 +1871,7 @@ function havenCreateLiveSender(jobId, deps) {
   const setTimer = deps.setTimer || ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer || ((id) => clearTimeout(id));
   let latest = null, lastSent = null, lastSentAt = 0, lastAttemptAt = 0, holdUntil = 0;
-  let inFlight = false, stopped = false, timer = null, sentCount = 0;
+  let inFlight = false, stopped = false, timer = null, sentCount = 0, failStreak = 0;
   function schedule(ms) {
     if (timer != null) clearTimer(timer);
     timer = setTimer(() => {
@@ -1918,6 +1920,8 @@ function havenCreateLiveSender(jobId, deps) {
         lastSent = fix;
         lastSentAt = lastAttemptAt;
         sentCount++;
+        failStreak = 0;
+        holdUntil = 0;
       } else if (r.state === "rate_limited") {
         const s = Number(r.retryAfterS);
         holdUntil = now() + 1e3 * (Number.isFinite(s) && s > 0 ? s : HAVEN_LIVE_RATE_LIMIT_DEFAULT_S);
@@ -1925,6 +1929,10 @@ function havenCreateLiveSender(jobId, deps) {
       } else if (r.state === "stop") {
         stop(r.error || "stopped");
         return;
+      } else {
+        holdUntil = now() + HAVEN_LIVE_RETRY_WAITS_MS[Math.min(failStreak, HAVEN_LIVE_RETRY_WAITS_MS.length - 1)];
+        failStreak++;
+        lastAttemptAt = 0;
       }
       pump();
     });
@@ -2680,6 +2688,8 @@ function HavenProApp() {
     setSettingsAuthOpen(false);
     clearAllDestinations();
     stopLiveSharing();
+    endLocationWatch();
+    setLocationDenied(false);
     clearAuthLinkedAccount();
     if (accountSourceRef.current === "local") dropSessionlessAccount();
     showToast("Signed out");
@@ -3271,6 +3281,7 @@ function HavenProApp() {
     return () => clearInterval(id);
   }, [activeJobs]);
   const liveSenderRef = useRef(null);
+  const lastPositionRef = useRef(null);
   const liveStoppedJobRef = useRef(null);
   const [liveShare, setLiveShare] = useState({ jobId: null, state: "off" });
   const [locationDenied, setLocationDenied] = useState(false);
@@ -3289,6 +3300,10 @@ function HavenProApp() {
       stopLiveSharing();
       return;
     }
+    if (locationDenied) {
+      stopLiveSharing();
+      return;
+    }
     if (liveStoppedJobRef.current === liveShareJobId) return;
     if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
     stopLiveSharing();
@@ -3302,26 +3317,54 @@ function HavenProApp() {
     });
     liveSenderRef.current = sender;
     setLiveShare({ jobId: liveShareJobId, state: "sharing" });
-  }, [liveShareJobId]);
+    const last = lastPositionRef.current;
+    if (last && typeof last.timestamp === "number" && Date.now() - last.timestamp < 3e4) sender.onPosition(last);
+  }, [liveShareJobId, locationDenied]);
   useEffect(() => () => {
     if (liveSenderRef.current) liveSenderRef.current.stop();
   }, []);
+  const locationWatchRef = useRef(null);
+  function endLocationWatch() {
+    if (locationWatchRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    locationWatchRef.current = null;
+    lastPositionRef.current = null;
+    setProLiveLocation(null);
+  }
+  const signedInId = authSession ? authSession.id || "signed-in" : null;
   useEffect(() => {
-    if (!activeJobs.some((j) => j.status === "en_route") || !navigator.geolocation) return;
+    if (!signedInId || !activeJobs.some((j) => j.status === "en_route") || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
+        if (locationWatchRef.current !== watchId) return;
+        lastPositionRef.current = pos;
         setLocationDenied(false);
         setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
         if (liveSenderRef.current) liveSenderRef.current.onPosition(pos);
       },
       (err) => {
+        if (locationWatchRef.current !== watchId) return;
         setProLiveLocation(null);
-        if (err && err.code === 1) setLocationDenied(true);
+        if (err && err.code === 1) {
+          if (liveSenderRef.current) {
+            liveSenderRef.current.stop();
+            liveSenderRef.current = null;
+          }
+          lastPositionRef.current = null;
+          setLiveShare({ jobId: null, state: "off" });
+          setLocationDenied(true);
+        }
       },
       { enableHighAccuracy: true, maximumAge: 1e4, timeout: 1e4 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [activeJobs]);
+    locationWatchRef.current = watchId;
+    return () => {
+      if (locationWatchRef.current === watchId) {
+        navigator.geolocation.clearWatch(watchId);
+        locationWatchRef.current = null;
+        lastPositionRef.current = null;
+      }
+    };
+  }, [activeJobs, signedInId]);
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
     let armed = false, timer = null;

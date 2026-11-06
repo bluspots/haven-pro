@@ -11,7 +11,13 @@
  *  3. Board / unassigned / SIM jobs → no call.
  *  4. Any status other than en_route → no call; a running session stops.
  *  5. rate_limited → continues after the wait; tracking_not_active / not_found /
- *     not_authenticated / invalid_point / 401 / 403 → stops.
+ *     not_authenticated / invalid_point / 401 / 403 / other 4xx → stops at once.
+ *     Founder-locked retry rule (2026-11-06): thrown fetch, 5xx, 408 and a malformed
+ *     success body keep the session and retry after 10 s, 20 s, then 30 s (staying at
+ *     30 s); an ok resets to the normal cadence; a retry sends only the latest fix.
+ *  Fix 1: location permission denied (from the start, or revoked after sharing) stops
+ *     the sender at once, cached fix included; the no-permission notice follows.
+ *  Fix 2: sign-out ends the location watch (clearWatch) as well as sending.
  *  6. A (0, 0) fix and a fix worse than ~100 m are not sent.
  *  7. Never the operating-area save, never jobs.lat / jobs.lng, never localStorage.
  *  8. The locked notice text on an en_route job screen.
@@ -165,6 +171,46 @@ async function senderChecks() {
     ok(sends.length === 2, "no connection: tried again 10 s later");
   }
   {
+    // Founder-locked backoff: 10 s, 20 s, 30 s, 30 s ... then an ok resets the cadence.
+    const results = ["retry", "retry", "retry", "retry", "retry", "ok", "ok", "retry", "retry", "ok", "ok"];
+    const { s, clock, sends } = makeSender(L, n => ({ state: results[n - 1] || "ok" }));
+    // A fresh fix arrives every 5 s, each one ~110 m further on (always "moving").
+    // Fixes land between send times (offset 2.5 s) so "latest at send time" is unambiguous.
+    let k = 0;
+    const fed = [];
+    const feed = () => { const lat = NEAR.lat + 0.001 * (++k); fed.push({ lat, at: clock.now() }); s.onPosition(pos({ lat, lng: NEAR.lng })); };
+    feed(); await flush();
+    await clock.advance(2500);
+    for (let i = 0; i < 40; i++) { feed(); await flush(); await clock.advance(5000); }
+    const gaps = sends.slice(1).map((x, i) => x.at - sends[i].at);
+    ok(JSON.stringify(gaps.slice(0, 5)) === JSON.stringify([10000, 20000, 30000, 30000, 30000]), "4. retryable failures back off 10 s, 20 s, 30 s, then stay at 30 s");
+    ok(!s.isStopped(), "4. the session stays alive through repeated outages");
+    ok(gaps[5] === 10000 && gaps[6] === 10000, "4. an ok resets the backoff to the normal 10 s moving cadence");
+    ok(gaps[7] === 10000 && gaps[8] === 20000 && gaps[9] === 10000, "4. a later outage starts the backoff again at 10 s, then 20 s (the ok reset it)");
+    const latestAt = t => fed.filter(f => f.at <= t).pop();
+    ok(sends.every(x => x.fix.lat === latestAt(x.at).lat), "5. every attempt (retries included) sends only the latest good fix");
+    ok(new Set(sends.map(x => x.fix.lat)).size === sends.length && sends.length === 1 + gaps.length, "5. no queued trail: one point per attempt, missed fixes are never uploaded later");
+  }
+  {
+    // After an ok the stationary heartbeat is back at 30 s.
+    const { s, clock, sends } = makeSender(L, n => ({ state: n === 1 ? "retry" : "ok" }));
+    s.onPosition(pos(NEAR)); await flush();
+    await clock.advance(10000);
+    ok(sends.length === 2, "retry then ok");
+    s.onPosition(pos(NEAR)); await flush();
+    await clock.advance(29999);
+    ok(sends.length === 2, "after the reset, not moving: no send before 30 s");
+    await clock.advance(1);
+    ok(sends.length === 3, "after the reset, not moving: 30 s heartbeat");
+  }
+  {
+    // Retries never resend a fix older than 2 minutes.
+    const { s, clock, sends } = makeSender(L, { state: "retry" });
+    s.onPosition(pos(NEAR)); await flush();
+    await clock.advance(600000);
+    ok(sends.every(x => x.at - x.fix.receivedAt <= 120000) && JSON.stringify(sends.map(x => (x.at - sends[0].at) / 1000)) === "[0,10,30,60,90,120]", "5. a retry never sends a fix older than 2 minutes");
+  }
+  {
     const { s, clock, sends } = makeSender(L, { state: "ok" });
     s.onPosition(pos({ lat: 0, lng: 0 })); s.onPosition(pos(NEAR, { coords: { latitude: NEAR.lat, longitude: NEAR.lng, accuracy: 500 } }));
     await clock.advance(60000);
@@ -222,11 +268,22 @@ async function adapterChecks() {
     ["401", () => json(401, {}), r => r.state === "stop" && r.error === "not_authenticated"],
     ["403", () => json(403, {}), r => r.state === "stop" && r.error === "not_authenticated"],
     ["400", () => json(400, {}), r => r.state === "stop"],
+    ["404", () => json(404, {}), r => r.state === "stop"],
+    ["429", () => json(429, {}), r => r.state === "rate_limited"],
     ["500", () => json(500, {}), r => r.state === "retry"],
+    ["503", () => json(503, {}), r => r.state === "retry"],
+    ["408", () => json(408, {}), r => r.state === "retry"],
     ["network", () => { throw new Error("offline"); }, r => r.state === "retry"],
+    ["malformed: not JSON", () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("bad"); } }), r => r.state === "retry"],
+    ["malformed: null", () => json(200, null), r => r.state === "retry"],
+    ["malformed: array", () => json(200, []), r => r.state === "retry"],
+    ["malformed: {}", () => json(200, {}), r => r.state === "retry"],
+    ["malformed: ok not boolean", () => json(200, { ok: "yes" }), r => r.state === "retry"],
+    ["malformed: ok false without error", () => json(200, { ok: false }), r => r.state === "retry"],
   ]) {
     const { api } = loadAdapter(async () => resp(), true);
-    ok(want(await api.sendProLiveLocation(JOB, fix)), "5. " + label + " → " + (label === "rate_limited" ? "wait and continue" : (label === "500" || label === "network") ? "keep the session, try again" : "stop"));
+    const retry = /^(5\d\d|408|network|malformed)/.test(label);
+    ok(want(await api.sendProLiveLocation(JOB, fix)), "5. " + label + " → " + (label === "rate_limited" || label === "429" ? "wait and continue" : retry ? "keep the session, retry with backoff" : "stop"));
   }
 }
 
@@ -264,12 +321,14 @@ async function renderApp(opts) {
   window.requestAnimationFrame = window.requestAnimationFrame || (cb => setTimeout(cb, 0));
   window.cancelAnimationFrame = window.cancelAnimationFrame || (id => clearTimeout(id));
   window.localStorage.clear();
-  const geo = { watchers: new Map(), seq: 0, cleared: 0 };
+  const geo = { watchers: new Map(), all: [], seq: 0, cleared: 0, delivered: { after: 0 } };
   geo.emit = p => { for (const w of geo.watchers.values()) w.ok(p); };
+  // Like a platform that still fires a cleared watch once: the app must ignore it.
+  geo.emitAll = p => { for (const w of geo.all) { if (geo.watchers.has(w.id)) geo.delivered.after++; w.ok(p); } };
   geo.fail = code => { for (const w of geo.watchers.values()) if (w.err) w.err({ code }); };
   Object.defineProperty(window.navigator, "geolocation", { configurable: true, value: {
     watchPosition(okCb, errCb) {
-      const id = ++geo.seq; geo.watchers.set(id, { ok: okCb, err: errCb });
+      const id = ++geo.seq; geo.watchers.set(id, { ok: okCb, err: errCb }); geo.all.push({ id, ok: okCb });
       setTimeout(() => { if (!geo.watchers.has(id)) return; if (opts.denied) errCb && errCb({ code: 1 }); else okCb(pos(opts.at || NEAR)); }, 5);
       return id;
     },
@@ -428,6 +487,27 @@ async function appChecks() {
     w.close();
   }
 
+  console.log("App: permission revoked after sharing started:");
+  {
+    const app = await renderApp({ rows: [activeRow()], live: fastRateLimited });
+    const w = app.window;
+    await waitFor(w, () => liveCalls(app.calls).length >= 3, "sending a cached fix repeatedly");
+    clickText(w, /My Jobs$/); await sleep(150);
+    clickText(w, /Fix leaking faucet/); await sleep(200);
+    await waitFor(w, x => !!notice(x) && notice(x).getAttribute("data-live-state") === "sharing", "sharing notice");
+    app.geo.fail(1); // PERMISSION_DENIED from the running watch
+    await sleep(60);
+    const n = liveCalls(app.calls).length;
+    await sleep(1000);
+    ok(liveCalls(app.calls).length === n, "Fix 1: after a revoke, the cached fix is not sent again (sender stopped at once)");
+    ok(notice(w).getAttribute("data-live-state") === "no-permission" && /doesn't have location permission/.test(noticeText(w)), "Fix 1: the no-permission notice shows once sending has stopped");
+    app.geo.emit(pos(NEAR)); // permission granted again
+    await waitFor(w, () => liveCalls(app.calls).length > n, "sharing resumes with permission");
+    ok(notice(w).getAttribute("data-live-state") === "sharing", "with permission back and the job still en_route, sharing resumes");
+    noLeaks(app, "revoke");
+    w.close();
+  }
+
   console.log("App: sign-out stops sending:");
   {
     const app = await renderApp({ rows: [activeRow()], live: fastRateLimited });
@@ -441,8 +521,10 @@ async function appChecks() {
     await waitFor(w, () => !app.state.session, "signed out");
     await sleep(400);
     const n = liveCalls(app.calls).length;
-    app.geo.emit(pos(FAR)); await sleep(800);
+    ok(app.geo.watchers.size === 0 && app.geo.cleared >= 1, "Fix 2: sign-out ends the location watch (clearWatch)");
+    app.geo.emitAll(pos(FAR)); await sleep(800);
     ok(liveCalls(app.calls).length === n, "9. after sign-out nothing more is sent");
+    ok(app.geo.delivered.after === 0, "Fix 2: after sign-out no position reaches the app");
     noLeaks(app, "sign-out");
     w.close();
   }
@@ -458,7 +540,9 @@ function shippedChecks() {
     ok(!/sb_secret_[A-Za-z0-9]|"role"\s*:\s*"service_role"|sk\.eyJ/.test(html), f + ": no secret key value");
   }
   ok((app.match(/watchPosition\(/g) || []).length === 1, "one watchPosition in the app (sending hooks onto the existing watch)");
-  ok(!/visibilitychange/.test(app) && !/clearWatch/.test(app.replace(/return \(\) => navigator\.geolocation\.clearWatch\(watchId\);/, "")), "the watch is not stopped on visibilitychange / app hide");
+  ok(!/visibilitychange|onblur|"blur"|pagehide/.test(app), "the watch is not stopped on visibilitychange / blur / app hide");
+  ok((app.match(/clearWatch\(/g) || []).length === 2 && /function endLocationWatch\(\) \{\n    if \(locationWatchRef\.current != null && navigator\.geolocation\) navigator\.geolocation\.clearWatch/.test(app) && /navigator\.geolocation\.clearWatch\(watchId\); locationWatchRef\.current = null;/.test(app), "the watch ends only in its effect cleanup and on sign-out");
+  ok(/endLocationWatch\(\); \/\/ and the location watch ends with it/.test(app) && /if \(!signedInId \|\| !activeJobs\.some/.test(app), "Fix 2: no watch while signed out; sign-out ends it directly");
   ok(/enableHighAccuracy: true/.test(app), "high accuracy stays on");
   ok(/stopLiveSharing\(\); \/\/ live location stops at sign-out/.test(app), "9. sign-out stops sharing");
   const stripComments = t => t.replace(/\/\/[^\n]*/g, "");

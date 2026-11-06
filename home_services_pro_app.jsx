@@ -898,6 +898,8 @@ export default function HavenProApp() {
     setSettingsAuthOpen(false);
     clearAllDestinations(); // MAP-05: no exact destination survives sign-out
     stopLiveSharing(); // live location stops at sign-out
+    endLocationWatch(); // and the location watch ends with it
+    setLocationDenied(false);
     clearAuthLinkedAccount();
     // Signing out never leaves a sessionless (local) account behind.
     if (accountSourceRef.current === "local") dropSessionlessAccount();
@@ -1515,6 +1517,7 @@ export default function HavenProApp() {
   // fed by the existing watch below (no second watch). The point is sent only
   // through pro_update_live_location and kept nowhere else.
   const liveSenderRef = useRef(null);
+  const lastPositionRef = useRef(null); // latest device fix, memory only; dropped on deny / watch end / sign-out
   const liveStoppedJobRef = useRef(null); // job id whose sharing the server ended
   const [liveShare, setLiveShare] = useState({ jobId: null, state: "off" }); // off | sharing | stopped
   const [locationDenied, setLocationDenied] = useState(false);
@@ -1526,6 +1529,7 @@ export default function HavenProApp() {
   }
   useEffect(() => {
     if (!liveShareJobId) { liveStoppedJobRef.current = null; stopLiveSharing(); return; }
+    if (locationDenied) { stopLiveSharing(); return; } // no permission: nothing is sent
     if (liveStoppedJobRef.current === liveShareJobId) return; // the server already ended it
     if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
     stopLiveSharing();
@@ -1539,7 +1543,11 @@ export default function HavenProApp() {
     });
     liveSenderRef.current = sender;
     setLiveShare({ jobId: liveShareJobId, state: "sharing" });
-  }, [liveShareJobId]);
+    // Start from a fix that arrived just before this session existed (e.g. the fix
+    // that showed permission is back), only if it is under 30 s old.
+    const last = lastPositionRef.current;
+    if (last && typeof last.timestamp === "number" && Date.now() - last.timestamp < 30000) sender.onPosition(last);
+  }, [liveShareJobId, locationDenied]);
   useEffect(() => () => { if (liveSenderRef.current) liveSenderRef.current.stop(); }, []);
 
   // Live location — only watched while a job is actually en_route, to gate
@@ -1547,23 +1555,45 @@ export default function HavenProApp() {
   // backend job, feed the live-location sender above. If the device or the
   // job has no coordinates, arrival stays closed. Missing coordinates are not
   // inside the radius. Not stopped when the app is hidden: it runs for as long
-  // as the operating system keeps delivering positions.
+  // as the operating system keeps delivering positions. Signed out: no watch
+  // (sign-out also ends it directly, see endLocationWatch).
+  const locationWatchRef = useRef(null);
+  function endLocationWatch() {
+    if (locationWatchRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    locationWatchRef.current = null;
+    lastPositionRef.current = null;
+    setProLiveLocation(null);
+  }
+  const signedInId = authSession ? (authSession.id || "signed-in") : null;
   useEffect(() => {
-    if (!activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
+    if (!signedInId || !activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
       pos => {
+        if (locationWatchRef.current !== watchId) return; // ended (sign-out): ignore late positions
+        lastPositionRef.current = pos;
         setLocationDenied(false);
         setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
         if (liveSenderRef.current) liveSenderRef.current.onPosition(pos);
       },
       err => {
+        if (locationWatchRef.current !== watchId) return;
         setProLiveLocation(null);
-        if (err && err.code === 1) setLocationDenied(true); // PERMISSION_DENIED: nothing is sent
+        if (err && err.code === 1) {
+          // PERMISSION_DENIED (from the start or revoked while sharing): stop the
+          // sender first (drops its cached fix), then say so. Nothing is sent.
+          if (liveSenderRef.current) { liveSenderRef.current.stop(); liveSenderRef.current = null; }
+          lastPositionRef.current = null;
+          setLiveShare({ jobId: null, state: "off" });
+          setLocationDenied(true);
+        }
       },
       { enableHighAccuracy: true, maximumAge: 10000, timeout: 10000 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [activeJobs]);
+    locationWatchRef.current = watchId;
+    return () => {
+      if (locationWatchRef.current === watchId) { navigator.geolocation.clearWatch(watchId); locationWatchRef.current = null; lastPositionRef.current = null; }
+    };
+  }, [activeJobs, signedInId]);
 
   // Tap the status bar to scroll to the top (same as Haven Customer). iOS
   // scrolls the page, not the app's inner scroll areas, when the status bar

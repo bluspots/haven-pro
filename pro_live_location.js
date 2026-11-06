@@ -16,14 +16,18 @@
 // - rate_limited: wait retry_after_s (4 s if missing) and carry on.
 // - Any other refusal (not_found, tracking_not_active, not_authenticated,
 //   invalid_point, 401/403, other 4xx) stops sending for this job.
-// - No connection / server error: not a refusal. Keep the session and try
-//   again on the normal cadence (10 s minimum between attempts).
+// - Brief outages are not a refusal (founder-locked 2026-11-06): a thrown
+//   fetch, HTTP 5xx, HTTP 408 or a malformed success body keep the session and
+//   retry after 10 s, then 20 s, then 30 s (staying at 30 s) until an ok, which
+//   resets to the normal cadence. A retry sends only the latest good fix; missed
+//   points are never queued or uploaded later.
 
 const HAVEN_LIVE_MIN_INTERVAL_MS = 10000;   // moving
 const HAVEN_LIVE_HEARTBEAT_MS = 30000;      // not moving
 const HAVEN_LIVE_MOVE_M = 25;
 const HAVEN_LIVE_MAX_ACCURACY_M = 100;
 const HAVEN_LIVE_RATE_LIMIT_DEFAULT_S = 4;
+const HAVEN_LIVE_RETRY_WAITS_MS = [10000, 20000, 30000]; // then stays at 30 s
 // A heartbeat never repeats a fix older than this: if the device has stopped
 // reporting, sending stops too, and the Customer side shows "paused" honestly.
 const HAVEN_LIVE_MAX_FIX_AGE_MS = 120000;
@@ -67,7 +71,7 @@ function havenCreateLiveSender(jobId, deps) {
   const setTimer = deps.setTimer || ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer || (id => clearTimeout(id));
   let latest = null, lastSent = null, lastSentAt = 0, lastAttemptAt = 0, holdUntil = 0;
-  let inFlight = false, stopped = false, timer = null, sentCount = 0;
+  let inFlight = false, stopped = false, timer = null, sentCount = 0, failStreak = 0;
 
   function schedule(ms) {
     if (timer != null) clearTimer(timer);
@@ -99,12 +103,17 @@ function havenCreateLiveSender(jobId, deps) {
       inFlight = false;
       if (stopped) return;
       const r = res || { state: "retry" };
-      if (r.state === "ok") { lastSent = fix; lastSentAt = lastAttemptAt; sentCount++; }
+      if (r.state === "ok") { lastSent = fix; lastSentAt = lastAttemptAt; sentCount++; failStreak = 0; holdUntil = 0; }
       else if (r.state === "rate_limited") {
         const s = Number(r.retryAfterS);
         holdUntil = now() + 1000 * (Number.isFinite(s) && s > 0 ? s : HAVEN_LIVE_RATE_LIMIT_DEFAULT_S);
         lastAttemptAt = 0; // the server's wait replaces the 10 s spacing
       } else if (r.state === "stop") { stop(r.error || "stopped"); return; }
+      else { // retry: brief outage, back off 10 s, 20 s, 30 s, 30 s...
+        holdUntil = now() + HAVEN_LIVE_RETRY_WAITS_MS[Math.min(failStreak, HAVEN_LIVE_RETRY_WAITS_MS.length - 1)];
+        failStreak++;
+        lastAttemptAt = 0;
+      }
       pump();
     });
   }

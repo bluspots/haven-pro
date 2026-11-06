@@ -866,8 +866,9 @@ async function fetchAssignedJobDestination(jobId) {
 // The point travels only in the POST JSON body, never on a URL. Never logged,
 // never stored. No session -> no call. Result for havenCreateLiveSender:
 //   { state: "ok" } | { state: "rate_limited", retryAfterS } |
-//   { state: "stop", error } (any refusal: stop sending) |
-//   { state: "retry" } (no connection or server error: not a refusal).
+//   { state: "stop", error } (a real refusal: stop sending) |
+//   { state: "retry" } (brief outage: thrown fetch, 5xx, 408 or a malformed
+//   success body; the sender backs off 10 s / 20 s / 30 s and keeps sharing).
 async function sendProLiveLocation(jobId, fix) {
   const cfg = getSupabaseConfig();
   if (!cfg || !looksLikeUuid(jobId)) return { state: "stop", error: "not_found" };
@@ -898,8 +899,9 @@ async function sendProLiveLocation(jobId, fix) {
   try { out = await res.json(); } catch (e) { out = null; }
   if (!out || typeof out !== "object" || Array.isArray(out)) return { state: "retry" };
   if (out.ok === true) return { state: "ok" };
+  if (out.ok !== false || typeof out.error !== "string" || !out.error) return { state: "retry" }; // malformed
   if (out.error === "rate_limited") return { state: "rate_limited", retryAfterS: out.retry_after_s };
-  return { state: "stop", error: typeof out.error === "string" ? out.error : "refused" };
+  return { state: "stop", error: out.error };
 }
 
 // Read the assigned job's current status. null on miss / error (caller fail-closes).
@@ -2123,14 +2125,18 @@ function HavenEnRouteNavigation(props) {
 // - rate_limited: wait retry_after_s (4 s if missing) and carry on.
 // - Any other refusal (not_found, tracking_not_active, not_authenticated,
 //   invalid_point, 401/403, other 4xx) stops sending for this job.
-// - No connection / server error: not a refusal. Keep the session and try
-//   again on the normal cadence (10 s minimum between attempts).
+// - Brief outages are not a refusal (founder-locked 2026-11-06): a thrown
+//   fetch, HTTP 5xx, HTTP 408 or a malformed success body keep the session and
+//   retry after 10 s, then 20 s, then 30 s (staying at 30 s) until an ok, which
+//   resets to the normal cadence. A retry sends only the latest good fix; missed
+//   points are never queued or uploaded later.
 
 const HAVEN_LIVE_MIN_INTERVAL_MS = 10000;   // moving
 const HAVEN_LIVE_HEARTBEAT_MS = 30000;      // not moving
 const HAVEN_LIVE_MOVE_M = 25;
 const HAVEN_LIVE_MAX_ACCURACY_M = 100;
 const HAVEN_LIVE_RATE_LIMIT_DEFAULT_S = 4;
+const HAVEN_LIVE_RETRY_WAITS_MS = [10000, 20000, 30000]; // then stays at 30 s
 // A heartbeat never repeats a fix older than this: if the device has stopped
 // reporting, sending stops too, and the Customer side shows "paused" honestly.
 const HAVEN_LIVE_MAX_FIX_AGE_MS = 120000;
@@ -2174,7 +2180,7 @@ function havenCreateLiveSender(jobId, deps) {
   const setTimer = deps.setTimer || ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer || (id => clearTimeout(id));
   let latest = null, lastSent = null, lastSentAt = 0, lastAttemptAt = 0, holdUntil = 0;
-  let inFlight = false, stopped = false, timer = null, sentCount = 0;
+  let inFlight = false, stopped = false, timer = null, sentCount = 0, failStreak = 0;
 
   function schedule(ms) {
     if (timer != null) clearTimer(timer);
@@ -2206,12 +2212,17 @@ function havenCreateLiveSender(jobId, deps) {
       inFlight = false;
       if (stopped) return;
       const r = res || { state: "retry" };
-      if (r.state === "ok") { lastSent = fix; lastSentAt = lastAttemptAt; sentCount++; }
+      if (r.state === "ok") { lastSent = fix; lastSentAt = lastAttemptAt; sentCount++; failStreak = 0; holdUntil = 0; }
       else if (r.state === "rate_limited") {
         const s = Number(r.retryAfterS);
         holdUntil = now() + 1000 * (Number.isFinite(s) && s > 0 ? s : HAVEN_LIVE_RATE_LIMIT_DEFAULT_S);
         lastAttemptAt = 0; // the server's wait replaces the 10 s spacing
       } else if (r.state === "stop") { stop(r.error || "stopped"); return; }
+      else { // retry: brief outage, back off 10 s, 20 s, 30 s, 30 s...
+        holdUntil = now() + HAVEN_LIVE_RETRY_WAITS_MS[Math.min(failStreak, HAVEN_LIVE_RETRY_WAITS_MS.length - 1)];
+        failStreak++;
+        lastAttemptAt = 0;
+      }
       pump();
     });
   }
@@ -3130,6 +3141,8 @@ function HavenProApp() {
     setSettingsAuthOpen(false);
     clearAllDestinations(); // MAP-05: no exact destination survives sign-out
     stopLiveSharing(); // live location stops at sign-out
+    endLocationWatch(); // and the location watch ends with it
+    setLocationDenied(false);
     clearAuthLinkedAccount();
     // Signing out never leaves a sessionless (local) account behind.
     if (accountSourceRef.current === "local") dropSessionlessAccount();
@@ -3747,6 +3760,7 @@ function HavenProApp() {
   // fed by the existing watch below (no second watch). The point is sent only
   // through pro_update_live_location and kept nowhere else.
   const liveSenderRef = useRef(null);
+  const lastPositionRef = useRef(null); // latest device fix, memory only; dropped on deny / watch end / sign-out
   const liveStoppedJobRef = useRef(null); // job id whose sharing the server ended
   const [liveShare, setLiveShare] = useState({ jobId: null, state: "off" }); // off | sharing | stopped
   const [locationDenied, setLocationDenied] = useState(false);
@@ -3758,6 +3772,7 @@ function HavenProApp() {
   }
   useEffect(() => {
     if (!liveShareJobId) { liveStoppedJobRef.current = null; stopLiveSharing(); return; }
+    if (locationDenied) { stopLiveSharing(); return; } // no permission: nothing is sent
     if (liveStoppedJobRef.current === liveShareJobId) return; // the server already ended it
     if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
     stopLiveSharing();
@@ -3771,7 +3786,11 @@ function HavenProApp() {
     });
     liveSenderRef.current = sender;
     setLiveShare({ jobId: liveShareJobId, state: "sharing" });
-  }, [liveShareJobId]);
+    // Start from a fix that arrived just before this session existed (e.g. the fix
+    // that showed permission is back), only if it is under 30 s old.
+    const last = lastPositionRef.current;
+    if (last && typeof last.timestamp === "number" && Date.now() - last.timestamp < 30000) sender.onPosition(last);
+  }, [liveShareJobId, locationDenied]);
   useEffect(() => () => { if (liveSenderRef.current) liveSenderRef.current.stop(); }, []);
 
   // Live location — only watched while a job is actually en_route, to gate
@@ -3779,23 +3798,45 @@ function HavenProApp() {
   // backend job, feed the live-location sender above. If the device or the
   // job has no coordinates, arrival stays closed. Missing coordinates are not
   // inside the radius. Not stopped when the app is hidden: it runs for as long
-  // as the operating system keeps delivering positions.
+  // as the operating system keeps delivering positions. Signed out: no watch
+  // (sign-out also ends it directly, see endLocationWatch).
+  const locationWatchRef = useRef(null);
+  function endLocationWatch() {
+    if (locationWatchRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    locationWatchRef.current = null;
+    lastPositionRef.current = null;
+    setProLiveLocation(null);
+  }
+  const signedInId = authSession ? (authSession.id || "signed-in") : null;
   useEffect(() => {
-    if (!activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
+    if (!signedInId || !activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
       pos => {
+        if (locationWatchRef.current !== watchId) return; // ended (sign-out): ignore late positions
+        lastPositionRef.current = pos;
         setLocationDenied(false);
         setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
         if (liveSenderRef.current) liveSenderRef.current.onPosition(pos);
       },
       err => {
+        if (locationWatchRef.current !== watchId) return;
         setProLiveLocation(null);
-        if (err && err.code === 1) setLocationDenied(true); // PERMISSION_DENIED: nothing is sent
+        if (err && err.code === 1) {
+          // PERMISSION_DENIED (from the start or revoked while sharing): stop the
+          // sender first (drops its cached fix), then say so. Nothing is sent.
+          if (liveSenderRef.current) { liveSenderRef.current.stop(); liveSenderRef.current = null; }
+          lastPositionRef.current = null;
+          setLiveShare({ jobId: null, state: "off" });
+          setLocationDenied(true);
+        }
       },
       { enableHighAccuracy: true, maximumAge: 10000, timeout: 10000 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [activeJobs]);
+    locationWatchRef.current = watchId;
+    return () => {
+      if (locationWatchRef.current === watchId) { navigator.geolocation.clearWatch(watchId); locationWatchRef.current = null; lastPositionRef.current = null; }
+    };
+  }, [activeJobs, signedInId]);
 
   // Tap the status bar to scroll to the top (same as Haven Customer). iOS
   // scrolls the page, not the app's inner scroll areas, when the status bar

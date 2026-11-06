@@ -515,8 +515,9 @@ async function fetchAssignedJobDestination(jobId) {
 // The point travels only in the POST JSON body, never on a URL. Never logged,
 // never stored. No session -> no call. Result for havenCreateLiveSender:
 //   { state: "ok" } | { state: "rate_limited", retryAfterS } |
-//   { state: "stop", error } (any refusal: stop sending) |
-//   { state: "retry" } (no connection or server error: not a refusal).
+//   { state: "stop", error } (a real refusal: stop sending) |
+//   { state: "retry" } (brief outage: thrown fetch, 5xx, 408 or a malformed
+//   success body; the sender backs off 10 s / 20 s / 30 s and keeps sharing).
 async function sendProLiveLocation(jobId, fix) {
   const cfg = getSupabaseConfig();
   if (!cfg || !looksLikeUuid(jobId)) return { state: "stop", error: "not_found" };
@@ -547,8 +548,9 @@ async function sendProLiveLocation(jobId, fix) {
   try { out = await res.json(); } catch (e) { out = null; }
   if (!out || typeof out !== "object" || Array.isArray(out)) return { state: "retry" };
   if (out.ok === true) return { state: "ok" };
+  if (out.ok !== false || typeof out.error !== "string" || !out.error) return { state: "retry" }; // malformed
   if (out.error === "rate_limited") return { state: "rate_limited", retryAfterS: out.retry_after_s };
-  return { state: "stop", error: typeof out.error === "string" ? out.error : "refused" };
+  return { state: "stop", error: out.error };
 }
 
 // Read the assigned job's current status. null on miss / error (caller fail-closes).
