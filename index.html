@@ -716,6 +716,44 @@ async function fetchAssignedJobDestination(jobId) {
     return { state: "error", error: "network" };
   }
 }
+async function sendProLiveLocation(jobId, fix) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return { state: "stop", error: "not_found" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok || actor.mode !== "session") return { state: "stop", error: "not_authenticated" };
+  const body = { p_job_id: jobId, p_lat: fix.lat, p_lng: fix.lng };
+  if (typeof fix.capturedAt === "number" && Number.isFinite(fix.capturedAt)) body.p_captured_at = new Date(fix.capturedAt).toISOString();
+  let res;
+  try {
+    res = await fetch(`${cfg.url}/rest/v1/rpc/pro_update_live_location`, {
+      method: "POST",
+      headers: {
+        apikey: actor.headers.apikey,
+        Authorization: actor.headers.Authorization,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    return { state: "retry" };
+  }
+  if (res.status === 401 || res.status === 403) return { state: "stop", error: "not_authenticated" };
+  if (res.status === 429) return { state: "rate_limited", retryAfterS: null };
+  if (res.status >= 500 || res.status === 408) return { state: "retry" };
+  if (!res.ok) return { state: "stop", error: "http_" + res.status };
+  let out = null;
+  try {
+    out = await res.json();
+  } catch (e) {
+    out = null;
+  }
+  if (!out || typeof out !== "object" || Array.isArray(out)) return { state: "retry" };
+  if (out.ok === true) return { state: "ok" };
+  if (out.ok !== false || typeof out.error !== "string" || !out.error) return { state: "retry" };
+  if (out.error === "rate_limited") return { state: "rate_limited", retryAfterS: out.retry_after_s };
+  return { state: "stop", error: out.error };
+}
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();
   if (!cfg || !looksLikeUuid(jobId)) return null;
@@ -1798,6 +1836,129 @@ function HavenEnRouteNavigation(props) {
     )
   );
 }
+const HAVEN_LIVE_MIN_INTERVAL_MS = 1e4;
+const HAVEN_LIVE_HEARTBEAT_MS = 3e4;
+const HAVEN_LIVE_MOVE_M = 25;
+const HAVEN_LIVE_MAX_ACCURACY_M = 100;
+const HAVEN_LIVE_RATE_LIMIT_DEFAULT_S = 4;
+const HAVEN_LIVE_RETRY_WAITS_MS = [1e4, 2e4, 3e4];
+const HAVEN_LIVE_MAX_FIX_AGE_MS = 12e4;
+const HAVEN_LIVE_NOTICE = "Sharing your location with this customer until you arrive.";
+const HAVEN_LIVE_NO_PERMISSION = "Your location isn't being shared with this customer because Haven Pro doesn't have location permission.";
+const HAVEN_LIVE_STOPPED = "Your location isn't being shared with this customer right now.";
+function havenLiveShareEligible(job, backendConfigured) {
+  return !!backendConfigured && !!job && !!job.backendClaimed && job.status === "en_route" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(job.id || ""));
+}
+function havenLiveFix(pos) {
+  const c = pos && pos.coords;
+  if (!c) return null;
+  const lat = c.latitude, lng = c.longitude;
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  if (typeof c.accuracy === "number" && (!Number.isFinite(c.accuracy) || c.accuracy > HAVEN_LIVE_MAX_ACCURACY_M)) return null;
+  const t = typeof pos.timestamp === "number" && Number.isFinite(pos.timestamp) ? pos.timestamp : null;
+  return { lat, lng, capturedAt: t };
+}
+function havenMetersBetween(a, b) {
+  const R = 6371e3, toRad = (d) => d * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+function havenCreateLiveSender(jobId, deps) {
+  const now = deps.now || (() => Date.now());
+  const setTimer = deps.setTimer || ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = deps.clearTimer || ((id) => clearTimeout(id));
+  let latest = null, lastSent = null, lastSentAt = 0, lastAttemptAt = 0, holdUntil = 0;
+  let inFlight = false, stopped = false, timer = null, sentCount = 0, failStreak = 0;
+  function schedule(ms) {
+    if (timer != null) clearTimer(timer);
+    timer = setTimer(() => {
+      timer = null;
+      pump();
+    }, Math.max(0, ms));
+  }
+  function stop(code) {
+    if (stopped) return;
+    stopped = true;
+    latest = null;
+    lastSent = null;
+    if (timer != null) {
+      clearTimer(timer);
+      timer = null;
+    }
+    if (code && typeof deps.onStop === "function") deps.onStop(code);
+  }
+  function pump() {
+    if (stopped || inFlight || !latest) return;
+    const t = now();
+    if (t < holdUntil) {
+      schedule(holdUntil - t);
+      return;
+    }
+    let due;
+    if (holdUntil) due = holdUntil;
+    else if (!lastSent) due = lastAttemptAt ? lastAttemptAt + HAVEN_LIVE_MIN_INTERVAL_MS : t;
+    else {
+      const moved = havenMetersBetween(lastSent, latest) >= HAVEN_LIVE_MOVE_M;
+      due = lastSentAt + (moved ? HAVEN_LIVE_MIN_INTERVAL_MS : HAVEN_LIVE_HEARTBEAT_MS);
+      if (lastAttemptAt) due = Math.max(due, lastAttemptAt + HAVEN_LIVE_MIN_INTERVAL_MS);
+    }
+    if (t < due) {
+      schedule(due - t);
+      return;
+    }
+    if (latest.receivedAt != null && t - latest.receivedAt > HAVEN_LIVE_MAX_FIX_AGE_MS) return;
+    const fix = latest;
+    inFlight = true;
+    lastAttemptAt = t;
+    Promise.resolve().then(() => deps.send(jobId, fix)).then((res) => res, () => ({ state: "retry" })).then((res) => {
+      inFlight = false;
+      if (stopped) return;
+      const r = res || { state: "retry" };
+      if (r.state === "ok") {
+        lastSent = fix;
+        lastSentAt = lastAttemptAt;
+        sentCount++;
+        failStreak = 0;
+        holdUntil = 0;
+      } else if (r.state === "rate_limited") {
+        const s = Number(r.retryAfterS);
+        holdUntil = now() + 1e3 * (Number.isFinite(s) && s > 0 ? s : HAVEN_LIVE_RATE_LIMIT_DEFAULT_S);
+        lastAttemptAt = 0;
+      } else if (r.state === "stop") {
+        stop(r.error || "stopped");
+        return;
+      } else {
+        holdUntil = now() + HAVEN_LIVE_RETRY_WAITS_MS[Math.min(failStreak, HAVEN_LIVE_RETRY_WAITS_MS.length - 1)];
+        failStreak++;
+        lastAttemptAt = 0;
+      }
+      pump();
+    });
+  }
+  return {
+    jobId,
+    // A raw device position (GeolocationPosition-like). Bad fixes are ignored.
+    onPosition(pos) {
+      if (stopped) return;
+      const f = havenLiveFix(pos);
+      if (!f) return;
+      latest = { lat: f.lat, lng: f.lng, capturedAt: f.capturedAt, receivedAt: now() };
+      pump();
+    },
+    stop() {
+      stop(null);
+    },
+    isStopped() {
+      return stopped;
+    },
+    sentCount() {
+      return sentCount;
+    }
+  };
+}
 const AVATAR_OPTIONS = ["👷", "👷‍♀️", "🧑‍🔧", "👨‍🔧", "👩‍🔧"];
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 function formatShortDate(ts) {
@@ -2527,6 +2688,9 @@ function HavenProApp() {
     setAuthNotice("");
     setSettingsAuthOpen(false);
     clearAllDestinations();
+    stopLiveSharing();
+    endLocationWatch();
+    setLocationDenied(false);
     clearAuthLinkedAccount();
     if (accountSourceRef.current === "local") dropSessionlessAccount();
     showToast("Signed out");
@@ -3117,15 +3281,91 @@ function HavenProApp() {
     const id = setInterval(() => setClockTick(Date.now()), 1e3);
     return () => clearInterval(id);
   }, [activeJobs]);
+  const liveSenderRef = useRef(null);
+  const lastPositionRef = useRef(null);
+  const liveStoppedJobRef = useRef(null);
+  const [liveShare, setLiveShare] = useState({ jobId: null, state: "off" });
+  const [locationDenied, setLocationDenied] = useState(false);
+  const liveShareJob = authSession ? activeJobs.find((j) => havenLiveShareEligible(j, !!getSupabaseConfig())) : null;
+  const liveShareJobId = liveShareJob ? String(liveShareJob.id) : null;
+  function stopLiveSharing() {
+    if (liveSenderRef.current) {
+      liveSenderRef.current.stop();
+      liveSenderRef.current = null;
+    }
+    setLiveShare({ jobId: null, state: "off" });
+  }
   useEffect(() => {
-    if (!activeJobs.some((j) => j.status === "en_route") || !navigator.geolocation) return;
+    if (!liveShareJobId) {
+      liveStoppedJobRef.current = null;
+      stopLiveSharing();
+      return;
+    }
+    if (locationDenied) {
+      stopLiveSharing();
+      return;
+    }
+    if (liveStoppedJobRef.current === liveShareJobId) return;
+    if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
+    stopLiveSharing();
+    const sender = havenCreateLiveSender(liveShareJobId, {
+      send: sendProLiveLocation,
+      onStop: () => {
+        liveStoppedJobRef.current = liveShareJobId;
+        if (liveSenderRef.current === sender) liveSenderRef.current = null;
+        setLiveShare({ jobId: liveShareJobId, state: "stopped" });
+      }
+    });
+    liveSenderRef.current = sender;
+    setLiveShare({ jobId: liveShareJobId, state: "sharing" });
+    const last = lastPositionRef.current;
+    if (last && typeof last.timestamp === "number" && Date.now() - last.timestamp < 3e4) sender.onPosition(last);
+  }, [liveShareJobId, locationDenied]);
+  useEffect(() => () => {
+    if (liveSenderRef.current) liveSenderRef.current.stop();
+  }, []);
+  const locationWatchRef = useRef(null);
+  function endLocationWatch() {
+    if (locationWatchRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    locationWatchRef.current = null;
+    lastPositionRef.current = null;
+    setProLiveLocation(null);
+  }
+  const signedInId = authSession ? authSession.id || "signed-in" : null;
+  useEffect(() => {
+    if (!signedInId || !activeJobs.some((j) => j.status === "en_route") || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
-      (pos) => setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => setProLiveLocation(null),
+      (pos) => {
+        if (locationWatchRef.current !== watchId) return;
+        lastPositionRef.current = pos;
+        setLocationDenied(false);
+        setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        if (liveSenderRef.current) liveSenderRef.current.onPosition(pos);
+      },
+      (err) => {
+        if (locationWatchRef.current !== watchId) return;
+        setProLiveLocation(null);
+        if (err && err.code === 1) {
+          if (liveSenderRef.current) {
+            liveSenderRef.current.stop();
+            liveSenderRef.current = null;
+          }
+          lastPositionRef.current = null;
+          setLiveShare({ jobId: null, state: "off" });
+          setLocationDenied(true);
+        }
+      },
       { enableHighAccuracy: true, maximumAge: 1e4, timeout: 1e4 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [activeJobs]);
+    locationWatchRef.current = watchId;
+    return () => {
+      if (locationWatchRef.current === watchId) {
+        navigator.geolocation.clearWatch(watchId);
+        locationWatchRef.current = null;
+        lastPositionRef.current = null;
+      }
+    };
+  }, [activeJobs, signedInId]);
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
     let armed = false, timer = null;
@@ -4057,6 +4297,24 @@ function HavenProApp() {
       /* @__PURE__ */ React.createElement("div", { style: { display: "block", textAlign: "center", padding: "12px 0", background: T.cta, color: "#fff", fontSize: 13.5, fontWeight: 800, fontFamily: FONT } }, "🗺️ ", hasOrigin ? "Get Directions" : "Open in Maps")
     );
   }
+  function liveShareNotice(job) {
+    if (!havenLiveShareEligible(job, !!getSupabaseConfig())) return null;
+    const id = String(job.id);
+    const noGeo = typeof navigator === "undefined" || !navigator.geolocation;
+    const text = locationDenied || noGeo ? HAVEN_LIVE_NO_PERMISSION : liveShare.jobId === id && liveShare.state === "stopped" ? HAVEN_LIVE_STOPPED : HAVEN_LIVE_NOTICE;
+    const sharing = text === HAVEN_LIVE_NOTICE;
+    return /* @__PURE__ */ React.createElement(
+      "div",
+      {
+        "data-testid": "live-share-notice",
+        "data-live-state": sharing ? "sharing" : text === HAVEN_LIVE_STOPPED ? "stopped" : "no-permission",
+        role: "status",
+        style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", marginBottom: 12, borderRadius: 14, background: sharing ? T.pgt : T.w, border: sharing ? "none" : `1px solid ${T.bd}` }
+      },
+      /* @__PURE__ */ React.createElement("span", { "aria-hidden": "true", style: { fontSize: 16 } }, sharing ? "📡" : "⚠️"),
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: sharing ? T.pgd : T.tx, fontFamily: FONT, lineHeight: 1.35 } }, text)
+    );
+  }
   function formatElapsed(ms) {
     const totalSec = Math.max(0, Math.floor(ms / 1e3));
     const h = Math.floor(totalSec / 3600);
@@ -4089,7 +4347,7 @@ function HavenProApp() {
     const materialsAnchorStep = diagnosis ? "diagnosing" : "in_progress";
     const materialsMidflight = job.status === "materials_requested" || job.status === "materials_approved";
     const currentIdx = materialsMidflight ? steps.indexOf(materialsAnchorStep) + 0.5 : steps.indexOf(job.status);
-    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(popMyJobs) }, backHeader(job.title, popMyJobs), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job.status === "en_route" && mapPanel(job), job.status === "in_progress" && timerPanel(job), /* @__PURE__ */ React.createElement("div", { style: { background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 10 } }, job.category, " · ", job.city), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3 } }, "Labor Payout"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 26, fontWeight: 900, color: T.pg, fontFamily: FONT, marginBottom: diagnosis ? 6 : 12 } }, "$", job.payout), diagnosis && job.inspectionFee != null && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 12 } }, "Inspection Visit: $", job.inspectionFee, " if the repair can't proceed"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 18 } }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" } }, "Distance"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 } }, job.distanceMi != null ? `📍 ${Number(job.distanceMi).toFixed(1)} mi` : "—")), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" } }, "Requested"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 } }, "📅 ", job.requested)))), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(popMyJobs) }, backHeader(job.title, popMyJobs), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" } }, job.status === "en_route" && liveShareNotice(job), job.status === "en_route" && mapPanel(job), job.status === "in_progress" && timerPanel(job), /* @__PURE__ */ React.createElement("div", { style: { background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 10 } }, job.category, " · ", job.city), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: T.ts, textTransform: "uppercase", letterSpacing: 0.3 } }, "Labor Payout"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 26, fontWeight: 900, color: T.pg, fontFamily: FONT, marginBottom: diagnosis ? 6 : 12 } }, "$", job.payout), diagnosis && job.inspectionFee != null && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 600, color: T.ts, fontFamily: FONT, marginBottom: 12 } }, "Inspection Visit: $", job.inspectionFee, " if the repair can't proceed"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 18 } }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" } }, "Distance"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 } }, job.distanceMi != null ? `📍 ${Number(job.distanceMi).toFixed(1)} mi` : "—")), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: T.tm, textTransform: "uppercase" } }, "Requested"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, marginTop: 2 } }, "📅 ", job.requested)))), /* @__PURE__ */ React.createElement(
       "button",
       {
         onClick: () => {
