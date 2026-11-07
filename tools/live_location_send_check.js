@@ -18,6 +18,8 @@
  *  Fix 1: location permission denied (from the start, or revoked after sharing) stops
  *     the sender at once, cached fix included; the no-permission notice follows.
  *  Fix 2: sign-out ends the location watch (clearWatch) as well as sending.
+ *  C1: a retry / rate_limited wait is a deadline: the latest good fix is sent when it
+ *     ends even if it is back near the last success (no 10/30 cadence until an ok).
  *  6. A (0, 0) fix and a fix worse than ~100 m are not sent.
  *  7. Never the operating-area save, never jobs.lat / jobs.lng, never localStorage.
  *  8. The locked notice text on an en_route job screen.
@@ -190,6 +192,49 @@ async function senderChecks() {
     const latestAt = t => fed.filter(f => f.at <= t).pop();
     ok(sends.every(x => x.fix.lat === latestAt(x.at).lat), "5. every attempt (retries included) sends only the latest good fix");
     ok(new Set(sends.map(x => x.fix.lat)).size === sends.length && sends.length === 1 + gaps.length, "5. no queued trail: one point per attempt, missed fixes are never uploaded later");
+  }
+  {
+    // C1 (paper QA of a96f366): the retry wait is a deadline, not a floor. ok at A,
+    // retryable failure at a far point B, then a good point C back near A during the
+    // first 10 s wait: C goes at the locked 10 s retry (then 20 s), not at a 30 s heartbeat.
+    const results = ["ok", "retry", "retry", "ok", "ok"];
+    const { s, clock, sends } = makeSender(L, n => ({ state: results[n - 1] || "ok" }));
+    const A = NEAR, B = FAR, C = { lat: NEAR.lat + 0.0001, lng: NEAR.lng }; // C ≈ 11 m from A
+    s.onPosition(pos(A)); await flush();                       // t=0   A sent, ok
+    await clock.advance(10000); s.onPosition(pos(B)); await flush(); // t=10 B sent, retryable failure
+    await clock.advance(5000); s.onPosition(pos(C)); await flush();  // t=15 C arrives near A
+    await clock.advance(5000);                                  // t=20 the 10 s retry deadline
+    const at = i => sends[i] && (sends[i].at - sends[0].at) / 1000;
+    ok(sends.length === 3 && at(2) === 20, "C1. near the last success: the first retry still goes at the locked 10 s (t=20 s, not 30 s)");
+    ok(sends[2].fix.lat === C.lat, "C1. the retry sends the latest fix (C), not the failed point B");
+    await clock.advance(20000);                                 // t=40 second retry (20 s wait)
+    ok(sends.length === 4 && at(3) === 40 && sends[3].fix.lat === C.lat, "C1. the next retry follows the locked 20 s wait, still not moved");
+    ok(sends.filter(x => x.fix.lat === B.lat).length === 1, "C1. the failed point B is never re-sent or queued");
+    await clock.advance(29999);
+    ok(sends.length === 4, "C1. after the ok, not moving: back to the 30 s heartbeat");
+    await clock.advance(1);
+    ok(sends.length === 5 && at(4) === 70, "C1. heartbeat 30 s after the ok");
+  }
+  {
+    // rate_limited deadline: ok at A, rate_limited (3 s) at far B, then C near A.
+    const results = ["ok", "rate_limited", "ok"];
+    const { s, clock, sends } = makeSender(L, n => (results[n - 1] === "rate_limited" ? { state: "rate_limited", retryAfterS: 3 } : { state: "ok" }));
+    const C = { lat: NEAR.lat + 0.0001, lng: NEAR.lng };
+    s.onPosition(pos(NEAR)); await flush();
+    await clock.advance(10000); s.onPosition(pos(FAR)); await flush();  // t=10 rate_limited, retry_after_s 3
+    await clock.advance(1000); s.onPosition(pos(C)); await flush();     // t=11 C near the last success
+    await clock.advance(1999);
+    ok(sends.length === 2, "rate_limited: nothing before retry_after_s");
+    await clock.advance(1);
+    ok(sends.length === 3 && sends[2].at - sends[1].at === 3000 && sends[2].fix.lat === C.lat, "rate_limited near the last success: the latest fix goes when retry_after_s elapses (no extra heartbeat wait)");
+  }
+  {
+    // A deadline never sends a fix older than 2 minutes.
+    const { s, clock, sends } = makeSender(L, n => ({ state: n === 1 ? "ok" : "retry" }));
+    s.onPosition(pos(NEAR)); await flush();
+    await clock.advance(10000); s.onPosition(pos(FAR)); await flush();  // retry → deadlines 10, 20, 30, 30…
+    await clock.advance(600000);
+    ok(sends.every(x => x.at - x.fix.receivedAt <= 120000), "a retry deadline never sends a fix older than 2 minutes");
   }
   {
     // After an ok the stationary heartbeat is back at 30 s.

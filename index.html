@@ -1898,7 +1898,8 @@ function havenCreateLiveSender(jobId, deps) {
       return;
     }
     let due;
-    if (!lastSent) due = lastAttemptAt ? lastAttemptAt + HAVEN_LIVE_MIN_INTERVAL_MS : t;
+    if (holdUntil) due = holdUntil;
+    else if (!lastSent) due = lastAttemptAt ? lastAttemptAt + HAVEN_LIVE_MIN_INTERVAL_MS : t;
     else {
       const moved = havenMetersBetween(lastSent, latest) >= HAVEN_LIVE_MOVE_M;
       due = lastSentAt + (moved ? HAVEN_LIVE_MIN_INTERVAL_MS : HAVEN_LIVE_HEARTBEAT_MS);

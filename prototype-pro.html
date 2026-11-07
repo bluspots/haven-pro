@@ -2197,7 +2197,12 @@ function havenCreateLiveSender(jobId, deps) {
     const t = now();
     if (t < holdUntil) { schedule(holdUntil - t); return; }
     let due;
-    if (!lastSent) due = lastAttemptAt ? lastAttemptAt + HAVEN_LIVE_MIN_INTERVAL_MS : t;
+    // After a retryable failure or rate_limited, holdUntil IS the deadline (set only
+    // by those, cleared by an ok): the latest good fix goes at that moment, whether
+    // or not it has moved since the last success. The 10 s / 30 s movement cadence
+    // applies again only after an ok.
+    if (holdUntil) due = holdUntil;
+    else if (!lastSent) due = lastAttemptAt ? lastAttemptAt + HAVEN_LIVE_MIN_INTERVAL_MS : t;
     else {
       const moved = havenMetersBetween(lastSent, latest) >= HAVEN_LIVE_MOVE_M;
       due = lastSentAt + (moved ? HAVEN_LIVE_MIN_INTERVAL_MS : HAVEN_LIVE_HEARTBEAT_MS);
