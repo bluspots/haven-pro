@@ -309,7 +309,7 @@ function shippedChecks() {
   ok(!/localStorage[^\n]*destination|destination[^\n]*localStorage/i.test(src + read("pro_maps.js") + read("backend_adapter.js")), "destinations are never written to localStorage");
   ok(/clearAllDestinations\(\); \/\/ MAP-05: no exact destination survives sign-out/.test(src) && /if \(!authSession \|\| !authSession\.id\) clearAllDestinations\(\);/.test(src), "5. sign-out clears every stored destination");
   ok((src.match(/HavenEnRouteNavigation|HAVEN_ASSIGNED_JOB_MAP_ENABLED/g) || []).length === 2, "the app file calls into pro_maps.js once, behind the flag");
-  ok(/"backend_adapter\.js" "pro_maps\.js" "\$SRC"/.test(read("build-pro.sh")), "pro_maps.js is part of the build");
+  ok(/"backend_adapter\.js" "pro_maps\.js" "pro_live_location\.js" "pro_native_location\.js" "\$SRC"/.test(read("build-pro.sh")), "pro_maps.js is part of the build (before the live-location sender)");
 }
 
 (async () => {

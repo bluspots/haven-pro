@@ -511,6 +511,50 @@ async function fetchAssignedJobDestination(jobId) {
   }
 }
 
+// Live location while Driving to Job (pro_update_live_location, migration 0032).
+// The point travels only in the POST JSON body, never on a URL. Never logged,
+// never stored. No session -> no call. Result for havenCreateLiveSender:
+//   { state: "ok" } | { state: "rate_limited", retryAfterS } |
+//   { state: "stop", error } (a real refusal: stop sending) |
+//   { state: "retry" } (brief outage: thrown fetch, 5xx, 408 or a malformed
+//   success body; the sender backs off 10 s / 20 s / 30 s and keeps sharing).
+async function sendProLiveLocation(jobId, fix) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !looksLikeUuid(jobId)) return { state: "stop", error: "not_found" };
+  const actor = await resolveHavenJobWriteAuth(cfg);
+  if (!actor.ok || actor.mode !== "session") return { state: "stop", error: "not_authenticated" };
+  const body = { p_job_id: jobId, p_lat: fix.lat, p_lng: fix.lng };
+  if (typeof fix.capturedAt === "number" && Number.isFinite(fix.capturedAt)) body.p_captured_at = new Date(fix.capturedAt).toISOString();
+  const url = `${cfg.url}/rest/v1/rpc/pro_update_live_location`;
+  const headers = {
+    apikey: actor.headers.apikey,
+    Authorization: actor.headers.Authorization,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  let res;
+  try {
+    // Native app: Capacitor's native HTTP (keeps working in the background; same
+    // URL, headers and JSON body). Browser: fetch, unchanged.
+    res = typeof havenUseNativeHttp === "function" && havenUseNativeHttp()
+      ? await havenNativeHttpPost(url, headers, body)
+      : await fetch(url, { method: "POST", headers: headers, body: JSON.stringify(body) });
+  } catch (e) {
+    return { state: "retry" };
+  }
+  if (res.status === 401 || res.status === 403) return { state: "stop", error: "not_authenticated" };
+  if (res.status === 429) return { state: "rate_limited", retryAfterS: null };
+  if (res.status >= 500 || res.status === 408) return { state: "retry" };
+  if (!res.ok) return { state: "stop", error: "http_" + res.status };
+  let out = null;
+  try { out = await res.json(); } catch (e) { out = null; }
+  if (!out || typeof out !== "object" || Array.isArray(out)) return { state: "retry" };
+  if (out.ok === true) return { state: "ok" };
+  if (out.ok !== false || typeof out.error !== "string" || !out.error) return { state: "retry" }; // malformed
+  if (out.error === "rate_limited") return { state: "rate_limited", retryAfterS: out.retry_after_s };
+  return { state: "stop", error: out.error };
+}
+
 // Read the assigned job's current status. null on miss / error (caller fail-closes).
 async function fetchAssignedJobStatus(jobId) {
   const cfg = getSupabaseConfig();
