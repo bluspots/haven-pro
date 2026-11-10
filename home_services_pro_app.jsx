@@ -1533,8 +1533,9 @@ export default function HavenProApp() {
     if (liveStoppedJobRef.current === liveShareJobId) return; // the server already ended it
     if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
     stopLiveSharing();
+    if (HAVEN_NATIVE_SPIKE_DIAGNOSTICS) havenDiagReset();
     const sender = havenCreateLiveSender(liveShareJobId, {
-      send: sendProLiveLocation,
+      send: HAVEN_NATIVE_SPIKE_DIAGNOSTICS ? havenDiagWrapSend(sendProLiveLocation) : sendProLiveLocation,
       onStop: () => {
         liveStoppedJobRef.current = liveShareJobId;
         if (liveSenderRef.current === sender) liveSenderRef.current = null;
@@ -1559,18 +1560,21 @@ export default function HavenProApp() {
   // (sign-out also ends it directly, see endLocationWatch).
   const locationWatchRef = useRef(null);
   function endLocationWatch() {
-    if (locationWatchRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    const geo = havenLocationApi(); // native app: background-capable plugin; browser: the standard web location API
+    if (locationWatchRef.current != null && geo) geo.clearWatch(locationWatchRef.current);
     locationWatchRef.current = null;
     lastPositionRef.current = null;
     setProLiveLocation(null);
   }
   const signedInId = authSession ? (authSession.id || "signed-in") : null;
   useEffect(() => {
-    if (!signedInId || !activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
-    const watchId = navigator.geolocation.watchPosition(
+    const geo = havenLocationApi(); // native app: background-capable plugin; browser: the standard web location API
+    if (!signedInId || !activeJobs.some(j => j.status === "en_route") || !geo) return;
+    const watchId = geo.watchPosition(
       pos => {
         if (locationWatchRef.current !== watchId) return; // ended (sign-out): ignore late positions
         lastPositionRef.current = pos;
+        if (HAVEN_NATIVE_SPIKE_DIAGNOSTICS) havenDiagFix(); // counts only, never the point
         setLocationDenied(false);
         setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
         if (liveSenderRef.current) liveSenderRef.current.onPosition(pos);
@@ -1591,7 +1595,7 @@ export default function HavenProApp() {
     );
     locationWatchRef.current = watchId;
     return () => {
-      if (locationWatchRef.current === watchId) { navigator.geolocation.clearWatch(watchId); locationWatchRef.current = null; lastPositionRef.current = null; }
+      if (locationWatchRef.current === watchId) { geo.clearWatch(watchId); locationWatchRef.current = null; lastPositionRef.current = null; }
     };
   }, [activeJobs, signedInId]);
 
@@ -2757,18 +2761,21 @@ export default function HavenProApp() {
   function liveShareNotice(job) {
     if (!havenLiveShareEligible(job, !!getSupabaseConfig())) return null;
     const id = String(job.id);
-    const noGeo = typeof navigator === "undefined" || !navigator.geolocation;
+    const noGeo = !havenLocationApi();
     const text = locationDenied || noGeo ? HAVEN_LIVE_NO_PERMISSION
       : liveShare.jobId === id && liveShare.state === "stopped" ? HAVEN_LIVE_STOPPED
       : HAVEN_LIVE_NOTICE;
     const sharing = text === HAVEN_LIVE_NOTICE;
-    return (
+    const notice = (
       <div data-testid="live-share-notice" data-live-state={sharing ? "sharing" : (text === HAVEN_LIVE_STOPPED ? "stopped" : "no-permission")} role="status"
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", marginBottom: 12, borderRadius: 14, background: sharing ? T.pgt : T.w, border: sharing ? "none" : `1px solid ${T.bd}` }}>
         <span aria-hidden="true" style={{ fontSize: 16 }}>{sharing ? "📡" : "⚠️"}</span>
         <span style={{ fontSize: 13, fontWeight: 700, color: sharing ? T.pgd : T.tx, fontFamily: FONT, lineHeight: 1.35 }}>{text}</span>
       </div>
     );
+    // Native spike build only: counts and times (never coordinates) for device testing.
+    if (!(HAVEN_NATIVE_SPIKE_DIAGNOSTICS && havenIsNativeApp())) return notice;
+    return <>{notice}<HavenLiveDiagPanel T={T} font={FONT} /></>;
   }
 
   function formatElapsed(ms) {

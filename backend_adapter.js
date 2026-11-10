@@ -525,18 +525,20 @@ async function sendProLiveLocation(jobId, fix) {
   if (!actor.ok || actor.mode !== "session") return { state: "stop", error: "not_authenticated" };
   const body = { p_job_id: jobId, p_lat: fix.lat, p_lng: fix.lng };
   if (typeof fix.capturedAt === "number" && Number.isFinite(fix.capturedAt)) body.p_captured_at = new Date(fix.capturedAt).toISOString();
+  const url = `${cfg.url}/rest/v1/rpc/pro_update_live_location`;
+  const headers = {
+    apikey: actor.headers.apikey,
+    Authorization: actor.headers.Authorization,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
   let res;
   try {
-    res = await fetch(`${cfg.url}/rest/v1/rpc/pro_update_live_location`, {
-      method: "POST",
-      headers: {
-        apikey: actor.headers.apikey,
-        Authorization: actor.headers.Authorization,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    // Native app: Capacitor's native HTTP (keeps working in the background; same
+    // URL, headers and JSON body). Browser: fetch, unchanged.
+    res = typeof havenUseNativeHttp === "function" && havenUseNativeHttp()
+      ? await havenNativeHttpPost(url, headers, body)
+      : await fetch(url, { method: "POST", headers: headers, body: JSON.stringify(body) });
   } catch (e) {
     return { state: "retry" };
   }

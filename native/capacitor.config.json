@@ -1,0 +1,11 @@
+{
+  "appId": "app.haven.pro.spike",
+  "appName": "Haven Pro",
+  "webDir": "www",
+  "android": {
+    "useLegacyBridge": true
+  },
+  "ios": {
+    "contentInset": "never"
+  }
+}

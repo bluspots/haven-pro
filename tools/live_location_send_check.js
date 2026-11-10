@@ -586,7 +586,10 @@ function shippedChecks() {
   }
   ok((app.match(/watchPosition\(/g) || []).length === 1, "one watchPosition in the app (sending hooks onto the existing watch)");
   ok(!/visibilitychange|onblur|"blur"|pagehide/.test(app), "the watch is not stopped on visibilitychange / blur / app hide");
-  ok((app.match(/clearWatch\(/g) || []).length === 2 && /function endLocationWatch\(\) \{\n    if \(locationWatchRef\.current != null && navigator\.geolocation\) navigator\.geolocation\.clearWatch/.test(app) && /navigator\.geolocation\.clearWatch\(watchId\); locationWatchRef\.current = null;/.test(app), "the watch ends only in its effect cleanup and on sign-out");
+  // The watch's location API is havenLocationApi() (browser: navigator.geolocation; native app: the
+  // background-capable plugin shim). It ends only in its effect cleanup and on sign-out.
+  ok((app.match(/clearWatch\(/g) || []).length === 2 && /function endLocationWatch\(\) \{\n    const geo = havenLocationApi\(\);[^\n]*\n    if \(locationWatchRef\.current != null && geo\) geo\.clearWatch/.test(app) && /geo\.clearWatch\(watchId\); locationWatchRef\.current = null;/.test(app), "the watch ends only in its effect cleanup and on sign-out");
+  ok(!/navigator\.geolocation/.test(app), "the app reaches location only through havenLocationApi()");
   ok(/endLocationWatch\(\); \/\/ and the location watch ends with it/.test(app) && /if \(!signedInId \|\| !activeJobs\.some/.test(app), "Fix 2: no watch while signed out; sign-out ends it directly");
   ok(/enableHighAccuracy: true/.test(app), "high accuracy stays on");
   ok(/stopLiveSharing\(\); \/\/ live location stops at sign-out/.test(app), "9. sign-out stops sharing");
@@ -594,7 +597,7 @@ function shippedChecks() {
   const live = stripComments(read("pro_live_location.js")) + read("backend_adapter.js").slice(read("backend_adapter.js").indexOf("async function sendProLiveLocation"), read("backend_adapter.js").indexOf("// Read the assigned job's current status.")).replace(/\/\/[^\n]*/g, "");
   ok(!/console\.|localStorage/.test(live), "the sender never logs and never touches localStorage");
   ok(!/operating|setOperating|jobs\?|"lat"|"lng"/.test(live), "7. the sender never names the operating area or the jobs table");
-  ok(/"pro_maps\.js" "pro_live_location\.js" "\$SRC"/.test(read("build-pro.sh")), "pro_live_location.js is part of the build");
+  ok(/"pro_maps\.js" "pro_live_location\.js" "pro_native_location\.js" "\$SRC"/.test(read("build-pro.sh")), "pro_live_location.js (and the native location source) are part of the build");
 }
 
 (async () => {
