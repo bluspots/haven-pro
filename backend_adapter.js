@@ -171,12 +171,19 @@ async function fetchPostedJobsFromSupabase() {
 // Signed in: auth uid + user bearer. No session: skip. Do not query as a demo pro.
 // No backend config fails closed to [] (no SIM fallback). On error, soft-fails to [].
 async function fetchActiveJobsFromSupabase() {
+  const r = await fetchActiveJobsResult();
+  return r.ok ? r.rows : [];
+}
+// Same read, but says whether it happened: { ok: true, rows } or { ok: false }.
+// Live job updates use this so a failed read never looks like "no active jobs"
+// (which would take the Pro's job off the screen).
+async function fetchActiveJobsResult() {
   const cfg = getSupabaseConfig();
-  if (!cfg) return []; // no backend config — fail closed
+  if (!cfg) return { ok: false, rows: [] }; // no backend config — fail closed
   const actor = await resolveHavenJobWriteAuth(cfg);
   if (!actor.ok) {
     console.warn("Supabase active jobs fetch skipped", actor.reason);
-    return [];
+    return { ok: false, rows: [] };
   }
   // Align exactly with the local one-active gate
   const activeStatuses = Array.from(ACTIVE_BLOCK_STATUSES);
@@ -198,13 +205,13 @@ async function fetchActiveJobsFromSupabase() {
     });
     if (!res.ok) {
       console.warn("Supabase active jobs fetch failed", res.status, await res.text());
-      return [];
+      return { ok: false, rows: [] };
     }
     const rows = await res.json();
-    if (!Array.isArray(rows)) return [];
+    if (!Array.isArray(rows)) return { ok: false, rows: [] };
     // Defensive: filter to statuses we consider active locally, even if backend returns extra
     const clean = rows.filter(r => r && activeStatuses.includes(r.status));
-    return clean.map(row => {
+    return { ok: true, rows: clean.map(row => {
       const base = mapSupabaseRowToJob(row);
       const acceptedAt =
         row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
@@ -224,10 +231,10 @@ async function fetchActiveJobsFromSupabase() {
         // Existing jobs.materials_reimbursed_cents column (0001). Dollars, same as local receipts.
         materialsReimbursed: typeof materialsCents === "number" && materialsCents > 0 ? Math.round(materialsCents / 100) : 0,
       };
-    });
+    }) };
   } catch (e) {
     console.warn("Supabase active jobs fetch error", e);
-    return [];
+    return { ok: false, rows: [] };
   }
 }
 
