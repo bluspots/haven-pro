@@ -42,6 +42,7 @@ function havenParseJobSignal(payload) {
 // deps:
 //   getClient()        -> the app's supabase-js client (or null)
 //   onRefetch(batch)   -> Promise; batch = { signals: [{jobId,status,reason,at}], wake: bool, tags: [..] }
+//   isHidden()         -> true while the app is in the background (refetches wait)
 //   debounceMs, retryWaitsMs, setTimer(fn, ms), clearTimer(id)  (tests)
 // Returns { start(userId), stop(), kick(tag), topic(), state() }.
 function havenCreateJobSignal(deps) {
@@ -63,6 +64,7 @@ function havenCreateJobSignal(deps) {
   let tags = [];
   let refetching = false;
   let again = false;
+  let heldWhileHidden = false;
 
   function schedule() {
     if (debounceTimer != null) clearTimer(debounceTimer);
@@ -71,6 +73,10 @@ function havenCreateJobSignal(deps) {
   }
   async function flush(myGen) {
     if (refetching) { again = true; return; }
+    // In the background: hold the refetch (signals, polls) and run it once when
+    // the app is back in the foreground (kick("foreground")).
+    if (typeof d.isHidden === "function" && d.isHidden()) { heldWhileHidden = true; return; }
+    heldWhileHidden = false;
     const batch = { signals: Array.from(pending.values()), wake, tags: tags.slice() };
     pending = new Map(); wake = false; tags = [];
     if (!batch.signals.length && !batch.wake) return;
@@ -103,18 +109,19 @@ function havenCreateJobSignal(deps) {
     }, wait);
   }
   async function join(myGen) {
-    if (!client || !topic) return;
+    const c = client, t = topic;
+    if (!c || !t || myGen !== gen) return;
     status = "joining";
     try {
       // Realtime Authorization uses the user's JWT (supabase-js takes it from the session).
-      if (client.realtime && typeof client.realtime.setAuth === "function") await client.realtime.setAuth();
+      if (c.realtime && typeof c.realtime.setAuth === "function") await c.realtime.setAuth();
     } catch (e) {
       scheduleResubscribe(myGen);
       return;
     }
-    if (myGen !== gen) return;
+    if (myGen !== gen || channel) return;   // stopped, restarted, or already joined
     try {
-      const ch = client.channel(topic, { config: { private: true } });
+      const ch = c.channel(t, { config: { private: true } });
       channel = ch;
       ch.on("broadcast", { event: HAVEN_JOB_SIGNAL_EVENT }, (msg) => {
         if (myGen !== gen || channel !== ch) return;
@@ -140,31 +147,41 @@ function havenCreateJobSignal(deps) {
       scheduleResubscribe(myGen);
     }
   }
-  async function stop() {
+  // Synchronous teardown: bumps the generation and forgets the channel at once
+  // (before any await), so a start()/stop() in the same tick can't leave an
+  // older join alive. Returns the removal of the old channel to await.
+  function teardown() {
     gen++;
     if (debounceTimer != null) { clearTimer(debounceTimer); debounceTimer = null; }
     if (retryTimer != null) { clearTimer(retryTimer); retryTimer = null; }
-    pending = new Map(); wake = false; tags = []; again = false; failures = 0;
+    pending = new Map(); wake = false; tags = []; again = false; failures = 0; heldWhileHidden = false;
     topic = null;
     status = "idle";
-    await removeCurrent();
-    client = null;
+    const c = client, ch = channel;
+    channel = null; client = null;
+    return (async () => {
+      if (c && ch && typeof c.removeChannel === "function") {
+        try { await c.removeChannel(ch); } catch (e) {}
+      }
+    })();
   }
+  async function stop() { await teardown(); }
   return {
     // Join the signed-in user's topic. Same user again: nothing changes.
     // Another user: the old channel is removed first (account switch).
     async start(userId) {
       const t = havenJobSignalTopic(userId);
       if (t && t === topic) return true;
-      await stop();
-      if (!t) return false;
+      const removed = teardown();          // synchronous: gen bumps now
       const myGen = gen;
+      if (!t) { await removed; return false; }
       topic = t;
       let c = null;
       try { c = typeof d.getClient === "function" ? d.getClient() : null; } catch (e) { c = null; }
-      if (myGen !== gen) return false;
-      if (!c || typeof c.channel !== "function") { status = "unavailable"; return false; }
+      if (!c || typeof c.channel !== "function") { status = "unavailable"; await removed; return false; }
       client = c;
+      await removed;                       // the old channel goes before the new join
+      if (myGen !== gen) return false;     // stopped / restarted meanwhile
       await join(myGen);
       return myGen === gen;
     },
@@ -178,6 +195,7 @@ function havenCreateJobSignal(deps) {
     },
     topic() { return topic; },
     state() { return status; },
+    held() { return heldWhileHidden; },
   };
 }
 

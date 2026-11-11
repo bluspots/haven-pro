@@ -123,6 +123,9 @@ function mapBoardRowToJob(row) {
   return job;
 }
 
+// Returns the board rows, [] when no board may be read (no backend, signed
+// out), or null when the read FAILED (HTTP error, network, malformed body).
+// Callers keep the board they have on null, so a failed refresh never empties it.
 async function fetchPostedJobsFromSupabase() {
   const cfg = getSupabaseConfig();
   if (!cfg) return []; // no backend config — fail closed (no SIM fallback)
@@ -149,10 +152,10 @@ async function fetchPostedJobsFromSupabase() {
     });
     if (!res.ok) {
       console.warn("Supabase jobs fetch failed", res.status, await res.text());
-      return [];
+      return null;
     }
     const rows = await res.json();
-    if (!Array.isArray(rows)) return [];
+    if (!Array.isArray(rows)) return null;
     const clean = rows.filter((row) => {
       const isPosted = row && row.status === "posted";
       const hasPro = !(row == null) && row.pro_id != null;
@@ -163,7 +166,7 @@ async function fetchPostedJobsFromSupabase() {
     return clean.map(mapBoardRowToJob);
   } catch (e) {
     console.warn("Supabase jobs fetch error", e);
-    return [];
+    return null;
   }
 }
 

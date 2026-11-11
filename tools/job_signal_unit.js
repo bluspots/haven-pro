@@ -144,6 +144,50 @@ module.exports = async function runJobSignalUnit(src, ok) {
     ok(batches.length === 4, "after sign-out nothing refetches (late messages and wake-ups ignored)");
   }
 
+  // Same-tick races (Quagon MED-1): the generation bumps before any await.
+  {
+    const live = c => c.chans.filter(ch => !ch.removed);
+    const c1 = mockClient();
+    const s1 = S.havenCreateJobSignal({ getClient: () => c1, onRefetch: async () => {}, setTimer, clearTimer });
+    const pa = s1.start(U); const ps = s1.stop();
+    await pa; await ps; await advance(0);
+    ok(live(c1).length === 0 && s1.topic() === null && s1.state() === "idle", "start(A) then stop() in the same tick: no channel is left subscribed");
+    const c2 = mockClient();
+    const s2 = S.havenCreateJobSignal({ getClient: () => c2, onRefetch: async () => {}, setTimer, clearTimer });
+    const p1 = s2.start(U); const p2 = s2.start(U2);
+    await p1; await p2; await advance(0);
+    ok(live(c2).length === 1 && live(c2)[0].topic === "jobs:user:" + U2 && s2.topic() === "jobs:user:" + U2, "start(A) then start(B) in the same tick: exactly one channel, B's");
+    ok(!c2.chans.some(ch => ch.topic === "jobs:user:" + u && !ch.removed), "…and no untracked channel for A");
+    const c3 = mockClient();
+    const s3 = S.havenCreateJobSignal({ getClient: () => c3, onRefetch: async () => {}, setTimer, clearTimer });
+    const q1 = s3.start(U); const q2 = s3.stop(); const q3 = s3.start(U);
+    await q1; await q2; await q3; await advance(0);
+    ok(live(c3).length === 1 && s3.topic() === "jobs:user:" + u, "start → stop → start in one tick: exactly one channel");
+    // stop() while subscribed, then a late SUBSCRIBED from the removed channel
+    const c4 = mockClient(); const b4 = [];
+    const s4 = S.havenCreateJobSignal({ getClient: () => c4, onRefetch: async (b) => { b4.push(b); }, setTimer, clearTimer });
+    await s4.start(U);
+    const ch4 = c4.chans[0];
+    const st = s4.stop();
+    ch4.status("SUBSCRIBED"); ch4.emit({ v: 1, job_id: J(1), status: "en_route", reason: "updated", at: "t" });
+    await st; await advance(1000);
+    ok(ch4.removed && b4.length === 0, "late callbacks from a channel stopped in the same tick are ignored");
+    await s2.stop(); await s3.stop();
+  }
+  // In the background (optional LOW): refetches wait, then run once on foreground.
+  {
+    const c = mockClient(); const b = []; let hidden = false;
+    const sig = S.havenCreateJobSignal({ getClient: () => c, onRefetch: async (x) => { b.push(x); }, isHidden: () => hidden, setTimer, clearTimer });
+    await sig.start(U);
+    hidden = true;
+    c.chans[0].emit({ v: 1, job_id: J(5), status: "cancelled", reason: "removed", at: "t" });
+    sig.kick("poll"); await advance(2000);
+    ok(b.length === 0 && sig.held() === true, "while hidden: signals and polls don't refetch (held)");
+    hidden = false; sig.kick("foreground"); await advance(400);
+    ok(b.length === 1 && b[0].signals.length === 1 && b[0].signals[0].jobId === J(5), "back in the foreground: one refetch, with the held signal");
+    await sig.stop();
+  }
+
   // no realtime client yet: still refetches on wake-ups (fallback)
   {
     const b = [];

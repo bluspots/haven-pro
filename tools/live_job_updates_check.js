@@ -20,8 +20,10 @@
  *  4.  Founder release → "This job was reassigned…".
  *  5.  Missed broadcast: coming back to the foreground re-reads and removes
  *      the job with the generic copy; a failed read keeps the job.
- *  6.  The board re-reads after the Pro's own signal and on foreground.
+ *  6.  The board re-reads after the Pro's own signal and on foreground;
+ *      6b. a failed board refresh keeps the board, a real empty one clears it.
  *  7.  Sign-out removes the channel; nothing re-reads afterwards.
+ *  8.  In the background signals wait; one re-read on foreground.
  * fetch and Realtime are mocked. A mock is never certification: Quagon
  * certifies against the real backend once 0036 is applied.
  */
@@ -94,7 +96,7 @@ async function renderApp(opts) {
     watchPosition() { geo.watches++; return geo.watches; }, clearWatch() { geo.cleared++; }, getCurrentPosition() {},
   } });
   const calls = [];
-  const state = { rows: opts.rows, activeFail: false };
+  const state = { rows: opts.rows, activeFail: false, board: opts.board || [], boardFail: false };
   const profile = { id: PRO_ID, role: "pro", display_name: "Test Pro", email: "pro@example.com", first_name: "Test", last_name: "Pro", home_city: "Orlando, FL",
     work_categories: ["Plumbing"], operating_lat: 28.5, operating_lng: -81.3,
     pro_workspace: { onboardingStatus: "completed", onboardingStep: "done", firstName: "Test", lastName: "Pro", homeCity: "Orlando, FL", travelRadius: 25, workCategories: ["Plumbing"] } };
@@ -104,7 +106,7 @@ async function renderApp(opts) {
     if (url.endsWith("/auth/v1/health")) return json(200, {});
     if (url.includes("/rpc/is_qa_tester")) return json(200, false);
     if (url.includes("/rest/v1/profiles")) return json(200, [profile]);
-    if (url.includes("/rpc/jobs_posted_within_radius")) return json(200, []);
+    if (url.includes("/rpc/jobs_posted_within_radius")) return state.boardFail ? json(503, { message: "unavailable" }) : json(200, state.board);
     if (url.includes("/rpc/get_assigned_job_destination")) return json(200, { ok: false, error: "no_coordinates", city_label: "Orlando, FL" });
     if (/\/rest\/v1\/jobs\?pro_id=eq\..*status=in\./.test(url)) {
       if (state.activeFail) return json(500, { message: "down" });
@@ -151,8 +153,8 @@ const boardReads = calls => calls.filter(c => c.url.includes("/rpc/jobs_posted_w
 const row = (o) => Object.assign({ id: JOB, status: "en_route", pro_id: PRO_ID, category: "Plumbing", title: "Fix leaking faucet (fixture)", requires_diagnosis: false,
   inspection_fee_cents: 0, fixed_pro_labor_payout_cents: 6500, city_label: "Orlando, FL", accepted_at: new Date().toISOString(), posted_at: new Date().toISOString() }, o);
 const sig = (status, reason) => ({ v: 1, id: "m" + Math.random(), job_id: JOB, status, reason, at: new Date().toISOString() });
-async function start(rows) {
-  const app = await renderApp({ rows });
+async function start(rows, board) {
+  const app = await renderApp({ rows, board });
   await waitFor(app.window, x => leaf(x).includes("My Jobs"), "signed in");
   await waitFor(app.window, () => !!app.live(), "channel joined");
   await sleep(200);
@@ -242,6 +244,45 @@ async function appChecks() {
     app.window.dispatchEvent(new app.window.Event("online"));
     await waitFor(app.window, x => /This job is no longer assigned to you\./.test(leaf(x)), "generic removed toast");
     ok(!onDetail(app.window), "no broadcast at all: back online re-reads and the job leaves with the generic copy");
+    app.window.close();
+  }
+  console.log("6b. A failed board refresh keeps the board (Quagon MED-2):");
+  {
+    const boardRow = { id: "aaaaaaaa-aaaa-4aaa-8aaa-0000000000c1", status: "posted", pro_id: null, category: "Plumbing", title: "Unclog drain (fixture)",
+      requires_diagnosis: false, fixed_pro_labor_payout_cents: 5000, inspection_fee_cents: 0, city_label: "Orlando, FL", distance_mi: 2.5, posted_at: new Date().toISOString() };
+    const app = await start([], [boardRow]);
+    clickText(app.window, /^Home$/);
+    await waitFor(app.window, x => /Unclog drain \(fixture\)/.test(leaf(x)), "board job shown");
+    app.state.boardFail = true;
+    let b0 = boardReads(app.calls);
+    app.window.document.dispatchEvent(new app.window.Event("visibilitychange"));
+    await sleep(700);
+    ok(boardReads(app.calls) >= b0 + 1, "the refresh was attempted (503)");
+    ok(/Unclog drain \(fixture\)/.test(leaf(app.window)), "a failed board refresh keeps the existing jobs");
+    app.emit({ v: 1, id: "y", job_id: "aaaaaaaa-aaaa-4aaa-8aaa-0000000000ff", status: "posted", reason: "removed", at: new Date().toISOString() });
+    await sleep(700);
+    ok(/Unclog drain \(fixture\)/.test(leaf(app.window)), "…also after a signal-driven refresh fails");
+    app.state.boardFail = false; app.state.board = [];
+    b0 = boardReads(app.calls);
+    app.window.dispatchEvent(new app.window.Event("online"));
+    await sleep(700);
+    ok(boardReads(app.calls) >= b0 + 1 && !/Unclog drain \(fixture\)/.test(leaf(app.window)), "a successful empty result clears the board");
+    app.window.close();
+  }
+  console.log("8. In the background: refetches wait, then run once on foreground:");
+  {
+    const app = await start([row()]);
+    const w = app.window;
+    Object.defineProperty(w.document, "visibilityState", { configurable: true, get: () => app.state.vis || "visible" });
+    app.state.vis = "hidden";
+    let before = activeReads(app.calls);
+    app.emit(sig("en_route", "updated"));
+    await sleep(800);
+    ok(activeReads(app.calls) === before, "a signal while hidden doesn't re-read");
+    app.state.vis = "visible";
+    w.document.dispatchEvent(new w.Event("visibilitychange"));
+    await sleep(800);
+    ok(activeReads(app.calls) === before + 1, "back in the foreground: exactly one re-read");
     app.window.close();
   }
   console.log("Shipped pages:");

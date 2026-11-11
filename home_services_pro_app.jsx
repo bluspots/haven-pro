@@ -382,7 +382,8 @@ export default function HavenProApp() {
     let timerId = null;
     async function load() {
       const jobs = await fetchPostedJobsFromSupabase();
-      if (jobs && !cancelled) {
+      // null = the read failed: keep the board as it is (a real empty list is []).
+      if (Array.isArray(jobs) && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
         // Exclude any jobs that are currently active so they don't reappear on the board.
         const activeIds = new Set(activeJobsRef.current.map(j => j.id));
@@ -1304,6 +1305,8 @@ export default function HavenProApp() {
     jobSignalRef.current = havenCreateJobSignal({
       getClient: () => getHavenSupabaseClient(),
       onRefetch: (batch) => (jobSignalRefetchRef.current ? jobSignalRefetchRef.current(batch) : null),
+      // In the background, signals and the safety poll wait; one re-read on foreground.
+      isHidden: () => !havenPageVisible(window),
     });
   }
   useEffect(() => {
@@ -1766,7 +1769,7 @@ export default function HavenProApp() {
           }
           // Best-effort refresh of posted jobs after a failed claim
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) {
+          if (Array.isArray(refreshed)) {
             const activeIds = new Set(activeJobsRef.current.map(j => j.id));
             const filtered = refreshed.filter(j => !activeIds.has(j.id));
             setAvailableJobs(filtered);
