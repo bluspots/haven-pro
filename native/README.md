@@ -81,8 +81,8 @@ Start a QuickTime screen recording of it before you leave.
 Pro side, on the phone:
 
 1. Sign in as the existing QA Pro (you type the password; nobody else does).
-2. Accept the QA job, or open the job that is already en route. Allow location **While Using the App**
-   and keep **Precise Location** on.
+2. Accept **the dedicated QA job the founder approved for this test** (book it fresh from the QA Customer;
+   don't use any other job). Allow location **While Using the App** and keep **Precise Location** on.
 3. On the job screen, check the green notice ("Sharing your location with this customer until you arrive.")
    and the dashed **Background test** panel under it. The panel only counts things; it never shows
    coordinates.
@@ -105,6 +105,9 @@ stays under about 30 s while driving with good signal.
 
 Also note: battery % at start and end, whether the iPhone showed the blue location pill (and on
 Android the notification), and anything odd.
+
+Debug logging is off (`"loggingBehavior": "none"` in `capacitor.config.json`), so the Xcode console and
+Safari Web Inspector don't print plugin results, HTTP options, locations or tokens. Never paste those consoles.
 
 ## What the spike does not do yet
 
