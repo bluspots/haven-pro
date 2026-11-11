@@ -413,10 +413,10 @@ async function fetchPostedJobsFromSupabase() {
     });
     if (!res.ok) {
       console.warn("Supabase jobs fetch failed", res.status, await res.text());
-      return [];
+      return null;
     }
     const rows = await res.json();
-    if (!Array.isArray(rows)) return [];
+    if (!Array.isArray(rows)) return null;
     const clean = rows.filter((row) => {
       const isPosted = row && row.status === "posted";
       const hasPro = !(row == null) && row.pro_id != null;
@@ -426,16 +426,20 @@ async function fetchPostedJobsFromSupabase() {
     return clean.map(mapBoardRowToJob);
   } catch (e) {
     console.warn("Supabase jobs fetch error", e);
-    return [];
+    return null;
   }
 }
 async function fetchActiveJobsFromSupabase() {
+  const r = await fetchActiveJobsResult();
+  return r.ok ? r.rows : [];
+}
+async function fetchActiveJobsResult() {
   const cfg = getSupabaseConfig();
-  if (!cfg) return [];
+  if (!cfg) return { ok: false, rows: [] };
   const actor = await resolveHavenJobWriteAuth(cfg);
   if (!actor.ok) {
     console.warn("Supabase active jobs fetch skipped", actor.reason);
-    return [];
+    return { ok: false, rows: [] };
   }
   const activeStatuses = Array.from(ACTIVE_BLOCK_STATUSES);
   const statusList = activeStatuses.join(",");
@@ -452,12 +456,12 @@ async function fetchActiveJobsFromSupabase() {
     });
     if (!res.ok) {
       console.warn("Supabase active jobs fetch failed", res.status, await res.text());
-      return [];
+      return { ok: false, rows: [] };
     }
     const rows = await res.json();
-    if (!Array.isArray(rows)) return [];
+    if (!Array.isArray(rows)) return { ok: false, rows: [] };
     const clean = rows.filter((r) => r && activeStatuses.includes(r.status));
-    return clean.map((row) => {
+    return { ok: true, rows: clean.map((row) => {
       const base = mapSupabaseRowToJob(row);
       const acceptedAt = row.accepted_at ? Date.parse(row.accepted_at) : Date.now();
       const backendStatus = row.status;
@@ -473,10 +477,10 @@ async function fetchActiveJobsFromSupabase() {
         // Existing jobs.materials_reimbursed_cents column (0001). Dollars, same as local receipts.
         materialsReimbursed: typeof materialsCents === "number" && materialsCents > 0 ? Math.round(materialsCents / 100) : 0
       };
-    });
+    }) };
   } catch (e) {
     console.warn("Supabase active jobs fetch error", e);
-    return [];
+    return { ok: false, rows: [] };
   }
 }
 const TERMINAL_SYNC_STATUSES = /* @__PURE__ */ new Set(["inspection_completed", "materials_declined"]);
@@ -1637,6 +1641,329 @@ function subscribeHavenAuth(onChange) {
     }
   };
 }
+const HAVEN_JOB_SIGNAL_DEBOUNCE_MS = 400;
+const HAVEN_JOB_SIGNAL_EVENT = "job_changed";
+const HAVEN_JOB_SIGNAL_RETRY_MS = [1e3, 2e3, 5e3, 1e4, 3e4];
+const HAVEN_JOB_SIGNAL_SAFETY_POLL_MS = 6e4;
+const HAVEN_JOB_SIGNAL_REASONS = /* @__PURE__ */ new Set(["created", "added", "updated", "removed"]);
+const HAVEN_JOB_SIGNAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function havenJobSignalTopic(userId) {
+  const id = String(userId == null ? "" : userId).trim().toLowerCase();
+  return HAVEN_JOB_SIGNAL_UUID.test(id) ? "jobs:user:" + id : null;
+}
+function havenParseJobSignal(payload) {
+  if (!payload || typeof payload !== "object" || payload.v !== 1) return null;
+  const jobId = String(payload.job_id == null ? "" : payload.job_id).toLowerCase();
+  if (!HAVEN_JOB_SIGNAL_UUID.test(jobId)) return null;
+  const reason = HAVEN_JOB_SIGNAL_REASONS.has(payload.reason) ? payload.reason : "updated";
+  const status = typeof payload.status === "string" && payload.status ? payload.status : null;
+  const at = typeof payload.at === "string" ? payload.at : null;
+  return { jobId, status, reason, at };
+}
+function havenCreateJobSignal(deps) {
+  const d = deps || {};
+  const setTimer = d.setTimer || ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = d.clearTimer || ((id) => clearTimeout(id));
+  const debounceMs = typeof d.debounceMs === "number" ? d.debounceMs : HAVEN_JOB_SIGNAL_DEBOUNCE_MS;
+  const retryWaits = Array.isArray(d.retryWaitsMs) && d.retryWaitsMs.length ? d.retryWaitsMs : HAVEN_JOB_SIGNAL_RETRY_MS;
+  let gen = 0;
+  let client = null;
+  let channel = null;
+  let topic = null;
+  let status = "idle";
+  let debounceTimer = null;
+  let retryTimer = null;
+  let failures = 0;
+  let pending = /* @__PURE__ */ new Map();
+  let wake = false;
+  let tags = [];
+  let refetching = false;
+  let again = false;
+  let heldWhileHidden = false;
+  function schedule() {
+    if (debounceTimer != null) clearTimer(debounceTimer);
+    const myGen = gen;
+    debounceTimer = setTimer(() => {
+      debounceTimer = null;
+      if (myGen === gen) flush(myGen);
+    }, debounceMs);
+  }
+  async function flush(myGen) {
+    if (refetching) {
+      again = true;
+      return;
+    }
+    if (typeof d.isHidden === "function" && d.isHidden()) {
+      heldWhileHidden = true;
+      return;
+    }
+    heldWhileHidden = false;
+    const batch = { signals: Array.from(pending.values()), wake, tags: tags.slice() };
+    pending = /* @__PURE__ */ new Map();
+    wake = false;
+    tags = [];
+    if (!batch.signals.length && !batch.wake) return;
+    refetching = true;
+    try {
+      if (typeof d.onRefetch === "function") await d.onRefetch(batch);
+    } catch (e) {
+    } finally {
+      refetching = false;
+      if (again && myGen === gen) {
+        again = false;
+        schedule();
+      }
+    }
+  }
+  async function removeCurrent() {
+    const c = client, ch = channel;
+    channel = null;
+    if (c && ch && typeof c.removeChannel === "function") {
+      try {
+        await c.removeChannel(ch);
+      } catch (e) {
+      }
+    }
+  }
+  function scheduleResubscribe(myGen) {
+    if (myGen !== gen || retryTimer != null) return;
+    status = "retrying";
+    const wait = retryWaits[Math.min(failures, retryWaits.length - 1)];
+    failures++;
+    retryTimer = setTimer(async () => {
+      retryTimer = null;
+      if (myGen !== gen) return;
+      await removeCurrent();
+      if (myGen !== gen) return;
+      join(myGen);
+    }, wait);
+  }
+  async function join(myGen) {
+    const c = client, t = topic;
+    if (!c || !t || myGen !== gen) return;
+    status = "joining";
+    try {
+      if (c.realtime && typeof c.realtime.setAuth === "function") await c.realtime.setAuth();
+    } catch (e) {
+      scheduleResubscribe(myGen);
+      return;
+    }
+    if (myGen !== gen || channel) return;
+    try {
+      const ch = c.channel(t, { config: { private: true } });
+      channel = ch;
+      ch.on("broadcast", { event: HAVEN_JOB_SIGNAL_EVENT }, (msg) => {
+        if (myGen !== gen || channel !== ch) return;
+        const s = havenParseJobSignal(msg && msg.payload);
+        if (s) pending.set(s.jobId, s);
+        else wake = true;
+        schedule();
+      });
+      ch.subscribe((st) => {
+        if (myGen !== gen || channel !== ch) return;
+        if (st === "SUBSCRIBED") {
+          status = "subscribed";
+          failures = 0;
+          wake = true;
+          tags.push("subscribed");
+          schedule();
+        } else if (st === "CHANNEL_ERROR" || st === "TIMED_OUT") {
+          scheduleResubscribe(myGen);
+        } else if (st === "CLOSED" && status === "subscribed") {
+          scheduleResubscribe(myGen);
+        }
+      });
+    } catch (e) {
+      scheduleResubscribe(myGen);
+    }
+  }
+  function teardown() {
+    gen++;
+    if (debounceTimer != null) {
+      clearTimer(debounceTimer);
+      debounceTimer = null;
+    }
+    if (retryTimer != null) {
+      clearTimer(retryTimer);
+      retryTimer = null;
+    }
+    pending = /* @__PURE__ */ new Map();
+    wake = false;
+    tags = [];
+    again = false;
+    failures = 0;
+    heldWhileHidden = false;
+    topic = null;
+    status = "idle";
+    const c = client, ch = channel;
+    channel = null;
+    client = null;
+    return (async () => {
+      if (c && ch && typeof c.removeChannel === "function") {
+        try {
+          await c.removeChannel(ch);
+        } catch (e) {
+        }
+      }
+    })();
+  }
+  async function stop() {
+    await teardown();
+  }
+  return {
+    // Join the signed-in user's topic. Same user again: nothing changes.
+    // Another user: the old channel is removed first (account switch).
+    async start(userId) {
+      const t = havenJobSignalTopic(userId);
+      if (t && t === topic) return true;
+      const removed = teardown();
+      const myGen = gen;
+      if (!t) {
+        await removed;
+        return false;
+      }
+      topic = t;
+      let c = null;
+      try {
+        c = typeof d.getClient === "function" ? d.getClient() : null;
+      } catch (e) {
+        c = null;
+      }
+      if (!c || typeof c.channel !== "function") {
+        status = "unavailable";
+        await removed;
+        return false;
+      }
+      client = c;
+      await removed;
+      if (myGen !== gen) return false;
+      await join(myGen);
+      return myGen === gen;
+    },
+    stop,
+    // Foreground, back online, safety poll: refetch (debounced) while signed in.
+    kick(tag) {
+      if (!topic) return;
+      wake = true;
+      if (tag) tags.push(String(tag));
+      schedule();
+    },
+    topic() {
+      return topic;
+    },
+    state() {
+      return status;
+    },
+    held() {
+      return heldWhileHidden;
+    }
+  };
+}
+function havenAttachJobSignalWake(win, onWake) {
+  if (!win || typeof onWake !== "function") return () => {
+  };
+  const doc = win.document;
+  const onVisible = () => {
+    try {
+      if (!doc || doc.visibilityState !== "hidden") onWake("foreground");
+    } catch (e) {
+    }
+  };
+  const onOnline = () => onWake("online");
+  const onShow = (e) => {
+    if (e && e.persisted) onWake("foreground");
+  };
+  try {
+    if (doc) doc.addEventListener("visibilitychange", onVisible);
+  } catch (e) {
+  }
+  try {
+    win.addEventListener("online", onOnline);
+    win.addEventListener("pageshow", onShow);
+  } catch (e) {
+  }
+  return () => {
+    try {
+      if (doc) doc.removeEventListener("visibilitychange", onVisible);
+    } catch (e) {
+    }
+    try {
+      win.removeEventListener("online", onOnline);
+      win.removeEventListener("pageshow", onShow);
+    } catch (e) {
+    }
+  };
+}
+function havenPageVisible(win) {
+  try {
+    return !win || !win.document || win.document.visibilityState !== "hidden";
+  } catch (e) {
+    return true;
+  }
+}
+const HAVEN_PRO_POLL_OWNED_STATUSES = /* @__PURE__ */ new Set(["diagnosing", "materials_requested", "materials_approved"]);
+function havenProRemovedJobMessage(status) {
+  if (status === "cancelled") return "This job was cancelled.";
+  if (typeof status === "string" && status) return "This job was reassigned. You're no longer on it.";
+  return "This job is no longer assigned to you.";
+}
+function havenReconcileProActiveJobs(local, rows, opts) {
+  if (!Array.isArray(rows)) return null;
+  const o = opts || {};
+  const startedAt = typeof o.startedAt === "number" ? o.startedAt : 0;
+  const changed = o.lastLocalChange || {};
+  const busy = o.busyIds instanceof Set ? o.busyIds : /* @__PURE__ */ new Set();
+  const signals = o.signals instanceof Map ? o.signals : /* @__PURE__ */ new Map();
+  const current = Array.isArray(local) ? local : [];
+  const byId = new Map(current.map((j) => [String(j.id), j]));
+  const serverIds = /* @__PURE__ */ new Set();
+  const jobs = [];
+  const added = [];
+  rows.forEach((row) => {
+    if (!row || row.id == null) return;
+    const id = String(row.id);
+    if (serverIds.has(id)) return;
+    serverIds.add(id);
+    const mine = byId.get(id);
+    if (!mine) {
+      jobs.push(row);
+      added.push(id);
+      return;
+    }
+    const keepLocal = (changed[id] || 0) > startedAt || busy.has(id);
+    const merged = {
+      ...row,
+      ...mine,
+      status: keepLocal ? mine.status : row.status,
+      backendClaimed: true,
+      materialsReimbursed: row.materialsReimbursed || mine.materialsReimbursed || 0
+    };
+    jobs.push(merged);
+  });
+  const removed = [];
+  current.forEach((j) => {
+    const id = String(j.id);
+    if (serverIds.has(id)) return;
+    if (!j.backendClaimed) {
+      jobs.push(j);
+      return;
+    }
+    const sig = signals.get(id.toLowerCase()) || signals.get(id) || null;
+    const toldRemoved = !!(sig && sig.reason === "removed");
+    const finishingHere = busy.has(id) || (changed[id] || 0) > startedAt;
+    const pollOwned = HAVEN_PRO_POLL_OWNED_STATUSES.has(j.status) && !toldRemoved;
+    if (finishingHere || pollOwned) {
+      jobs.push(j);
+      return;
+    }
+    const status = sig ? sig.status : null;
+    removed.push({ job: j, status, message: havenProRemovedJobMessage(status) });
+  });
+  return { jobs, removed, added };
+}
+function havenProViewIsForJob(view, jobId) {
+  return !!(view && view.jobId != null && String(view.jobId) === String(jobId));
+}
 const HAVEN_ASSIGNED_JOB_MAP_ENABLED = true;
 const HAVEN_STATIC_MAP_W = 600;
 const HAVEN_STATIC_MAP_H = 300;
@@ -2066,12 +2393,13 @@ function HavenProApp() {
     if (backendState === "connecting") return;
     (typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout)(hideOpeningSplash);
   }, [backendState]);
+  const boardReloadRef = useRef(null);
   useEffect(() => {
     let cancelled = false;
     let timerId = null;
     async function load() {
       const jobs = await fetchPostedJobsFromSupabase();
-      if (jobs && !cancelled) {
+      if (Array.isArray(jobs) && !cancelled) {
         const activeIds = new Set(activeJobsRef.current.map((j) => j.id));
         const filtered = jobs.filter((j) => !activeIds.has(j.id));
         setAvailableJobs(filtered);
@@ -2081,12 +2409,16 @@ function HavenProApp() {
       setAvailableJobs([]);
       if (backendState === "ready" && authSession && authSession.id) {
         load();
-        timerId = window.setInterval(load, 3e4);
+        timerId = window.setInterval(() => {
+          if (havenPageVisible(window)) load();
+        }, 3e4);
+        boardReloadRef.current = load;
       }
     }
     return () => {
       cancelled = true;
       if (timerId) window.clearInterval(timerId);
+      if (boardReloadRef.current === load) boardReloadRef.current = null;
     };
   }, [tab, activeJobs, travelRadius, backendState, authSession && authSession.id]);
   const profileComplete = !!(firstName.trim() && lastName.trim() && homeCity.trim());
@@ -2844,19 +3176,37 @@ function HavenProApp() {
     accountCreatedAt
   ]);
   const activeLoadSeq = useRef(0);
-  async function reloadActiveJobs() {
+  async function reloadActiveJobs(signals) {
     const seq = ++activeLoadSeq.current;
-    const rows = await fetchActiveJobsFromSupabase();
+    const startedAt = Date.now();
+    const result = await fetchActiveJobsResult();
     if (seq !== activeLoadSeq.current) return;
-    if (rows) {
-      setActiveJobs(rows);
-      const activeIds = new Set(rows.map((j) => j.id));
-      setAvailableJobs((prev) => prev.filter((j) => !activeIds.has(j.id)));
-      if (rows.length > 0) {
-        setOnboardingStatus((prev) => prev === "completed" ? prev : "completed");
-        setOnboardingStep("done");
-        setAccountStatus("signed_in");
-      }
+    if (!result || !result.ok) return;
+    const busyIds = new Set([arrivingJobIdRef.current, advancingJobIdRef.current, completingJobIdRef.current].filter((x) => x != null).map(String));
+    const merged = havenReconcileProActiveJobs(activeJobsRef.current, result.rows, {
+      startedAt,
+      lastLocalChange: localJobChangeRef.current,
+      busyIds,
+      signals: signals instanceof Map ? signals : /* @__PURE__ */ new Map()
+    });
+    if (!merged) return;
+    const sig = (list) => list.map((j) => `${j.id}:${j.status}:${j.materialsReimbursed || 0}:${j.backendClaimed ? 1 : 0}`).join("|");
+    if (sig(merged.jobs) !== sig(activeJobsRef.current)) {
+      activeJobsRef.current = merged.jobs;
+      setActiveJobs(merged.jobs);
+    }
+    const activeIds = new Set(merged.jobs.map((j) => j.id));
+    setAvailableJobs((prev) => prev.filter((j) => !activeIds.has(j.id)));
+    if (merged.removed.length) {
+      const goneIds = new Set(merged.removed.map((r) => String(r.job.id)));
+      setReceiptDraft((prev) => prev && goneIds.has(String(prev.jobId)) ? null : prev);
+      setMyJobsStack((prev) => prev.some((v) => goneIds.has(String(v.jobId))) ? [{ view: "list" }] : prev);
+      merged.removed.forEach((r) => showToast(r.job.title ? `${r.message} (${r.job.title})` : r.message));
+    }
+    if (result.rows.length > 0) {
+      setOnboardingStatus((prev) => prev === "completed" ? prev : "completed");
+      setOnboardingStep("done");
+      setAccountStatus("signed_in");
     }
   }
   useEffect(() => {
@@ -2867,6 +3217,35 @@ function HavenProApp() {
       activeLoadSeq.current++;
     };
   }, [authSession && authSession.id]);
+  const jobSignalRefetchRef = useRef(null);
+  jobSignalRefetchRef.current = async (batch) => {
+    const signals = /* @__PURE__ */ new Map();
+    (batch && batch.signals || []).forEach((sg) => signals.set(sg.jobId, sg));
+    await reloadActiveJobs(signals);
+    if (boardReloadRef.current && havenPageVisible(window)) await boardReloadRef.current();
+  };
+  const jobSignalRef = useRef(null);
+  if (!jobSignalRef.current) {
+    jobSignalRef.current = havenCreateJobSignal({
+      getClient: () => getHavenSupabaseClient(),
+      onRefetch: (batch) => jobSignalRefetchRef.current ? jobSignalRefetchRef.current(batch) : null,
+      // In the background, signals and the safety poll wait; one re-read on foreground.
+      isHidden: () => !havenPageVisible(window)
+    });
+  }
+  useEffect(() => {
+    if (!getSupabaseConfig()) return void 0;
+    if (backendState === "ready" && authSession && authSession.id) jobSignalRef.current.start(authSession.id);
+    else jobSignalRef.current.stop();
+    return void 0;
+  }, [backendState, authSession && authSession.id]);
+  useEffect(() => {
+    const detach = havenAttachJobSignalWake(window, (tag) => jobSignalRef.current.kick(tag));
+    return () => {
+      detach();
+      jobSignalRef.current.stop();
+    };
+  }, []);
   function pushEarnings(view) {
     setEarningsStack((prev) => [...prev, view]);
   }
@@ -2886,6 +3265,12 @@ function HavenProApp() {
   useEffect(() => {
     if (openDetailJob) requestDestination(openDetailJob);
   }, [openDetailKey]);
+  const openDetailServerJobId = openDetailJob && openDetailJob.backendClaimed ? String(openDetailJob.id) : "";
+  useEffect(() => {
+    if (!openDetailServerJobId) return void 0;
+    const id = window.setInterval(() => jobSignalRef.current.kick("poll"), HAVEN_JOB_SIGNAL_SAFETY_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [openDetailServerJobId]);
   function pushMessages(view) {
     setMessagesStack((prev) => [...prev, view]);
   }
@@ -3272,7 +3657,7 @@ function HavenProApp() {
             showToast("Unable to claim this job right now.");
           }
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) {
+          if (Array.isArray(refreshed)) {
             const activeIds = new Set(activeJobsRef.current.map((j) => j.id));
             const filtered = refreshed.filter((j) => !activeIds.has(j.id));
             setAvailableJobs(filtered);
@@ -3286,13 +3671,16 @@ function HavenProApp() {
     }
     setAvailableJobs((prev) => prev.filter((j) => j.id !== job.id));
     const accepted = { ...job, lat: null, lng: null, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed };
+    localJobChangeRef.current[String(job.id)] = Date.now();
     setActiveJobs((prev) => [...prev, accepted]);
     if (backendClaimed) requestDestination(accepted);
     setTab("jobs");
     setMyJobsStack([{ view: "detail", jobId: job.id }]);
     showToast(`Accepted — ${job.title}`);
   }
+  const localJobChangeRef = useRef({});
   function updateActiveJob(jobId, updates) {
+    if (updates && Object.prototype.hasOwnProperty.call(updates, "status")) localJobChangeRef.current[String(jobId)] = Date.now();
     setActiveJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, ...updates } : j));
   }
   async function markArrived(jobId) {

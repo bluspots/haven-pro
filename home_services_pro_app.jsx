@@ -374,12 +374,16 @@ export default function HavenProApp() {
   }, [backendState]);
 
   // Load posted jobs when viewing Home (Job Board) and refresh lightly while on that screen
+  // Live job updates: the open board's reload, so a job_changed signal for
+  // this Pro (e.g. after being released) refreshes the board too.
+  const boardReloadRef = useRef(null);
   useEffect(() => {
     let cancelled = false;
     let timerId = null;
     async function load() {
       const jobs = await fetchPostedJobsFromSupabase();
-      if (jobs && !cancelled) {
+      // null = the read failed: keep the board as it is (a real empty list is []).
+      if (Array.isArray(jobs) && !cancelled) {
         // Replace SIM_JOBS entirely when backend is configured (even if empty)
         // Exclude any jobs that are currently active so they don't reappear on the board.
         const activeIds = new Set(activeJobsRef.current.map(j => j.id));
@@ -394,12 +398,17 @@ export default function HavenProApp() {
       // Phase 1B A1: only read once connected with a server-confirmed session (getUser).
       if (backendState === "ready" && authSession && authSession.id) {
         load();
-        timerId = window.setInterval(load, 30000); // ~30s refresh cadence
+        // ~30 s refresh while the board is visible (skipped while the app is in
+        // the background). Coming back to the foreground or online, and the
+        // Pro's own job_changed signal, refresh it through boardReloadRef.
+        timerId = window.setInterval(() => { if (havenPageVisible(window)) load(); }, 30000);
+        boardReloadRef.current = load;
       }
     }
     return () => {
       cancelled = true;
       if (timerId) window.clearInterval(timerId);
+      if (boardReloadRef.current === load) boardReloadRef.current = null;
     };
   }, [tab, activeJobs, travelRadius, backendState, authSession && authSession.id]);
 
@@ -1233,19 +1242,39 @@ export default function HavenProApp() {
   // An assigned active job means this Pro already passed onboarding — never
   // drop them back on Create Your Profile just because local state was blank.
   const activeLoadSeq = useRef(0);
-  async function reloadActiveJobs() {
+  // Live job updates: the server decides which jobs are this Pro's active jobs
+  // and their status (pro_live_updates.js). A failed read keeps what is on
+  // screen. A job the server no longer lists leaves My Jobs with plain copy;
+  // live location for it stops with it (the watch only runs for en_route jobs).
+  // signals: Map jobId -> { status, reason } from job_changed (may be empty).
+  async function reloadActiveJobs(signals) {
     const seq = ++activeLoadSeq.current;
-    const rows = await fetchActiveJobsFromSupabase();
+    const startedAt = Date.now();
+    const result = await fetchActiveJobsResult();
     if (seq !== activeLoadSeq.current) return;
-    if (rows) {
-      setActiveJobs(rows);
-      const activeIds = new Set(rows.map(j => j.id));
-      setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
-      if (rows.length > 0) {
-        setOnboardingStatus(prev => (prev === "completed" ? prev : "completed"));
-        setOnboardingStep("done");
-        setAccountStatus("signed_in");
-      }
+    if (!result || !result.ok) return;
+    const busyIds = new Set([arrivingJobIdRef.current, advancingJobIdRef.current, completingJobIdRef.current].filter(x => x != null).map(String));
+    const merged = havenReconcileProActiveJobs(activeJobsRef.current, result.rows, {
+      startedAt, lastLocalChange: localJobChangeRef.current, busyIds, signals: signals instanceof Map ? signals : new Map(),
+    });
+    if (!merged) return;
+    const sig = list => list.map(j => `${j.id}:${j.status}:${j.materialsReimbursed || 0}:${j.backendClaimed ? 1 : 0}`).join("|");
+    if (sig(merged.jobs) !== sig(activeJobsRef.current)) {
+      activeJobsRef.current = merged.jobs;
+      setActiveJobs(merged.jobs);
+    }
+    const activeIds = new Set(merged.jobs.map(j => j.id));
+    setAvailableJobs(prev => prev.filter(j => !activeIds.has(j.id)));
+    if (merged.removed.length) {
+      const goneIds = new Set(merged.removed.map(r => String(r.job.id)));
+      setReceiptDraft(prev => (prev && goneIds.has(String(prev.jobId)) ? null : prev));
+      setMyJobsStack(prev => (prev.some(v => goneIds.has(String(v.jobId))) ? [{ view: "list" }] : prev));
+      merged.removed.forEach(r => showToast(r.job.title ? `${r.message} (${r.job.title})` : r.message));
+    }
+    if (result.rows.length > 0) {
+      setOnboardingStatus(prev => (prev === "completed" ? prev : "completed"));
+      setOnboardingStep("done");
+      setAccountStatus("signed_in");
     }
   }
   useEffect(() => {
@@ -1254,6 +1283,42 @@ export default function HavenProApp() {
     }
     return () => { activeLoadSeq.current++; };
   }, [authSession && authSession.id]);
+
+  // ── Live job updates (realtime job signal, MIG-0036 contract v1) ──────────
+  // After sign-in the app joins its private topic jobs:user:<my id>. A
+  // job_changed message is only a "refetch" signal: after a 400 ms debounce
+  // the app re-reads its active jobs (and the board, if it is open) through
+  // the existing reads; the payload only picks the copy for a removed job.
+  // The same re-read runs on SUBSCRIBED (also after a reconnect), on coming
+  // back to the foreground or online, and every 60 s while a job screen is
+  // open. Before 0036 is live the channel never delivers and these re-reads
+  // keep the app current. Sign-out or another account removes the channel.
+  const jobSignalRefetchRef = useRef(null);
+  jobSignalRefetchRef.current = async (batch) => {
+    const signals = new Map();
+    ((batch && batch.signals) || []).forEach(sg => signals.set(sg.jobId, sg));
+    await reloadActiveJobs(signals);
+    if (boardReloadRef.current && havenPageVisible(window)) await boardReloadRef.current();
+  };
+  const jobSignalRef = useRef(null);
+  if (!jobSignalRef.current) {
+    jobSignalRef.current = havenCreateJobSignal({
+      getClient: () => getHavenSupabaseClient(),
+      onRefetch: (batch) => (jobSignalRefetchRef.current ? jobSignalRefetchRef.current(batch) : null),
+      // In the background, signals and the safety poll wait; one re-read on foreground.
+      isHidden: () => !havenPageVisible(window),
+    });
+  }
+  useEffect(() => {
+    if (!getSupabaseConfig()) return undefined;
+    if (backendState === "ready" && authSession && authSession.id) jobSignalRef.current.start(authSession.id);
+    else jobSignalRef.current.stop();
+    return undefined;
+  }, [backendState, authSession && authSession.id]);
+  useEffect(() => {
+    const detach = havenAttachJobSignalWake(window, tag => jobSignalRef.current.kick(tag));
+    return () => { detach(); jobSignalRef.current.stop(); };
+  }, []);
 
   function pushEarnings(view) { setEarningsStack(prev => [...prev, view]); }
   function popEarnings() { setEarningsStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
@@ -1272,6 +1337,14 @@ export default function HavenProApp() {
   useEffect(() => {
     if (openDetailJob) requestDestination(openDetailJob);
   }, [openDetailKey]);
+  // Live job updates: a slow safety re-read while a server job's screen is open,
+  // in case a broadcast was missed.
+  const openDetailServerJobId = openDetailJob && openDetailJob.backendClaimed ? String(openDetailJob.id) : "";
+  useEffect(() => {
+    if (!openDetailServerJobId) return undefined;
+    const id = window.setInterval(() => jobSignalRef.current.kick("poll"), HAVEN_JOB_SIGNAL_SAFETY_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [openDetailServerJobId]);
 
   function pushMessages(view) { setMessagesStack(prev => [...prev, view]); }
   function popMessages() { setMessagesStack(prev => (prev.length > 1 ? prev.slice(0, -1) : prev)); }
@@ -1696,7 +1769,7 @@ export default function HavenProApp() {
           }
           // Best-effort refresh of posted jobs after a failed claim
           const refreshed = await fetchPostedJobsFromSupabase();
-          if (refreshed) {
+          if (Array.isArray(refreshed)) {
             const activeIds = new Set(activeJobsRef.current.map(j => j.id));
             const filtered = refreshed.filter(j => !activeIds.has(j.id));
             setAvailableJobs(filtered);
@@ -1712,6 +1785,7 @@ export default function HavenProApp() {
     setAvailableJobs(prev => prev.filter(j => j.id !== job.id));
     // No coordinates are copied from the board or the claim row (MAP-05 / 0030).
     const accepted = { ...job, lat: null, lng: null, status: "en_route", acceptedAt: Date.now(), jobNotes: "", beforePhoto: null, afterPhoto: null, backendClaimed };
+    localJobChangeRef.current[String(job.id)] = Date.now(); // a read that started before the claim can't drop it
     setActiveJobs(prev => [...prev, accepted]);
     // Exact destination: once after a successful claim, from the assigned-destination RPC only.
     if (backendClaimed) requestDestination(accepted);
@@ -1720,7 +1794,11 @@ export default function HavenProApp() {
     showToast(`Accepted — ${job.title}`);
   }
 
+  // Live job updates: when this app last changed a job's status, so a server
+  // read that started before that change can't walk it back.
+  const localJobChangeRef = useRef({});
   function updateActiveJob(jobId, updates) {
+    if (updates && Object.prototype.hasOwnProperty.call(updates, "status")) localJobChangeRef.current[String(jobId)] = Date.now();
     setActiveJobs(prev => prev.map(j => (j.id === jobId ? { ...j, ...updates } : j)));
   }
   // Arrival is a backend write for claimed jobs. Local status becomes arrived only
