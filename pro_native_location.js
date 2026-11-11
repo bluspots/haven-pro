@@ -129,16 +129,48 @@ async function havenNativeHttpPost(url, headers, bodyObject) {
 }
 function havenUseNativeHttp() { return havenIsNativeApp() && !!havenNativePlugin("CapacitorHttp"); }
 
+// ── Android notification permission (Quagon V6, founder 2026-11-11) ────────
+// Android 13+ shows the "Sharing your location…" notification only with the
+// POST_NOTIFICATIONS permission. It is asked for right before tracking starts.
+// If the Pro refuses, sharing still runs and the app says the notification is
+// hidden ("share and warn").
+const HAVEN_NATIVE_NOTIFICATIONS_OFF_TEXT = "Notifications are off for Haven Pro, so you won't see the \u201cSharing your location\u201d notification. Your location is still shared with this customer until you arrive.";
+let havenNativeNotificationsOff = false;
+const havenNativeNotificationsListeners = new Set();
+function havenNativeNotificationsAreOff() { return havenNativeNotificationsOff; }
+function havenOnNativeNotificationsChange(fn) {
+  havenNativeNotificationsListeners.add(fn);
+  return () => havenNativeNotificationsListeners.delete(fn);
+}
+function havenSetNativeNotificationsOff(off) {
+  const v = !!off;
+  if (v === havenNativeNotificationsOff) return;
+  havenNativeNotificationsOff = v;
+  havenNativeNotificationsListeners.forEach(fn => { try { fn(v); } catch (e) {} });
+}
+// Never throws; never blocks tracking. notifications: the LocalNotifications plugin.
+async function havenEnsureAndroidNotifications(notifications) {
+  if (!notifications || typeof notifications.checkPermissions !== "function") return;
+  try {
+    let st = await notifications.checkPermissions();
+    if (st && st.display !== "granted" && st.display !== "denied" && typeof notifications.requestPermissions === "function") {
+      st = await notifications.requestPermissions();
+    }
+    havenSetNativeNotificationsOff(!(st && st.display === "granted"));
+  } catch (e) { /* unknown: don't warn */ }
+}
+
 // ── Location source ─────────────────────────────────────────────────────────
 // Native shim with the browser's watchPosition / clearWatch shape. Ids are
 // returned at once; the plugin watcher is added when permission is settled and
 // removed on clearWatch (even if that comes first).
 function havenCreateNativeLocationApi(deps) {
-  const bg = deps.backgroundGeolocation, geo = deps.geolocation, platform = deps.platform;
+  const bg = deps.backgroundGeolocation, geo = deps.geolocation, platform = deps.platform, notifications = deps.notifications;
   let seq = 0;
   const watches = new Map(); // id -> { pluginId, cleared }
   function toPosition(loc) {
-    return { coords: { latitude: loc.latitude, longitude: loc.longitude, accuracy: loc.accuracy }, timestamp: typeof loc.time === "number" ? loc.time : Date.now() };
+    // No device time: null (never "now"), so an old fix can't pass as current.
+    return { coords: { latitude: loc.latitude, longitude: loc.longitude, accuracy: loc.accuracy }, timestamp: typeof loc.time === "number" && Number.isFinite(loc.time) ? loc.time : null };
   }
   function start(id, onPos, onErr) {
     const w = watches.get(id);
@@ -152,6 +184,8 @@ function havenCreateNativeLocationApi(deps) {
           if (st && st.location === "denied") { havenLiveDiag.watchErrors++; return fail(1); }
         } catch (e) { havenLiveDiag.watchErrors++; return fail(1); }
       }
+      if (w.cleared) return;
+      if (platform === "android") await havenEnsureAndroidNotifications(notifications);
       if (w.cleared) return;
       let pluginId;
       try {
@@ -193,12 +227,16 @@ function havenCreateNativeLocationApi(deps) {
 }
 let havenNativeLocationApiInstance = null;
 // The en-route watch's location API: native shim in the native app, else the browser's.
-function havenLocationApi() {
-  if (havenIsNativeApp()) {
+// opts.background === false (native app): the web view's own location API,
+// which only runs while the app is open. Used when nothing is being shared
+// (a SIM job, or the server ended sharing): "I've Arrived" still gets a fix,
+// but there is no background tracking and no "Sharing…" notification.
+function havenLocationApi(opts) {
+  if (havenIsNativeApp() && !(opts && opts.background === false)) {
     const bg = havenNativePlugin("BackgroundGeolocation");
     if (bg && typeof bg.addWatcher === "function") {
       if (!havenNativeLocationApiInstance) {
-        havenNativeLocationApiInstance = havenCreateNativeLocationApi({ backgroundGeolocation: bg, geolocation: havenNativePlugin("Geolocation"), platform: havenNativePlatform() });
+        havenNativeLocationApiInstance = havenCreateNativeLocationApi({ backgroundGeolocation: bg, geolocation: havenNativePlugin("Geolocation"), notifications: havenNativePlugin("LocalNotifications"), platform: havenNativePlatform() });
       }
       return havenNativeLocationApiInstance;
     }

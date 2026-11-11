@@ -877,22 +877,62 @@ async function sendProLiveLocation(jobId, fix) {
   const body = { p_job_id: jobId, p_lat: fix.lat, p_lng: fix.lng };
   if (typeof fix.capturedAt === "number" && Number.isFinite(fix.capturedAt)) body.p_captured_at = new Date(fix.capturedAt).toISOString();
   const url = `${cfg.url}/rest/v1/rpc/pro_update_live_location`;
-  const headers = {
-    apikey: actor.headers.apikey,
-    Authorization: actor.headers.Authorization,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-  let res;
-  try {
+  const post = async (authorization) => {
+    const headers = {
+      apikey: actor.headers.apikey,
+      Authorization: authorization,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
     // Native app: Capacitor's native HTTP (keeps working in the background; same
     // URL, headers and JSON body). Browser: fetch, unchanged.
-    res = typeof havenUseNativeHttp === "function" && havenUseNativeHttp()
+    return typeof havenUseNativeHttp === "function" && havenUseNativeHttp()
       ? await havenNativeHttpPost(url, headers, body)
       : await fetch(url, { method: "POST", headers: headers, body: JSON.stringify(body) });
-  } catch (e) {
-    return { state: "retry" };
+  };
+  let res;
+  try { res = await post(actor.headers.Authorization); } catch (e) { return { state: "retry" }; }
+  if (res.status === 401) {
+    // Founder decision 2026-11-11: an expired sign-in mid-drive refreshes the
+    // session once (10 s limit) and retries once before sharing stops. A refresh
+    // that only timed out or had no network (e.g. a throttled background WebView)
+    // is a brief outage (retry), never a silent stop.
+    const refreshed = await havenRefreshSessionForLive(HAVEN_LIVE_REFRESH_TIMEOUT_MS);
+    if (!refreshed.ok) return refreshed.definitive ? { state: "stop", error: "not_authenticated" } : { state: "retry" };
+    try { res = await post(`Bearer ${refreshed.token}`); } catch (e) { return { state: "retry" }; }
   }
+  return havenMapLiveSendResponse(res);
+}
+const HAVEN_LIVE_REFRESH_TIMEOUT_MS = 10000;
+// { ok: true, token } | { ok: false, definitive } — definitive means the
+// session really can't be renewed (signed out, refresh token rejected).
+async function havenRefreshSessionForLive(timeoutMs) {
+  const client = getHavenSupabaseClient();
+  if (!client || !client.auth || typeof client.auth.refreshSession !== "function") return { ok: false, definitive: true };
+  let timer = null;
+  const timeout = new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs); });
+  try {
+    const out = await Promise.race([client.auth.refreshSession(), timeout]);
+    if (out && out.timedOut) return { ok: false, definitive: false };
+    const err = out && out.error;
+    if (err) {
+      const st = Number(err.status);
+      const definitive = st === 400 || st === 401 || st === 403 || err.name === "AuthSessionMissingError";
+      return { ok: false, definitive };
+    }
+    const session = out && out.data ? out.data.session : null;
+    if (session && typeof session.access_token === "string" && session.access_token) {
+      rememberHavenSession(session);
+      return { ok: true, token: session.access_token.trim() };
+    }
+    return { ok: false, definitive: true };
+  } catch (e) {
+    return { ok: false, definitive: false }; // network / thrown: brief outage
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+async function havenMapLiveSendResponse(res) {
   if (res.status === 401 || res.status === 403) return { state: "stop", error: "not_authenticated" };
   if (res.status === 429) return { state: "rate_limited", retryAfterS: null };
   if (res.status >= 500 || res.status === 408) return { state: "retry" };
@@ -2154,7 +2194,10 @@ function havenLiveShareEligible(job, backendConfigured) {
 
 // A device fix -> { lat, lng, capturedAt } or null when it must not be sent.
 // pos is a GeolocationPosition-like object. Accuracy is checked, never kept.
-function havenLiveFix(pos) {
+// nowMs (optional): a fix the device itself recorded more than
+// HAVEN_LIVE_MAX_FIX_AGE_MS ago is dropped (founder decision 2026-11-11), so an
+// old position is never shown to the Customer as current.
+function havenLiveFix(pos, nowMs) {
   const c = pos && pos.coords;
   if (!c) return null;
   const lat = c.latitude, lng = c.longitude;
@@ -2163,6 +2206,7 @@ function havenLiveFix(pos) {
   if (lat === 0 && lng === 0) return null; // junk fix
   if (typeof c.accuracy === "number" && (!Number.isFinite(c.accuracy) || c.accuracy > HAVEN_LIVE_MAX_ACCURACY_M)) return null;
   const t = typeof pos.timestamp === "number" && Number.isFinite(pos.timestamp) ? pos.timestamp : null;
+  if (t != null && typeof nowMs === "number" && nowMs - t > HAVEN_LIVE_MAX_FIX_AGE_MS) return null;
   return { lat: lat, lng: lng, capturedAt: t };
 }
 
@@ -2183,6 +2227,7 @@ function havenCreateLiveSender(jobId, deps) {
   const clearTimer = deps.clearTimer || (id => clearTimeout(id));
   let latest = null, lastSent = null, lastSentAt = 0, lastAttemptAt = 0, holdUntil = 0;
   let inFlight = false, stopped = false, timer = null, sentCount = 0, failStreak = 0;
+  let inFlightDone = null; // the send in progress (for idle())
 
   function schedule(ms) {
     if (timer != null) clearTimer(timer);
@@ -2212,10 +2257,12 @@ function havenCreateLiveSender(jobId, deps) {
     }
     if (t < due) { schedule(due - t); return; }
     // Heartbeat only with a recent fix; a silent device is not reported as current.
+    // Judged by when the app got it and by when the device recorded it.
     if (latest.receivedAt != null && t - latest.receivedAt > HAVEN_LIVE_MAX_FIX_AGE_MS) return;
+    if (latest.capturedAt != null && t - latest.capturedAt > HAVEN_LIVE_MAX_FIX_AGE_MS) return;
     const fix = latest;
     inFlight = true; lastAttemptAt = t;
-    Promise.resolve().then(() => deps.send(jobId, fix)).then(res => res, () => ({ state: "retry" })).then(res => {
+    inFlightDone = Promise.resolve().then(() => deps.send(jobId, fix)).then(res => res, () => ({ state: "retry" })).then(res => {
       inFlight = false;
       if (stopped) return;
       const r = res || { state: "retry" };
@@ -2238,12 +2285,19 @@ function havenCreateLiveSender(jobId, deps) {
     // A raw device position (GeolocationPosition-like). Bad fixes are ignored.
     onPosition(pos) {
       if (stopped) return;
-      const f = havenLiveFix(pos);
+      const f = havenLiveFix(pos, now());
       if (!f) return;
       latest = { lat: f.lat, lng: f.lng, capturedAt: f.capturedAt, receivedAt: now() };
       pump();
     },
     stop() { stop(null); },
+    // Resolves once the send in progress (if any) has finished, or after
+    // timeoutMs, whichever is first. Never rejects. Used at sign-out.
+    idle(timeoutMs) {
+      if (!inFlight || !inFlightDone) return Promise.resolve();
+      const wait = typeof timeoutMs === "number" ? timeoutMs : 3000;
+      return Promise.race([inFlightDone.then(() => {}, () => {}), new Promise(r => setTimer(r, wait))]);
+    },
     isStopped() { return stopped; },
     sentCount() { return sentCount; },
   };
@@ -2380,16 +2434,48 @@ async function havenNativeHttpPost(url, headers, bodyObject) {
 }
 function havenUseNativeHttp() { return havenIsNativeApp() && !!havenNativePlugin("CapacitorHttp"); }
 
+// ── Android notification permission (Quagon V6, founder 2026-11-11) ────────
+// Android 13+ shows the "Sharing your location…" notification only with the
+// POST_NOTIFICATIONS permission. It is asked for right before tracking starts.
+// If the Pro refuses, sharing still runs and the app says the notification is
+// hidden ("share and warn").
+const HAVEN_NATIVE_NOTIFICATIONS_OFF_TEXT = "Notifications are off for Haven Pro, so you won't see the \u201cSharing your location\u201d notification. Your location is still shared with this customer until you arrive.";
+let havenNativeNotificationsOff = false;
+const havenNativeNotificationsListeners = new Set();
+function havenNativeNotificationsAreOff() { return havenNativeNotificationsOff; }
+function havenOnNativeNotificationsChange(fn) {
+  havenNativeNotificationsListeners.add(fn);
+  return () => havenNativeNotificationsListeners.delete(fn);
+}
+function havenSetNativeNotificationsOff(off) {
+  const v = !!off;
+  if (v === havenNativeNotificationsOff) return;
+  havenNativeNotificationsOff = v;
+  havenNativeNotificationsListeners.forEach(fn => { try { fn(v); } catch (e) {} });
+}
+// Never throws; never blocks tracking. notifications: the LocalNotifications plugin.
+async function havenEnsureAndroidNotifications(notifications) {
+  if (!notifications || typeof notifications.checkPermissions !== "function") return;
+  try {
+    let st = await notifications.checkPermissions();
+    if (st && st.display !== "granted" && st.display !== "denied" && typeof notifications.requestPermissions === "function") {
+      st = await notifications.requestPermissions();
+    }
+    havenSetNativeNotificationsOff(!(st && st.display === "granted"));
+  } catch (e) { /* unknown: don't warn */ }
+}
+
 // ── Location source ─────────────────────────────────────────────────────────
 // Native shim with the browser's watchPosition / clearWatch shape. Ids are
 // returned at once; the plugin watcher is added when permission is settled and
 // removed on clearWatch (even if that comes first).
 function havenCreateNativeLocationApi(deps) {
-  const bg = deps.backgroundGeolocation, geo = deps.geolocation, platform = deps.platform;
+  const bg = deps.backgroundGeolocation, geo = deps.geolocation, platform = deps.platform, notifications = deps.notifications;
   let seq = 0;
   const watches = new Map(); // id -> { pluginId, cleared }
   function toPosition(loc) {
-    return { coords: { latitude: loc.latitude, longitude: loc.longitude, accuracy: loc.accuracy }, timestamp: typeof loc.time === "number" ? loc.time : Date.now() };
+    // No device time: null (never "now"), so an old fix can't pass as current.
+    return { coords: { latitude: loc.latitude, longitude: loc.longitude, accuracy: loc.accuracy }, timestamp: typeof loc.time === "number" && Number.isFinite(loc.time) ? loc.time : null };
   }
   function start(id, onPos, onErr) {
     const w = watches.get(id);
@@ -2403,6 +2489,8 @@ function havenCreateNativeLocationApi(deps) {
           if (st && st.location === "denied") { havenLiveDiag.watchErrors++; return fail(1); }
         } catch (e) { havenLiveDiag.watchErrors++; return fail(1); }
       }
+      if (w.cleared) return;
+      if (platform === "android") await havenEnsureAndroidNotifications(notifications);
       if (w.cleared) return;
       let pluginId;
       try {
@@ -2444,12 +2532,16 @@ function havenCreateNativeLocationApi(deps) {
 }
 let havenNativeLocationApiInstance = null;
 // The en-route watch's location API: native shim in the native app, else the browser's.
-function havenLocationApi() {
-  if (havenIsNativeApp()) {
+// opts.background === false (native app): the web view's own location API,
+// which only runs while the app is open. Used when nothing is being shared
+// (a SIM job, or the server ended sharing): "I've Arrived" still gets a fix,
+// but there is no background tracking and no "Sharing…" notification.
+function havenLocationApi(opts) {
+  if (havenIsNativeApp() && !(opts && opts.background === false)) {
     const bg = havenNativePlugin("BackgroundGeolocation");
     if (bg && typeof bg.addWatcher === "function") {
       if (!havenNativeLocationApiInstance) {
-        havenNativeLocationApiInstance = havenCreateNativeLocationApi({ backgroundGeolocation: bg, geolocation: havenNativePlugin("Geolocation"), platform: havenNativePlatform() });
+        havenNativeLocationApiInstance = havenCreateNativeLocationApi({ backgroundGeolocation: bg, geolocation: havenNativePlugin("Geolocation"), notifications: havenNativePlugin("LocalNotifications"), platform: havenNativePlatform() });
       }
       return havenNativeLocationApiInstance;
     }
@@ -3345,6 +3437,15 @@ function HavenProApp() {
     if (signOutInFlight.current || authBusy || !authSession) return;
     signOutInFlight.current = true;
     setAuthBusy(true);
+    // Sign-out order (Quagon review): (1) stop the live sender, (2) end the
+    // location watch (native session included), (3) let a send already on its
+    // way finish (3 s at most), (4) [no stop-sharing RPC: founder 2026-11-11,
+    // the Customer sees "paused" after 5 min], (5) sign out. Steps 1–3 never
+    // block sign-out.
+    const sender = liveSenderRef.current;
+    try { stopLiveSharing(); } catch (e) {}
+    try { endLocationWatch(); } catch (e) {}
+    try { if (sender && typeof sender.idle === "function") await sender.idle(3000); } catch (e) {}
     let result;
     try {
       result = await havenAuthSignOut();
@@ -3359,13 +3460,14 @@ function HavenProApp() {
       const msg = "Couldn't sign out. Please try again.";
       setAuthNotice(msg);
       showToast(msg);
+      setLiveRestartTick(t => t + 1); // still signed in: sharing and the watch start again
       return;
     }
     setAuthNotice("");
     setSettingsAuthOpen(false);
     clearAllDestinations(); // MAP-05: no exact destination survives sign-out
-    stopLiveSharing(); // live location stops at sign-out
-    endLocationWatch(); // and the location watch ends with it
+    stopLiveSharing(); // (already stopped above; harmless)
+    endLocationWatch();
     setLocationDenied(false);
     clearAuthLinkedAccount();
     // Signing out never leaves a sessionless (local) account behind.
@@ -3986,6 +4088,10 @@ function HavenProApp() {
   const liveSenderRef = useRef(null);
   const lastPositionRef = useRef(null); // latest device fix, memory only; dropped on deny / watch end / sign-out
   const liveStoppedJobRef = useRef(null); // job id whose sharing the server ended
+  const [liveStoppedJobId, setLiveStoppedJobId] = useState(null); // same, for the watch below
+  const [liveRestartTick, setLiveRestartTick] = useState(0); // bumped when a sign-out failed
+  const [nativeNotificationsOff, setNativeNotificationsOff] = useState(havenNativeNotificationsAreOff());
+  useEffect(() => havenOnNativeNotificationsChange(setNativeNotificationsOff), []);
   const [liveShare, setLiveShare] = useState({ jobId: null, state: "off" }); // off | sharing | stopped
   const [locationDenied, setLocationDenied] = useState(false);
   const liveShareJob = authSession ? activeJobs.find(j => havenLiveShareEligible(j, !!getSupabaseConfig())) : null;
@@ -3995,7 +4101,7 @@ function HavenProApp() {
     setLiveShare({ jobId: null, state: "off" });
   }
   useEffect(() => {
-    if (!liveShareJobId) { liveStoppedJobRef.current = null; stopLiveSharing(); return; }
+    if (!liveShareJobId) { liveStoppedJobRef.current = null; setLiveStoppedJobId(null); stopLiveSharing(); return; }
     if (locationDenied) { stopLiveSharing(); return; } // no permission: nothing is sent
     if (liveStoppedJobRef.current === liveShareJobId) return; // the server already ended it
     if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
@@ -4004,7 +4110,11 @@ function HavenProApp() {
     const sender = havenCreateLiveSender(liveShareJobId, {
       send: HAVEN_NATIVE_SPIKE_DIAGNOSTICS ? havenDiagWrapSend(sendProLiveLocation) : sendProLiveLocation,
       onStop: () => {
+        // A real server refusal: sharing for this job is over. The background
+        // watch ends too (Quagon V2); a foreground-only watch keeps the
+        // "I've Arrived" check working until the job leaves en_route.
         liveStoppedJobRef.current = liveShareJobId;
+        setLiveStoppedJobId(liveShareJobId);
         if (liveSenderRef.current === sender) liveSenderRef.current = null;
         setLiveShare({ jobId: liveShareJobId, state: "stopped" });
       },
@@ -4015,7 +4125,7 @@ function HavenProApp() {
     // that showed permission is back), only if it is under 30 s old.
     const last = lastPositionRef.current;
     if (last && typeof last.timestamp === "number" && Date.now() - last.timestamp < 30000) sender.onPosition(last);
-  }, [liveShareJobId, locationDenied]);
+  }, [liveShareJobId, locationDenied, liveRestartTick]);
   useEffect(() => () => { if (liveSenderRef.current) liveSenderRef.current.stop(); }, []);
 
   // Live location — only watched while a job is actually en_route, to gate
@@ -4026,17 +4136,34 @@ function HavenProApp() {
   // as the operating system keeps delivering positions. Signed out: no watch
   // (sign-out also ends it directly, see endLocationWatch).
   const locationWatchRef = useRef(null);
+  const locationGeoRef = useRef(null); // the API the current watch was started on
   function endLocationWatch() {
-    const geo = havenLocationApi(); // native app: background-capable plugin; browser: the standard web location API
+    const geo = locationGeoRef.current;
     if (locationWatchRef.current != null && geo) geo.clearWatch(locationWatchRef.current);
     locationWatchRef.current = null;
+    locationGeoRef.current = null;
     lastPositionRef.current = null;
     setProLiveLocation(null);
   }
   const signedInId = authSession ? (authSession.id || "signed-in") : null;
+  // Background tracking only while this Pro's location is actually being
+  // shared for a job: not for a SIM job, not after the server ended sharing,
+  // not without permission. Otherwise the watch is foreground-only.
+  const wantBackgroundLocation = !!liveShareJobId && liveStoppedJobId !== liveShareJobId && !locationDenied;
+  // After a permission denial the watch stays off until the Pro comes back to
+  // the app (they may have changed the setting), so a denied Android plugin
+  // can't keep a "Sharing…" notification up (Quagon V5).
   useEffect(() => {
-    const geo = havenLocationApi(); // native app: background-capable plugin; browser: the standard web location API
-    if (!signedInId || !activeJobs.some(j => j.status === "en_route") || !geo) return;
+    if (!locationDenied || typeof document === "undefined") return undefined;
+    const onVisible = () => { if (document.visibilityState !== "hidden") setLocationDenied(false); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [locationDenied]);
+  useEffect(() => {
+    // native app: background-capable plugin while sharing; otherwise (and in the
+    // browser) the standard web location API
+    const geo = havenLocationApi({ background: wantBackgroundLocation });
+    if (!signedInId || locationDenied || !activeJobs.some(j => j.status === "en_route") || !geo) return;
     const watchId = geo.watchPosition(
       pos => {
         if (locationWatchRef.current !== watchId) return; // ended (sign-out): ignore late positions
@@ -4051,8 +4178,12 @@ function HavenProApp() {
         setProLiveLocation(null);
         if (err && err.code === 1) {
           // PERMISSION_DENIED (from the start or revoked while sharing): stop the
-          // sender first (drops its cached fix), then say so. Nothing is sent.
+          // sender first (drops its cached fix), end the watch itself, then say
+          // so. Nothing is sent; the watch comes back when the Pro returns.
           if (liveSenderRef.current) { liveSenderRef.current.stop(); liveSenderRef.current = null; }
+          geo.clearWatch(watchId);
+          locationWatchRef.current = null;
+          locationGeoRef.current = null;
           lastPositionRef.current = null;
           setLiveShare({ jobId: null, state: "off" });
           setLocationDenied(true);
@@ -4061,10 +4192,11 @@ function HavenProApp() {
       { enableHighAccuracy: true, maximumAge: 10000, timeout: 10000 }
     );
     locationWatchRef.current = watchId;
+    locationGeoRef.current = geo;
     return () => {
-      if (locationWatchRef.current === watchId) { geo.clearWatch(watchId); locationWatchRef.current = null; lastPositionRef.current = null; }
+      if (locationWatchRef.current === watchId) { geo.clearWatch(watchId); locationWatchRef.current = null; locationGeoRef.current = null; lastPositionRef.current = null; }
     };
-  }, [activeJobs, signedInId]);
+  }, [activeJobs, signedInId, wantBackgroundLocation, locationDenied, liveRestartTick]);
 
   // Tap the status bar to scroll to the top (same as Haven Customer). iOS
   // scrolls the page, not the app's inner scroll areas, when the status bar
@@ -5240,9 +5372,16 @@ function HavenProApp() {
         <span style={{ fontSize: 13, fontWeight: 700, color: sharing ? T.pgd : T.tx, fontFamily: FONT, lineHeight: 1.35 }}>{text}</span>
       </div>
     );
+    // Android 13+, notifications refused: sharing still runs; say the notification is hidden.
+    const notifWarn = sharing && nativeNotificationsOff ? (
+      <div data-testid="live-share-notifications-off" role="status"
+        style={{ padding: "10px 14px", marginTop: -6, marginBottom: 12, borderRadius: 12, background: T.w, border: `1px solid ${T.bd}`, fontSize: 12.5, fontWeight: 600, color: T.tx, fontFamily: FONT, lineHeight: 1.35 }}>
+        {HAVEN_NATIVE_NOTIFICATIONS_OFF_TEXT}
+      </div>
+    ) : null;
     // Native spike build only: counts and times (never coordinates) for device testing.
-    if (!(HAVEN_NATIVE_SPIKE_DIAGNOSTICS && havenIsNativeApp())) return notice;
-    return <>{notice}<HavenLiveDiagPanel T={T} font={FONT} /></>;
+    if (!(HAVEN_NATIVE_SPIKE_DIAGNOSTICS && havenIsNativeApp())) return <>{notice}{notifWarn}</>;
+    return <>{notice}{notifWarn}<HavenLiveDiagPanel T={T} font={FONT} /></>;
   }
 
   function formatElapsed(ms) {

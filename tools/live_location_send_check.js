@@ -546,7 +546,11 @@ async function appChecks() {
     await sleep(1000);
     ok(liveCalls(app.calls).length === n, "Fix 1: after a revoke, the cached fix is not sent again (sender stopped at once)");
     ok(notice(w).getAttribute("data-live-state") === "no-permission" && /doesn't have location permission/.test(noticeText(w)), "Fix 1: the no-permission notice shows once sending has stopped");
-    app.geo.emit(pos(NEAR)); // permission granted again
+    ok(app.geo.watchers.size === 0, "V5: a permission denial ends the watch itself (no lingering native watcher / notification)");
+    // Permission granted again in Settings; the Pro comes back to the app → the watch re-arms.
+    w.document.dispatchEvent(new w.Event("visibilitychange"));
+    await waitFor(w, () => app.geo.watchers.size === 1, "watch re-armed on return");
+    app.geo.emit(pos(NEAR));
     await waitFor(w, () => liveCalls(app.calls).length > n, "sharing resumes with permission");
     ok(notice(w).getAttribute("data-live-state") === "sharing", "with permission back and the job still en_route, sharing resumes");
     noLeaks(app, "revoke");
@@ -585,14 +589,16 @@ function shippedChecks() {
     ok(!/sb_secret_[A-Za-z0-9]|"role"\s*:\s*"service_role"|sk\.eyJ/.test(html), f + ": no secret key value");
   }
   ok((app.match(/watchPosition\(/g) || []).length === 1, "one watchPosition in the app (sending hooks onto the existing watch)");
-  ok(!/visibilitychange|onblur|"blur"|pagehide/.test(app), "the watch is not stopped on visibilitychange / blur / app hide");
+  ok(!/onblur|"blur"|pagehide/.test(app) && (app.match(/visibilitychange/g) || []).length === 2
+    && /if \(!locationDenied \|\| typeof document === "undefined"\) return undefined;\n    const onVisible = \(\) => \{ if \(document\.visibilityState !== "hidden"\) setLocationDenied\(false\); \};/.test(app),
+    "the watch is not stopped on visibilitychange / blur / app hide (visibility is only used to re-arm after a denial)");
   // The watch's location API is havenLocationApi() (browser: navigator.geolocation; native app: the
   // background-capable plugin shim). It ends only in its effect cleanup and on sign-out.
-  ok((app.match(/clearWatch\(/g) || []).length === 2 && /function endLocationWatch\(\) \{\n    const geo = havenLocationApi\(\);[^\n]*\n    if \(locationWatchRef\.current != null && geo\) geo\.clearWatch/.test(app) && /geo\.clearWatch\(watchId\); locationWatchRef\.current = null;/.test(app), "the watch ends only in its effect cleanup and on sign-out");
+  ok((app.match(/clearWatch\(/g) || []).length === 3 && /function endLocationWatch\(\) \{\n    const geo = locationGeoRef\.current;\n    if \(locationWatchRef\.current != null && geo\) geo\.clearWatch/.test(app) && /geo\.clearWatch\(watchId\); locationWatchRef\.current = null;/.test(app), "the watch ends only in its effect cleanup, on sign-out, and on a permission denial");
   ok(!/navigator\.geolocation/.test(app), "the app reaches location only through havenLocationApi()");
-  ok(/endLocationWatch\(\); \/\/ and the location watch ends with it/.test(app) && /if \(!signedInId \|\| !activeJobs\.some/.test(app), "Fix 2: no watch while signed out; sign-out ends it directly");
+  ok(/try \{ endLocationWatch\(\); \} catch \(e\) \{\}/.test(app) && /if \(!signedInId \|\| locationDenied \|\| !activeJobs\.some/.test(app), "Fix 2: no watch while signed out; sign-out ends it directly");
   ok(/enableHighAccuracy: true/.test(app), "high accuracy stays on");
-  ok(/stopLiveSharing\(\); \/\/ live location stops at sign-out/.test(app), "9. sign-out stops sharing");
+  ok(/try \{ stopLiveSharing\(\); \} catch \(e\) \{\}\n    try \{ endLocationWatch\(\); \} catch \(e\) \{\}\n    try \{ if \(sender && typeof sender\.idle === "function"\) await sender\.idle\(3000\); \} catch \(e\) \{\}\n    let result;\n    try \{\n      result = await havenAuthSignOut\(\);/.test(app), "9. sign-out: stop sending, end the watch, settle the in-flight send (≤3 s), then sign out");
   const stripComments = t => t.replace(/\/\/[^\n]*/g, "");
   const live = stripComments(read("pro_live_location.js")) + read("backend_adapter.js").slice(read("backend_adapter.js").indexOf("async function sendProLiveLocation"), read("backend_adapter.js").indexOf("// Read the assigned job's current status.")).replace(/\/\/[^\n]*/g, "");
   ok(!/console\.|localStorage/.test(live), "the sender never logs and never touches localStorage");

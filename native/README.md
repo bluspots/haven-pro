@@ -60,8 +60,9 @@ npm run android        # opens Android Studio → Run on a connected phone
 To install the APK file directly: copy `app-debug.apk` to the phone, open it, and allow
 "Install unknown apps" for that one install.
 
-On Android 13+, allow notifications for Haven Pro (Settings → Apps → Haven Pro → Notifications)
-so the "Sharing your location…" notification is visible. The spike doesn't ask for this yet.
+On Android 13+, the app asks to show notifications right before sharing starts. If the Pro says no,
+sharing still runs and the job screen says the "Sharing your location" notification is hidden
+(founder decision 2026-11-11).
 
 ## The drive test (go/no-go)
 
@@ -109,13 +110,27 @@ Android the notification), and anything odd.
 Debug logging is off (`"loggingBehavior": "none"` in `capacitor.config.json`), so the Xcode console and
 Safari Web Inspector don't print plugin results, HTTP options, locations or tokens. Never paste those consoles.
 
+## Quagon Group B (done on this branch, founder decisions 2026-11-11)
+
+- **Server refusal** (not_found, tracking_not_active, not_authenticated, invalid_point, 4xx): the background
+  watch ends; a foreground-only watch keeps the "I've Arrived" check working until the job leaves en route.
+- **Stale fixes:** a fix the device recorded more than 2 minutes ago is never sent (device time, not only
+  receive time). A plugin fix without a device time is not treated as "now".
+- **401 mid-drive:** refresh the session once (10 s limit), retry once, then stop. A refresh that only timed
+  out or had no network is a brief outage (retry), not a stop. 403 still stops at once.
+- **Permission denied:** the watch itself is cleared (Android: no lingering notification) and re-arms when
+  the Pro comes back to the app.
+- **Sign-out order:** stop sending → end the watch → let a send already on its way finish (3 s at most) →
+  sign out. No stop-sharing RPC (founder: not now); the Customer sees "paused" after 5 minutes.
+- **Libraries bundled:** React, ReactDOM and supabase-js load from `www/vendor/` (pinned npm packages,
+  byte-identical to the website's CDN files). No remote scripts in the app.
+- **Android backups:** `allowBackup="false"` plus data-extraction rules, so the sign-in session isn't backed up.
+
 ## What the spike does not do yet
 
 - **No store builds.** The app ID is a placeholder (`app.haven.pro.spike`).
-- **Libraries still load from the internet.** React, ReactDOM and supabase-js come from CDNs; the
-  next step would bundle them.
-- **Two prompts are missing.** No Android notification-permission prompt, and no "precise location
-  is off" message (that needs copy approval).
-- **The Mapbox token may refuse the app's `localhost` address.**
+- **One prompt is missing:** no "precise location is off" message (that needs copy approval).
+- **Maps don't show in the app.** The Mapbox public token is limited to `bluspots.github.io` (403 from
+  `capacitor://localhost`). A separate app token is a founder decision for later.
 - **Force-quit, phone restarts, revoked permission, and some Android makers' battery savers stop
   tracking.** No app can prevent these; the Customer sees "paused" after 5 minutes.

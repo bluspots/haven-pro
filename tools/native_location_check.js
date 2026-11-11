@@ -61,8 +61,8 @@ function fakeNative(platform, opts) {
   const watchers = new Map();
   let seq = 0;
   const bg = {
-    async addWatcher(options, cb) { const id = "w" + (++seq); log.addWatcher.push(options); watchers.set(id, cb); if (opts.addDelay) await sleep(opts.addDelay); return id; },
-    async removeWatcher({ id }) { log.removeWatcher.push(id); watchers.delete(id); },
+    async addWatcher(options, cb) { const id = "w" + (++seq); log.addWatcher.push(options); log.order = (log.order || []).concat("addWatcher"); watchers.set(id, cb); if (opts.addDelay) await sleep(opts.addDelay); return id; },
+    async removeWatcher({ id }) { log.removeWatcher.push(id); log.order = (log.order || []).concat("removeWatcher"); watchers.delete(id); },
   };
   const geo = { async requestPermissions() { log.requestPermissions++; return { location: opts.iosDenied ? "denied" : "granted" }; } };
   const http = {
@@ -72,7 +72,12 @@ function fakeNative(platform, opts) {
       return { status: 200, data: { ok: true, received_at: new Date().toISOString() } };
     },
   };
-  const plugins = { BackgroundGeolocation: bg, Geolocation: geo, CapacitorHttp: http };
+  log.notif = [];
+  const notif = opts.notif ? {
+    async checkPermissions() { log.notif.push("check"); log.order = (log.order || []).concat("notifCheck"); return { display: opts.notif === "granted" ? "granted" : (opts.notif === "denied-already" ? "denied" : "prompt") }; },
+    async requestPermissions() { log.notif.push("request"); return { display: opts.notif === "allow" ? "granted" : "denied" }; },
+  } : undefined;
+  const plugins = { BackgroundGeolocation: bg, Geolocation: geo, CapacitorHttp: http, LocalNotifications: notif };
   return {
     log, watchers,
     emit: loc => { for (const cb of watchers.values()) cb(loc, undefined); },
@@ -82,10 +87,10 @@ function fakeNative(platform, opts) {
 }
 
 function loadNative(win, extra) {
-  const sandbox = Object.assign({ window: win, document: { visibilityState: "visible" }, navigator: win.navigator, Date, Math, Number, String, JSON, Promise, setTimeout, clearTimeout, setInterval, clearInterval, Map, Error, SyntaxError }, extra || {});
+  const sandbox = Object.assign({ window: win, document: { visibilityState: "visible" }, navigator: win.navigator, Date, Math, Number, String, JSON, Promise, setTimeout, clearTimeout, setInterval, clearInterval, Map, Set, Error, SyntaxError }, extra || {});
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(read("pro_native_location.js") + "\n;globalThis.__n = { havenLocationApi, havenIsNativeApp, havenNativeHttpPost, havenUseNativeHttp, havenCreateNativeLocationApi, havenDiagFix, havenDiagWrapSend, havenDiagLines, havenDiagReset, havenLiveDiag, HAVEN_NATIVE_SPIKE_DIAGNOSTICS, HAVEN_NATIVE_NOTIFICATION_TEXT };", sandbox);
+  vm.runInContext(read("pro_native_location.js") + "\n;globalThis.__n = { havenLocationApi, havenIsNativeApp, havenNativeHttpPost, havenUseNativeHttp, havenCreateNativeLocationApi, havenDiagFix, havenDiagWrapSend, havenDiagLines, havenDiagReset, havenLiveDiag, HAVEN_NATIVE_SPIKE_DIAGNOSTICS, HAVEN_NATIVE_NOTIFICATION_TEXT, havenNativeNotificationsAreOff, HAVEN_NATIVE_NOTIFICATIONS_OFF_TEXT };", sandbox);
   return { N: sandbox.__n, sandbox };
 }
 
@@ -240,11 +245,11 @@ async function renderApp(opts) {
   window.requestAnimationFrame = window.requestAnimationFrame || (cb => setTimeout(cb, 0));
   window.cancelAnimationFrame = window.cancelAnimationFrame || (id => clearTimeout(id));
   window.localStorage.clear();
-  const browserGeoUsed = { n: 0 };
+  const browserGeoUsed = { n: 0, active: 0 };
   Object.defineProperty(window.navigator, "geolocation", { configurable: true, value: {
-    watchPosition() { browserGeoUsed.n++; return 99; }, clearWatch() {}, getCurrentPosition() { browserGeoUsed.n++; },
+    watchPosition() { browserGeoUsed.n++; browserGeoUsed.active++; return 99; }, clearWatch() { browserGeoUsed.active = Math.max(0, browserGeoUsed.active - 1); }, getCurrentPosition() { browserGeoUsed.n++; },
   } });
-  const nat = fakeNative(opts.platform || "ios", { http: (req, n) => opts.live(n) });
+  const nat = fakeNative(opts.platform || "ios", { http: (req, n) => opts.live(n, req), notif: opts.notif });
   window.Capacitor = nat.Capacitor;
   const calls = [];
   const state = { rows: opts.rows || [], session: { access_token: "tok", user: { id: PRO_ID, email: "pro@example.com", user_metadata: { role: "pro" } } } };
@@ -271,7 +276,7 @@ async function renderApp(opts) {
     async getSession() { return { data: { session: state.session }, error: null }; },
     async getUser() { return { data: { user: state.session && state.session.user }, error: null }; },
     onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
-    async signOut() { state.session = null; return { error: null }; },
+    async signOut() { state.signOutAt = Date.now(); state.order = (state.order || []).concat("signOut"); state.session = null; return { error: null }; },
   } }; } };
   const ReactDOM = Object.assign({}, ReactDOMLegacy, ReactDOMClient);
   window.React = React; window.ReactDOM = ReactDOM;
@@ -283,6 +288,7 @@ async function renderApp(opts) {
 }
 const leaf = w => Array.from(w.document.querySelectorAll("#root *")).filter(e => e.children.length === 0 && e.tagName !== "STYLE").map(e => e.textContent).join(" ");
 async function waitFor(w, pred, label, tries) { for (let i = 0; i < (tries || 200); i++) { await sleep(25); if (pred(w)) return; } throw new Error("timed out: " + label); }
+// (w may be null for unit-level waits)
 function clickText(w, re) {
   const el = Array.from(w.document.querySelectorAll("#root *")).filter(e => e.children.length === 0 && re.test((e.textContent || "").trim())).pop();
   if (!el) throw new Error("no element " + re);
@@ -369,10 +375,237 @@ function shippedChecks() {
   ok(!/console\.|localStorage/.test(src), "N7. the native module never logs and never stores anything");
 }
 
+
+// ── N9: Quagon Group B (founder decisions 2026-11-11) ────────────────────────
+function loadLive() {
+  const sb = { Date, Math, Number, String, JSON, Promise, setTimeout, clearTimeout };
+  sb.globalThis = sb; vm.createContext(sb);
+  vm.runInContext(read("pro_live_location.js") + "\n;globalThis.__l = { havenLiveFix, havenCreateLiveSender, HAVEN_LIVE_MAX_FIX_AGE_MS };", sb);
+  return sb.__l;
+}
+function loadAdapterRefresh(fetchImpl, refresh) {
+  const store = {};
+  let session = { access_token: "old-token", user: { id: PRO_ID, email: "pro@example.com", user_metadata: { role: "pro" } } };
+  const counts = { refresh: 0 };
+  const sandbox = {
+    console: { log() {}, warn() {}, error() {} }, atob, setTimeout, clearTimeout,
+    window: { localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
+      supabase: { createClient() { return { auth: {
+        async getSession() { return { data: { session }, error: null }; },
+        async getUser() { return { data: { user: session.user }, error: null }; },
+        onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+        async refreshSession() { counts.refresh++; const r = await refresh(); if (r && r.data && r.data.session) session = r.data.session; return r; },
+      } }; } } },
+    fetch: fetchImpl, URL, encodeURIComponent, Date, JSON, Math, Array, Object, String, Number, Error, Promise, Set, Map,
+    INSPECTION_VISIT_FEE: 45, CONVENIENCE_FEE: 30, ACTIVE_BLOCK_STATUSES: new Set(["en_route"]),
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read("backend_adapter.js") + "\n;globalThis.__api = { sendProLiveLocation, HAVEN_LIVE_REFRESH_TIMEOUT_MS };", sandbox);
+  return { api: sandbox.__api, counts };
+}
+async function groupBChecks() {
+  console.log("N9 Group B — V3 stale fixes (device time):");
+  {
+    const L = loadLive();
+    const now = Date.now();
+    const p = (t) => ({ coords: { latitude: NEAR.lat, longitude: NEAR.lng, accuracy: 8 }, timestamp: t });
+    ok(L.havenLiveFix(p(now - 121000), now) === null, "V3. a fix the device recorded > 2 min ago is dropped");
+    ok(!!L.havenLiveFix(p(now - 5000), now) && !!L.havenLiveFix(p(null), now), "V3. a fresh fix, or one with no device time, is kept");
+    let t = 1000000; const timers = []; const sent = [];
+    const sender = L.havenCreateLiveSender(JOB, { now: () => t, setTimer: (fn, ms) => { timers.push({ fn, at: t + ms }); return timers.length; }, clearTimer() {},
+      send: async (id, fix) => { sent.push(fix); return { state: "ok" }; } });
+    sender.onPosition(p(t - 180000));
+    await flush();
+    ok(sent.length === 0, "V3. the sender never sends a device-old fix (not even as the first fix)");
+    sender.onPosition(p(t));
+    await flush();
+    ok(sent.length === 1, "V3. a fresh fix is sent");
+    // heartbeat: the same fix, received fresh, but its device time ages past 2 min → no heartbeat
+    t += 125000;
+    timers.sort((a, b) => a.at - b.at); const due = timers.filter(x => x.at <= t);
+    for (const x of due) { await x.fn(); await flush(); }
+    ok(sent.length === 1, "V3. the heartbeat stops once the last fix's device time is over 2 min old");
+    sender.stop();
+    const N = loadNative({ navigator: {}, Capacitor: undefined }).N;
+    const nat = fakeNative("ios");
+    const api = N.havenCreateNativeLocationApi({ backgroundGeolocation: nat.Capacitor.registerPlugin("BackgroundGeolocation"), geolocation: nat.Capacitor.registerPlugin("Geolocation"), platform: "ios" });
+    let got = null;
+    api.watchPosition(pos => { got = pos; });
+    await waitFor(null, () => nat.watchers.size === 1, "watcher", 40);
+    nat.emit(pluginLoc(NEAR, { time: undefined }));
+    ok(got && got.timestamp === null, "V3. a plugin fix with no device time gets timestamp null, never \"now\"");
+  }
+
+  console.log("N9 Group B — V4 401 mid-drive (refresh once, retry once):");
+  {
+    const fix = { lat: NEAR.lat, lng: NEAR.lng, capturedAt: Date.now() };
+    const okSession = () => ({ data: { session: { access_token: "new-token", user: { id: PRO_ID } } }, error: null });
+    {
+      const auths = [];
+      const { api, counts } = loadAdapterRefresh(async (url, init) => { auths.push(init.headers.Authorization); return auths.length === 1 ? json(401, {}) : json(200, { ok: true }); }, async () => okSession());
+      const r = await api.sendProLiveLocation(JOB, fix);
+      ok(r.state === "ok" && counts.refresh === 1 && auths.length === 2 && auths[0] === "Bearer old-token" && auths[1] === "Bearer new-token", "V4. 401 → refresh once → retry once with the new token → ok");
+    }
+    {
+      let n = 0;
+      const { api, counts } = loadAdapterRefresh(async () => { n++; return json(401, {}); }, async () => okSession());
+      const r = await api.sendProLiveLocation(JOB, fix);
+      ok(r.state === "stop" && r.error === "not_authenticated" && counts.refresh === 1 && n === 2, "V4. still 401 after the refresh → sharing stops (one refresh, one retry)");
+    }
+    {
+      const { api } = loadAdapterRefresh(async () => json(401, {}), async () => ({ data: { session: null }, error: { status: 400, name: "AuthApiError", message: "Invalid Refresh Token" } }));
+      const r = await api.sendProLiveLocation(JOB, fix);
+      ok(r.state === "stop" && r.error === "not_authenticated", "V4. the refresh is refused (signed out elsewhere) → stop");
+    }
+    {
+      const { api } = loadAdapterRefresh(async () => json(401, {}), async () => { throw new TypeError("Failed to fetch"); });
+      const r = await api.sendProLiveLocation(JOB, fix);
+      ok(r.state === "retry", "V4. the refresh fails for lack of network → brief outage (retry), not a silent stop");
+    }
+    {
+      const { api } = loadAdapterRefresh(async () => json(401, {}), () => new Promise(() => {}));
+      ok(api.HAVEN_LIVE_REFRESH_TIMEOUT_MS === 10000, "V4. the refresh has a 10 s limit");
+      const started = Date.now();
+      const realTO = global.setTimeout;
+      const r = await Promise.race([api.sendProLiveLocation(JOB, fix), new Promise(res => realTO(() => res({ state: "hung" }), 12000))]);
+      ok(r.state === "retry" && Date.now() - started < 11500, "V4. a refresh that hangs (throttled background web view) gives up after 10 s → retry");
+    }
+    {
+      let n = 0;
+      const { api, counts } = loadAdapterRefresh(async () => { n++; return json(403, {}); }, async () => okSession());
+      const r = await api.sendProLiveLocation(JOB, fix);
+      ok(r.state === "stop" && counts.refresh === 0 && n === 1, "V4. 403 (not an expired sign-in) still stops at once, no refresh");
+    }
+  }
+
+  console.log("N9 Group B — V6 Android notification permission:");
+  {
+    for (const [mode, wantOff, label] of [["prompt", true, "refused at the prompt"], ["allow", false, "allowed at the prompt"], ["granted", false, "already allowed"], ["denied-already", true, "already refused"]]) {
+      const { N } = loadNative({ navigator: {} });
+      const nat = fakeNative("android", { notif: mode === "prompt" ? "prompt" : mode });
+      const api = N.havenCreateNativeLocationApi({ backgroundGeolocation: nat.Capacitor.registerPlugin("BackgroundGeolocation"), geolocation: nat.Capacitor.registerPlugin("Geolocation"), notifications: nat.Capacitor.registerPlugin("LocalNotifications"), platform: "android" });
+      api.watchPosition(() => {});
+      await waitFor(null, () => nat.watchers.size === 1, "watcher", 40);
+      ok(N.havenNativeNotificationsAreOff() === wantOff && nat.log.order[0] === "notifCheck" && nat.log.order.indexOf("addWatcher") > 0,
+        "V6. Android, notifications " + label + ": asked before tracking starts; sharing still starts; warning " + (wantOff ? "shown" : "not shown"));
+      if (mode === "prompt") ok(nat.log.notif.join() === "check,request", "V6. the permission prompt is shown once (check → request)");
+      if (mode === "granted" || mode === "denied-already") ok(!nat.log.notif.includes("request"), "V6. no prompt when the answer is already known (" + label + ")");
+    }
+    const { N } = loadNative({ navigator: {} });
+    const nat = fakeNative("ios", { notif: "prompt" });
+    const api = N.havenCreateNativeLocationApi({ backgroundGeolocation: nat.Capacitor.registerPlugin("BackgroundGeolocation"), geolocation: nat.Capacitor.registerPlugin("Geolocation"), notifications: nat.Capacitor.registerPlugin("LocalNotifications"), platform: "ios" });
+    api.watchPosition(() => {});
+    await waitFor(null, () => nat.watchers.size === 1, "watcher", 40);
+    ok(nat.log.notif.length === 0, "V6. iPhone: no notification prompt (the blue location indicator is the iOS signal)");
+  }
+
+  console.log("N9 Group B — app (mocked native runtime):");
+  {
+    // V2: a real server refusal ends the background watch; a foreground watch keeps Arrived working.
+    const app = await renderApp({ platform: "ios", rows: [activeRow()], live: () => ({ status: 200, data: { ok: false, error: "tracking_not_active" } }) });
+    const w = app.window;
+    await waitFor(w, () => app.nat.watchers.size === 1, "watcher");
+    app.nat.emit(pluginLoc(NEAR));
+    await waitFor(w, () => app.nat.watchers.size === 0 && app.browserGeoUsed.active === 1, "background watch ended, foreground watch on", 200);
+    ok(app.nat.watchers.size === 0 && app.nat.log.removeWatcher.length >= 1, "V2. server refusal → the native background watcher (and its notification) ends");
+    ok(app.browserGeoUsed.active === 1, "V2. …and a foreground-only watch keeps the \"I've Arrived\" check working");
+    const n = app.nat.log.http.length;
+    await sleep(600);
+    ok(app.nat.log.http.length === n, "V2. nothing more is sent for that job");
+    w.close();
+  }
+  {
+    // V5: Android permission denied → the plugin watcher is cleared; it re-arms when the Pro comes back.
+    const app = await renderApp({ platform: "android", rows: [activeRow()], live: () => ({ status: 200, data: { ok: true } }) });
+    const w = app.window;
+    await waitFor(w, () => app.nat.watchers.size === 1, "watcher");
+    app.nat.fail({ code: "NOT_AUTHORIZED", message: "Permission denied." });
+    await waitFor(w, () => app.nat.watchers.size === 0, "watcher cleared on denial");
+    ok(app.nat.watchers.size === 0, "V5. Android: a permission denial clears the watcher (no lingering \"Sharing…\" notification)");
+    await sleep(300);
+    ok(app.nat.log.addWatcher.length === 1, "V5. it is not re-armed on its own");
+    w.document.dispatchEvent(new w.Event("visibilitychange"));
+    await waitFor(w, () => app.nat.watchers.size === 1, "re-armed on resume");
+    ok(app.nat.log.addWatcher.length === 2, "V5. coming back to the app re-arms the watch once");
+    w.close();
+  }
+  {
+    // V6 in the app: notifications refused → sharing on + a plain warning.
+    const app = await renderApp({ platform: "android", notif: "prompt", rows: [activeRow()], live: () => ({ status: 200, data: { ok: true } }) });
+    const w = app.window;
+    await waitFor(w, () => app.nat.watchers.size === 1, "watcher");
+    app.nat.emit(pluginLoc(NEAR));
+    await openJob(w);
+    await waitFor(w, x => !!x.document.querySelector('[data-testid="live-share-notifications-off"]'), "notifications-off warning");
+    const warn = w.document.querySelector('[data-testid="live-share-notifications-off"]').textContent;
+    ok(notice(w).getAttribute("data-live-state") === "sharing" && /Notifications are off for Haven Pro/.test(warn) && /still shared/.test(warn), "V6. app: sharing stays on and the warning explains the hidden notification");
+    w.close();
+  }
+  {
+    // Sign-out order: stop sender, end the native watch, settle the in-flight send (≤3 s), then sign out.
+    let release; const slowLive = () => new Promise(r => { release = () => r({ status: 200, data: { ok: true } }); });
+    const app = await renderApp({ platform: "ios", rows: [activeRow()], live: (n) => (n === 1 ? slowLive() : { status: 200, data: { ok: true } }) });
+    const w = app.window;
+    await waitFor(w, () => app.nat.watchers.size === 1, "watcher");
+    app.nat.emit(pluginLoc(NEAR));
+    await waitFor(w, () => app.nat.log.http.length === 1 && typeof release === "function", "send in flight");
+    clickText(w, /^Profile$/); await sleep(80);
+    await waitFor(w, x => !!button(x, "Sign Out", false), "Sign Out");
+    button(w, "Sign Out", false).click();
+    await waitFor(w, x => !!button(x, "Sign out", true), "confirm");
+    button(w, "Sign out", true).click();
+    await waitFor(w, () => app.nat.watchers.size === 0, "watch ended");
+    await sleep(200);
+    ok(!app.state.order, "sign-out waits for the send already on its way (not signed out yet)");
+    const releasedAt = Date.now(); release();
+    await waitFor(w, () => !!app.state.order, "signed out");
+    ok(app.nat.log.order.lastIndexOf("removeWatcher") >= 0 && app.state.signOutAt >= releasedAt, "sign-out order: sender stopped and watch ended first, then the in-flight send settled, then signOut");
+    ok(app.nat.log.http.length === 1, "no new send starts during sign-out");
+    w.close();
+  }
+  {
+    // …and a send that never finishes can't hold sign-out for more than ~3 s.
+    const app = await renderApp({ platform: "ios", rows: [activeRow()], live: () => new Promise(() => {}) });
+    const w = app.window;
+    await waitFor(w, () => app.nat.watchers.size === 1, "watcher");
+    app.nat.emit(pluginLoc(NEAR));
+    await waitFor(w, () => app.nat.log.http.length === 1, "send in flight");
+    clickText(w, /^Profile$/); await sleep(80);
+    await waitFor(w, x => !!button(x, "Sign Out", false), "Sign Out");
+    button(w, "Sign Out", false).click();
+    await waitFor(w, x => !!button(x, "Sign out", true), "confirm");
+    const t0 = Date.now();
+    button(w, "Sign out", true).click();
+    await waitFor(w, () => !!app.state.order, "signed out", 240);
+    ok(Date.now() - t0 < 4500, "a stuck send never blocks sign-out (gives up after about 3 s)");
+    w.close();
+  }
+
+  console.log("N9 Group B — native project:");
+  {
+    const pub = read("native/ios/App/App/public/index.html");
+    ok(!/<script[^>]*src="https?:\/\//.test(pub) && /src="vendor\/react\.production\.min\.js"/.test(pub) && /src="vendor\/supabase\.js"/.test(pub), "V7. the native app's page loads React, ReactDOM and supabase-js from the app bundle, no CDN");
+    const crypto = require("crypto"); const h = f => crypto.createHash("sha256").update(fs.readFileSync(path.join(root, f))).digest("hex");
+    ok(h("native/ios/App/App/public/vendor/react.production.min.js") === h("native/node_modules/react/umd/react.production.min.js")
+      && h("native/ios/App/App/public/vendor/supabase.js") === h("native/node_modules/@supabase/supabase-js/dist/umd/supabase.js"), "V7. bundled files are the pinned npm packages, byte for byte");
+    const npkg = JSON.parse(read("native/package.json"));
+    const deps = Object.assign({}, npkg.dependencies, npkg.devDependencies);
+    ok(deps.react === "18.3.1" && deps["react-dom"] === "18.3.1" && deps["@supabase/supabase-js"] === "2.117.2" && deps["@capacitor/local-notifications"] === "8.3.1", "V7/V6. library and plugin versions are pinned exactly (same as the website's CDN versions)");
+    const man = read("native/android/app/src/main/AndroidManifest.xml");
+    ok(/android:allowBackup="false"/.test(man) && /android:dataExtractionRules="@xml\/data_extraction_rules"/.test(man), "allowBackup=false and data-extraction rules on the Android app");
+    const rules = read("native/android/app/src/main/res/xml/data_extraction_rules.xml");
+    ok(/<cloud-backup>[\s\S]*<exclude domain="root" \/>[\s\S]*<\/cloud-backup>/.test(rules) && /<device-transfer>[\s\S]*<exclude domain="root" \/>[\s\S]*<\/device-transfer>/.test(rules), "the sign-in session (WebView storage) is excluded from cloud backup and device transfer");
+    const cfg = JSON.parse(read("native/capacitor.config.json"));
+    ok(cfg.loggingBehavior === "none" && /"loggingBehavior": "none"/.test(read("native/ios/App/App/capacitor.config.json")), "A2. Capacitor logging is off in the config and in the synced iOS project");
+  }
+}
+
 (async () => {
   await unitChecks();
   await adapterChecks();
   await appChecks();
+  await groupBChecks();
   shippedChecks();
   console.log(`OK: native background-location spike checks passed (${pass} assertions).`);
   process.exit(0);

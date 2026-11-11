@@ -526,22 +526,62 @@ async function sendProLiveLocation(jobId, fix) {
   const body = { p_job_id: jobId, p_lat: fix.lat, p_lng: fix.lng };
   if (typeof fix.capturedAt === "number" && Number.isFinite(fix.capturedAt)) body.p_captured_at = new Date(fix.capturedAt).toISOString();
   const url = `${cfg.url}/rest/v1/rpc/pro_update_live_location`;
-  const headers = {
-    apikey: actor.headers.apikey,
-    Authorization: actor.headers.Authorization,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-  let res;
-  try {
+  const post = async (authorization) => {
+    const headers = {
+      apikey: actor.headers.apikey,
+      Authorization: authorization,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
     // Native app: Capacitor's native HTTP (keeps working in the background; same
     // URL, headers and JSON body). Browser: fetch, unchanged.
-    res = typeof havenUseNativeHttp === "function" && havenUseNativeHttp()
+    return typeof havenUseNativeHttp === "function" && havenUseNativeHttp()
       ? await havenNativeHttpPost(url, headers, body)
       : await fetch(url, { method: "POST", headers: headers, body: JSON.stringify(body) });
-  } catch (e) {
-    return { state: "retry" };
+  };
+  let res;
+  try { res = await post(actor.headers.Authorization); } catch (e) { return { state: "retry" }; }
+  if (res.status === 401) {
+    // Founder decision 2026-11-11: an expired sign-in mid-drive refreshes the
+    // session once (10 s limit) and retries once before sharing stops. A refresh
+    // that only timed out or had no network (e.g. a throttled background WebView)
+    // is a brief outage (retry), never a silent stop.
+    const refreshed = await havenRefreshSessionForLive(HAVEN_LIVE_REFRESH_TIMEOUT_MS);
+    if (!refreshed.ok) return refreshed.definitive ? { state: "stop", error: "not_authenticated" } : { state: "retry" };
+    try { res = await post(`Bearer ${refreshed.token}`); } catch (e) { return { state: "retry" }; }
   }
+  return havenMapLiveSendResponse(res);
+}
+const HAVEN_LIVE_REFRESH_TIMEOUT_MS = 10000;
+// { ok: true, token } | { ok: false, definitive } — definitive means the
+// session really can't be renewed (signed out, refresh token rejected).
+async function havenRefreshSessionForLive(timeoutMs) {
+  const client = getHavenSupabaseClient();
+  if (!client || !client.auth || typeof client.auth.refreshSession !== "function") return { ok: false, definitive: true };
+  let timer = null;
+  const timeout = new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs); });
+  try {
+    const out = await Promise.race([client.auth.refreshSession(), timeout]);
+    if (out && out.timedOut) return { ok: false, definitive: false };
+    const err = out && out.error;
+    if (err) {
+      const st = Number(err.status);
+      const definitive = st === 400 || st === 401 || st === 403 || err.name === "AuthSessionMissingError";
+      return { ok: false, definitive };
+    }
+    const session = out && out.data ? out.data.session : null;
+    if (session && typeof session.access_token === "string" && session.access_token) {
+      rememberHavenSession(session);
+      return { ok: true, token: session.access_token.trim() };
+    }
+    return { ok: false, definitive: true };
+  } catch (e) {
+    return { ok: false, definitive: false }; // network / thrown: brief outage
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+async function havenMapLiveSendResponse(res) {
   if (res.status === 401 || res.status === 403) return { state: "stop", error: "not_authenticated" };
   if (res.status === 429) return { state: "rate_limited", retryAfterS: null };
   if (res.status >= 500 || res.status === 408) return { state: "retry" };
