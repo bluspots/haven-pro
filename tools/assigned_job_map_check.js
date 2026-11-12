@@ -229,8 +229,10 @@ async function appChecks() {
     ok(rpcCalls(app.calls).length === 1, "opening the job screen makes one lookup");
     ok(mapboxImgs(w)[0].getAttribute("src").includes("pin-l+0f6e4e(-81.379234,28.538336)"), "1. the pin is at the RPC point");
     const ls = links(w);
-    ok(ls.some(l => l.t === "Open in Apple Maps" && l.h === "https://maps.apple.com/?daddr=28.538336,-81.379234&dirflg=d"), "1. Apple Maps → the RPC point");
-    ok(ls.some(l => /Google Maps/.test(l.t) && l.h.includes("query=28.538336,-81.379234")), "1. Google Maps → the RPC point");
+    // Navigate (2026-11-11): with no saved app, the chooser offers each app, all to the RPC point.
+    ok(ls.some(l => l.t === "Apple Maps" && l.h === "https://maps.apple.com/?daddr=28.538336,-81.379234&dirflg=d"), "1. Apple Maps → the RPC point");
+    ok(ls.some(l => l.t === "Google Maps" && l.h.includes("destination=28.538336,-81.379234")), "1. Google Maps → the RPC point");
+    ok(ls.some(l => l.t === "Waze" && l.h.includes("ll=28.538336,-81.379234")), "1. Waze → the RPC point");
     ok(!ls.some(l => /10\.101|20\.202/.test(l.h)) && !mapboxImgs(w)[0].getAttribute("src").includes("10.101"), "6. the table row's lat/lng are never used");
     ok(!w.document.querySelector('[data-testid="assigned-address"]'), "no address line while the server sends null");
     w.close();
@@ -309,7 +311,7 @@ function shippedChecks() {
   ok(!/localStorage[^\n]*destination|destination[^\n]*localStorage/i.test(src + read("pro_maps.js") + read("backend_adapter.js")), "destinations are never written to localStorage");
   ok(/clearAllDestinations\(\); \/\/ MAP-05: no exact destination survives sign-out/.test(src) && /if \(!authSession \|\| !authSession\.id\) clearAllDestinations\(\);/.test(src), "5. sign-out clears every stored destination");
   ok((src.match(/HavenEnRouteNavigation|HAVEN_ASSIGNED_JOB_MAP_ENABLED/g) || []).length === 2, "the app file calls into pro_maps.js once, behind the flag");
-  ok(/"backend_adapter\.js" "pro_maps\.js" "pro_live_location\.js" "\$SRC"/.test(read("build-pro.sh")), "pro_maps.js is part of the build (before the live-location sender)");
+  ok(/"backend_adapter\.js"[^)\n]*"pro_maps\.js" "pro_live_location\.js" "\$SRC"/.test(read("build-pro.sh")), "pro_maps.js is part of the build (before the live-location sender)");
 }
 
 (async () => {
