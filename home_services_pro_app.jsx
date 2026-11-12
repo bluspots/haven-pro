@@ -906,6 +906,9 @@ export default function HavenProApp() {
     setAuthNotice("");
     setSettingsAuthOpen(false);
     clearAllDestinations(); // MAP-05: no exact destination survives sign-out
+    stopLiveSharing(); // live location stops at sign-out
+    endLocationWatch(); // and the location watch ends with it
+    setLocationDenied(false);
     clearAuthLinkedAccount();
     // Signing out never leaves a sessionless (local) account behind.
     if (accountSourceRef.current === "local") dropSessionlessAccount();
@@ -1582,19 +1585,88 @@ export default function HavenProApp() {
     return () => clearInterval(id);
   }, [activeJobs]);
 
-  // Live location — only watched while a job is actually en_route, and only
-  // to gate "I've Arrived" and power real turn-by-turn directions. If the
-  // browser or the job has no coordinates, arrival stays closed. Missing
-  // coordinates are not inside the radius.
+  // Live location while Driving to Job (pro_live_location.js, founder 2026-11-06).
+  // One sending session for the assigned, backend-claimed en_route job; it is
+  // fed by the existing watch below (no second watch). The point is sent only
+  // through pro_update_live_location and kept nowhere else.
+  const liveSenderRef = useRef(null);
+  const lastPositionRef = useRef(null); // latest device fix, memory only; dropped on deny / watch end / sign-out
+  const liveStoppedJobRef = useRef(null); // job id whose sharing the server ended
+  const [liveShare, setLiveShare] = useState({ jobId: null, state: "off" }); // off | sharing | stopped
+  const [locationDenied, setLocationDenied] = useState(false);
+  const liveShareJob = authSession ? activeJobs.find(j => havenLiveShareEligible(j, !!getSupabaseConfig())) : null;
+  const liveShareJobId = liveShareJob ? String(liveShareJob.id) : null;
+  function stopLiveSharing() {
+    if (liveSenderRef.current) { liveSenderRef.current.stop(); liveSenderRef.current = null; }
+    setLiveShare({ jobId: null, state: "off" });
+  }
   useEffect(() => {
-    if (!activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
+    if (!liveShareJobId) { liveStoppedJobRef.current = null; stopLiveSharing(); return; }
+    if (locationDenied) { stopLiveSharing(); return; } // no permission: nothing is sent
+    if (liveStoppedJobRef.current === liveShareJobId) return; // the server already ended it
+    if (liveSenderRef.current && liveSenderRef.current.jobId === liveShareJobId) return;
+    stopLiveSharing();
+    const sender = havenCreateLiveSender(liveShareJobId, {
+      send: sendProLiveLocation,
+      onStop: () => {
+        liveStoppedJobRef.current = liveShareJobId;
+        if (liveSenderRef.current === sender) liveSenderRef.current = null;
+        setLiveShare({ jobId: liveShareJobId, state: "stopped" });
+      },
+    });
+    liveSenderRef.current = sender;
+    setLiveShare({ jobId: liveShareJobId, state: "sharing" });
+    // Start from a fix that arrived just before this session existed (e.g. the fix
+    // that showed permission is back), only if it is under 30 s old.
+    const last = lastPositionRef.current;
+    if (last && typeof last.timestamp === "number" && Date.now() - last.timestamp < 30000) sender.onPosition(last);
+  }, [liveShareJobId, locationDenied]);
+  useEffect(() => () => { if (liveSenderRef.current) liveSenderRef.current.stop(); }, []);
+
+  // Live location — only watched while a job is actually en_route, to gate
+  // "I've Arrived", power real turn-by-turn directions and, for an assigned
+  // backend job, feed the live-location sender above. If the device or the
+  // job has no coordinates, arrival stays closed. Missing coordinates are not
+  // inside the radius. Not stopped when the app is hidden: it runs for as long
+  // as the operating system keeps delivering positions. Signed out: no watch
+  // (sign-out also ends it directly, see endLocationWatch).
+  const locationWatchRef = useRef(null);
+  function endLocationWatch() {
+    if (locationWatchRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    locationWatchRef.current = null;
+    lastPositionRef.current = null;
+    setProLiveLocation(null);
+  }
+  const signedInId = authSession ? (authSession.id || "signed-in") : null;
+  useEffect(() => {
+    if (!signedInId || !activeJobs.some(j => j.status === "en_route") || !navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
-      pos => setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => setProLiveLocation(null),
+      pos => {
+        if (locationWatchRef.current !== watchId) return; // ended (sign-out): ignore late positions
+        lastPositionRef.current = pos;
+        setLocationDenied(false);
+        setProLiveLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        if (liveSenderRef.current) liveSenderRef.current.onPosition(pos);
+      },
+      err => {
+        if (locationWatchRef.current !== watchId) return;
+        setProLiveLocation(null);
+        if (err && err.code === 1) {
+          // PERMISSION_DENIED (from the start or revoked while sharing): stop the
+          // sender first (drops its cached fix), then say so. Nothing is sent.
+          if (liveSenderRef.current) { liveSenderRef.current.stop(); liveSenderRef.current = null; }
+          lastPositionRef.current = null;
+          setLiveShare({ jobId: null, state: "off" });
+          setLocationDenied(true);
+        }
+      },
       { enableHighAccuracy: true, maximumAge: 10000, timeout: 10000 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [activeJobs]);
+    locationWatchRef.current = watchId;
+    return () => {
+      if (locationWatchRef.current === watchId) { navigator.geolocation.clearWatch(watchId); locationWatchRef.current = null; lastPositionRef.current = null; }
+    };
+  }, [activeJobs, signedInId]);
 
   // Tap the status bar to scroll to the top (same as Haven Customer). iOS
   // scrolls the page, not the app's inner scroll areas, when the status bar
@@ -2758,6 +2830,25 @@ export default function HavenProApp() {
   }
 
 
+  // Notice, not a switch: sharing runs until Arrived / the job leaves en_route /
+  // sign-out / the server ends it. Without OS location permission nothing is sent.
+  function liveShareNotice(job) {
+    if (!havenLiveShareEligible(job, !!getSupabaseConfig())) return null;
+    const id = String(job.id);
+    const noGeo = typeof navigator === "undefined" || !navigator.geolocation;
+    const text = locationDenied || noGeo ? HAVEN_LIVE_NO_PERMISSION
+      : liveShare.jobId === id && liveShare.state === "stopped" ? HAVEN_LIVE_STOPPED
+      : HAVEN_LIVE_NOTICE;
+    const sharing = text === HAVEN_LIVE_NOTICE;
+    return (
+      <div data-testid="live-share-notice" data-live-state={sharing ? "sharing" : (text === HAVEN_LIVE_STOPPED ? "stopped" : "no-permission")} role="status"
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", marginBottom: 12, borderRadius: 14, background: sharing ? T.pgt : T.w, border: sharing ? "none" : `1px solid ${T.bd}` }}>
+        <span aria-hidden="true" style={{ fontSize: 16 }}>{sharing ? "📡" : "⚠️"}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: sharing ? T.pgd : T.tx, fontFamily: FONT, lineHeight: 1.35 }}>{text}</span>
+      </div>
+    );
+  }
+
   function formatElapsed(ms) {
     const totalSec = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(totalSec / 3600);
@@ -2814,6 +2905,7 @@ export default function HavenProApp() {
       <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(popMyJobs)}>
         {backHeader(job.title, popMyJobs)}
         <div style={{ padding: "0 20px 32px" }}>
+          {job.status === "en_route" && liveShareNotice(job)}
           {job.status === "en_route" && mapPanel(job)}
           {job.status === "in_progress" && timerPanel(job)}
           <div style={{ background: T.w, border: `1px solid ${T.bd}`, borderRadius: 18, padding: 18, marginBottom: 16 }}>
