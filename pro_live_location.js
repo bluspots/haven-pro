@@ -43,7 +43,10 @@ function havenLiveShareEligible(job, backendConfigured) {
 
 // A device fix -> { lat, lng, capturedAt } or null when it must not be sent.
 // pos is a GeolocationPosition-like object. Accuracy is checked, never kept.
-function havenLiveFix(pos) {
+// nowMs (optional): a fix the device itself recorded more than
+// HAVEN_LIVE_MAX_FIX_AGE_MS ago is dropped (founder decision 2026-11-11), so an
+// old position is never shown to the Customer as current.
+function havenLiveFix(pos, nowMs) {
   const c = pos && pos.coords;
   if (!c) return null;
   const lat = c.latitude, lng = c.longitude;
@@ -52,6 +55,7 @@ function havenLiveFix(pos) {
   if (lat === 0 && lng === 0) return null; // junk fix
   if (typeof c.accuracy === "number" && (!Number.isFinite(c.accuracy) || c.accuracy > HAVEN_LIVE_MAX_ACCURACY_M)) return null;
   const t = typeof pos.timestamp === "number" && Number.isFinite(pos.timestamp) ? pos.timestamp : null;
+  if (t != null && typeof nowMs === "number" && nowMs - t > HAVEN_LIVE_MAX_FIX_AGE_MS) return null;
   return { lat: lat, lng: lng, capturedAt: t };
 }
 
@@ -72,6 +76,7 @@ function havenCreateLiveSender(jobId, deps) {
   const clearTimer = deps.clearTimer || (id => clearTimeout(id));
   let latest = null, lastSent = null, lastSentAt = 0, lastAttemptAt = 0, holdUntil = 0;
   let inFlight = false, stopped = false, timer = null, sentCount = 0, failStreak = 0;
+  let inFlightDone = null; // the send in progress (for idle())
 
   function schedule(ms) {
     if (timer != null) clearTimer(timer);
@@ -101,10 +106,12 @@ function havenCreateLiveSender(jobId, deps) {
     }
     if (t < due) { schedule(due - t); return; }
     // Heartbeat only with a recent fix; a silent device is not reported as current.
+    // Judged by when the app got it and by when the device recorded it.
     if (latest.receivedAt != null && t - latest.receivedAt > HAVEN_LIVE_MAX_FIX_AGE_MS) return;
+    if (latest.capturedAt != null && t - latest.capturedAt > HAVEN_LIVE_MAX_FIX_AGE_MS) return;
     const fix = latest;
     inFlight = true; lastAttemptAt = t;
-    Promise.resolve().then(() => deps.send(jobId, fix)).then(res => res, () => ({ state: "retry" })).then(res => {
+    inFlightDone = Promise.resolve().then(() => deps.send(jobId, fix)).then(res => res, () => ({ state: "retry" })).then(res => {
       inFlight = false;
       if (stopped) return;
       const r = res || { state: "retry" };
@@ -127,12 +134,19 @@ function havenCreateLiveSender(jobId, deps) {
     // A raw device position (GeolocationPosition-like). Bad fixes are ignored.
     onPosition(pos) {
       if (stopped) return;
-      const f = havenLiveFix(pos);
+      const f = havenLiveFix(pos, now());
       if (!f) return;
       latest = { lat: f.lat, lng: f.lng, capturedAt: f.capturedAt, receivedAt: now() };
       pump();
     },
     stop() { stop(null); },
+    // Resolves once the send in progress (if any) has finished, or after
+    // timeoutMs, whichever is first. Never rejects. Used at sign-out.
+    idle(timeoutMs) {
+      if (!inFlight || !inFlightDone) return Promise.resolve();
+      const wait = typeof timeoutMs === "number" ? timeoutMs : 3000;
+      return Promise.race([inFlightDone.then(() => {}, () => {}), new Promise(r => setTimer(r, wait))]);
+    },
     isStopped() { return stopped; },
     sentCount() { return sentCount; },
   };
