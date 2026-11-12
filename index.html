@@ -1988,6 +1988,40 @@ function havenAppleMapsUrl(point) {
   if (!point) return null;
   return "https://maps.apple.com/?daddr=" + havenFixed6(point.lat) + "," + havenFixed6(point.lng) + "&dirflg=d";
 }
+const HAVEN_NAV_APP_KEY = "haven_pro_nav_app_v1";
+const HAVEN_NAV_APPS = [
+  { id: "apple", label: "Apple Maps" },
+  { id: "google", label: "Google Maps" },
+  { id: "waze", label: "Waze" }
+];
+function havenNavAppLabel(id) {
+  const a = HAVEN_NAV_APPS.find((x) => x.id === id);
+  return a ? a.label : "";
+}
+function havenNavigationUrl(app, point) {
+  if (!point) return null;
+  const lat = havenFixed6(point.lat), lng = havenFixed6(point.lng);
+  if (app === "apple") return "https://maps.apple.com/?daddr=" + lat + "," + lng + "&dirflg=d";
+  if (app === "google") return "https://www.google.com/maps/dir/?api=1&destination=" + lat + "," + lng + "&travelmode=driving&dir_action=navigate";
+  if (app === "waze") return "https://waze.com/ul?ll=" + lat + "," + lng + "&navigate=yes";
+  return null;
+}
+function havenReadNavApp() {
+  try {
+    const v = typeof window !== "undefined" && window.localStorage ? window.localStorage.getItem(HAVEN_NAV_APP_KEY) : null;
+    return HAVEN_NAV_APPS.some((a) => a.id === v) ? v : "";
+  } catch (e) {
+    return "";
+  }
+}
+function havenSaveNavApp(id) {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    if (HAVEN_NAV_APPS.some((a) => a.id === id)) window.localStorage.setItem(HAVEN_NAV_APP_KEY, id);
+    else window.localStorage.removeItem(HAVEN_NAV_APP_KEY);
+  } catch (e) {
+  }
+}
 function havenDestinationMessage(dest) {
   if (!dest || dest.state === "loading") return { text: "Loading location…", retry: false };
   if (dest.state === "ok") return { text: "", retry: false };
@@ -2097,10 +2131,61 @@ function HavenEnRouteNavigation(props) {
       })
     );
   }
-  const apple = havenAppleMapsUrl(point);
-  const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center" });
+  const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center", cursor: "pointer" });
   const addressLine = point && dest.address && dest.address.line ? dest.address.line : null;
-  const googleLabel = point ? "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps") : "🗺️ " + havenCityOnlyLinkLabel(city);
+  const [navApp, setNavApp] = React.useState(havenReadNavApp());
+  const [choosing, setChoosing] = React.useState(false);
+  const navUrl = havenNavigationUrl(navApp, point);
+  const pick = (id) => {
+    havenSaveNavApp(id);
+    setNavApp(id);
+    setChoosing(false);
+  };
+  let navArea = null;
+  if (point) {
+    if (choosing || !navUrl) {
+      navArea = h(
+        "div",
+        { "data-testid": "nav-chooser", role: "group", "aria-label": "Navigate with", style: { padding: "4px 12px 12px" } },
+        h("div", { style: { fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: font, margin: "4px 2px 8px" } }, "Navigate with"),
+        h(
+          "div",
+          { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+          HAVEN_NAV_APPS.map((a) => h("a", {
+            key: a.id,
+            "data-nav-app": a.id,
+            href: havenNavigationUrl(a.id, point),
+            target: "_blank",
+            rel: "noopener noreferrer",
+            onClick: () => pick(a.id),
+            style: { ...btn(false), minWidth: 96 }
+          }, a.label))
+        ),
+        h(
+          "div",
+          { style: { fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: font, margin: "8px 2px 0", lineHeight: 1.4 } },
+          "We'll remember your choice on this phone. Change it any time here or in Settings."
+        )
+      );
+    } else {
+      navArea = h(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: 8, padding: 12 } },
+        h(
+          "a",
+          { "data-testid": "navigate-button", "data-nav-app": navApp, href: navUrl, target: "_blank", rel: "noopener noreferrer", style: { ...btn(true), flexDirection: "column", gap: 1, minHeight: 52 } },
+          h("span", null, "Navigate"),
+          h("span", { style: { fontSize: 11.5, fontWeight: 600, opacity: 0.9 } }, "with " + havenNavAppLabel(navApp))
+        ),
+        h("button", {
+          type: "button",
+          "data-testid": "navigate-change",
+          onClick: () => setChoosing(true),
+          style: { minHeight: 52, padding: "0 14px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" }
+        }, "Change")
+      );
+    }
+  }
   return h(
     "div",
     { "data-testid": "assigned-job-map", style: { borderRadius: 18, overflow: "hidden", marginBottom: 16, border: "1px solid " + T.bd, background: T.w } },
@@ -2116,12 +2201,13 @@ function HavenEnRouteNavigation(props) {
       )
     ),
     mapArea,
-    h(
+    navArea,
+    // Without a point there is no navigation to the job: only a city-level search,
+    // secondary styling, labelled as such.
+    !point && city && h(
       "div",
       { style: { display: "flex", gap: 8, padding: 12, flexWrap: "wrap" } },
-      apple && h("a", { href: apple, target: "_blank", rel: "noopener noreferrer", style: btn(true) }, "Open in Apple Maps"),
-      // Without a point the city search is secondary styling: it is not navigation to the job.
-      (point || city) && h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!!point && !apple) }, googleLabel)
+      h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(false) }, "🗺️ " + havenCityOnlyLinkLabel(city))
     )
   );
 }
@@ -5329,11 +5415,34 @@ function HavenProApp() {
         style: { width: 46, height: 27, borderRadius: 20, background: theme === "dark" ? T.pg : T.bd, position: "relative", border: "none", cursor: "pointer" }
       },
       /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", top: 2.5, left: theme === "dark" ? 21 : 2.5, width: 22, height: 22, borderRadius: "50%", background: "#FFFFFF", boxShadow: "0 1px 3px rgba(0,0,0,.25)", transition: "left .18s ease" } })
-    )), navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport")), devTestPanel("account state", [
+    )), navRow("🧭", "Navigation app", havenNavAppLabel(havenReadNavApp()) || "Ask when I tap Navigate", () => setProfileView("navApp")), navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport")), devTestPanel("account state", [
       { label: "Jump to Marketplace Ready", onClick: devJumpToMarketplaceReady }
     ])));
   }
+  function navAppScreen() {
+    const current = havenReadNavApp();
+    const choose = (id) => {
+      havenSaveNavApp(id);
+      setProfileView("settings");
+    };
+    const options = HAVEN_NAV_APPS.map((a) => ({ id: a.id, label: a.label })).concat([{ id: "", label: "Ask when I tap Navigate" }]);
+    return /* @__PURE__ */ React.createElement("div", { className: "hp-scroll", style: { flex: 1, overflowY: "auto" }, ...swipeBackHandlers(() => setProfileView("settings")) }, backHeader("Navigation app", () => setProfileView("settings")), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 32px" }, role: "radiogroup", "aria-label": "Navigation app" }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, margin: "0 2px 12px", lineHeight: 1.45 } }, "Navigate on a job opens this app with driving directions to the job. Saved on this phone only."), options.map((o) => /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        key: o.id || "ask",
+        type: "button",
+        role: "radio",
+        "aria-checked": current === o.id,
+        "data-nav-option": o.id || "ask",
+        onClick: () => choose(o.id),
+        style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: T.w, border: `1px solid ${current === o.id ? T.pg : T.bd}`, borderRadius: 14, padding: "14px", marginBottom: 8, cursor: "pointer", fontFamily: FONT }
+      },
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: T.tx } }, o.label),
+      current === o.id ? /* @__PURE__ */ React.createElement("span", { "aria-hidden": "true", style: { color: T.pg, fontWeight: 800 } }, "✓") : null
+    ))));
+  }
   function profileScreen(view = profileView) {
+    if (view === "navApp") return navAppScreen();
     if (view === "edit" && editDraft) return editProfileScreen();
     if (view === "categories" && categoriesDraft) return manageCategoriesScreen();
     if (view === "settings") return settingsScreen();
