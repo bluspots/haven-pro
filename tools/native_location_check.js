@@ -277,7 +277,7 @@ async function renderApp(opts) {
     async getUser() { return { data: { user: state.session && state.session.user }, error: null }; },
     onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
     async signOut() { state.signOutAt = Date.now(); state.order = (state.order || []).concat("signOut"); state.session = null; return { error: null }; },
-  } }; } };
+  }, ...(opts.realtime ? opts.realtime(state) : {}) }; } };
   const ReactDOM = Object.assign({}, ReactDOMLegacy, ReactDOMClient);
   window.React = React; window.ReactDOM = ReactDOM;
   global.window = window; global.document = window.document; global.React = React; global.ReactDOM = ReactDOM;
@@ -601,7 +601,9 @@ async function groupBChecks() {
   }
 }
 
-(async () => {
+// The integration check (tools/native_integration_check.js) reuses this harness.
+module.exports = { renderApp, fakeNative, pluginLoc, activeRow, waitFor, clickText, button, notice, openJob, leaf, sleep, hasCoord, JOB, PRO_ID, NEAR, DEST, LIVE_PATH, NOTICE };
+if (require.main === module) (async () => {
   await unitChecks();
   await adapterChecks();
   await appChecks();

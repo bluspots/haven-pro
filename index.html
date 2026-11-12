@@ -4184,9 +4184,10 @@ function HavenProApp() {
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [locationDenied]);
+  const hasEnRouteJob = activeJobs.some((j) => j.status === "en_route");
   useEffect(() => {
     const geo = havenLocationApi({ background: wantBackgroundLocation });
-    if (!signedInId || locationDenied || !activeJobs.some((j) => j.status === "en_route") || !geo) return;
+    if (!signedInId || locationDenied || !hasEnRouteJob || !geo) return;
     const watchId = geo.watchPosition(
       (pos) => {
         if (locationWatchRef.current !== watchId) return;
@@ -4224,7 +4225,7 @@ function HavenProApp() {
         lastPositionRef.current = null;
       }
     };
-  }, [activeJobs, signedInId, wantBackgroundLocation, locationDenied, liveRestartTick]);
+  }, [hasEnRouteJob, signedInId, wantBackgroundLocation, locationDenied, liveRestartTick]);
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
     let armed = false, timer = null;

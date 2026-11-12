@@ -596,7 +596,7 @@ function shippedChecks() {
   // background-capable plugin shim). It ends only in its effect cleanup and on sign-out.
   ok((app.match(/clearWatch\(/g) || []).length === 3 && /function endLocationWatch\(\) \{\n    const geo = locationGeoRef\.current;\n    if \(locationWatchRef\.current != null && geo\) geo\.clearWatch/.test(app) && /geo\.clearWatch\(watchId\); locationWatchRef\.current = null;/.test(app), "the watch ends only in its effect cleanup, on sign-out, and on a permission denial");
   ok(!/navigator\.geolocation/.test(app), "the app reaches location only through havenLocationApi()");
-  ok(/try \{ endLocationWatch\(\); \} catch \(e\) \{\}/.test(app) && /if \(!signedInId \|\| locationDenied \|\| !activeJobs\.some/.test(app), "Fix 2: no watch while signed out; sign-out ends it directly");
+  ok(/try \{ endLocationWatch\(\); \} catch \(e\) \{\}/.test(app) && /const hasEnRouteJob = activeJobs\.some\(j => j\.status === "en_route"\);/.test(app) && /if \(!signedInId \|\| locationDenied \|\| !hasEnRouteJob \|\| !geo\) return;/.test(app), "Fix 2: no watch while signed out; sign-out ends it directly");
   ok(/enableHighAccuracy: true/.test(app), "high accuracy stays on");
   ok(/try \{ stopLiveSharing\(\); \} catch \(e\) \{\}\n    try \{ endLocationWatch\(\); \} catch \(e\) \{\}\n    try \{ if \(sender && typeof sender\.idle === "function"\) await sender\.idle\(3000\); \} catch \(e\) \{\}\n    let result;\n    try \{\n      result = await havenAuthSignOut\(\);/.test(app), "9. sign-out: stop sending, end the watch, settle the in-flight send (≤3 s), then sign out");
   const stripComments = t => t.replace(/\/\/[^\n]*/g, "");

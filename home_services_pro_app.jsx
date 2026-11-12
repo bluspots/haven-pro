@@ -1673,11 +1673,15 @@ export default function HavenProApp() {
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [locationDenied]);
+  // The watch depends only on whether a job is en route, not on the job list
+  // itself: a note, a photo or a live job update on another job must not
+  // remove and re-add the native background watcher (integration, #76 + #77).
+  const hasEnRouteJob = activeJobs.some(j => j.status === "en_route");
   useEffect(() => {
     // native app: background-capable plugin while sharing; otherwise (and in the
     // browser) the standard web location API
     const geo = havenLocationApi({ background: wantBackgroundLocation });
-    if (!signedInId || locationDenied || !activeJobs.some(j => j.status === "en_route") || !geo) return;
+    if (!signedInId || locationDenied || !hasEnRouteJob || !geo) return;
     const watchId = geo.watchPosition(
       pos => {
         if (locationWatchRef.current !== watchId) return; // ended (sign-out): ignore late positions
@@ -1710,7 +1714,7 @@ export default function HavenProApp() {
     return () => {
       if (locationWatchRef.current === watchId) { geo.clearWatch(watchId); locationWatchRef.current = null; locationGeoRef.current = null; lastPositionRef.current = null; }
     };
-  }, [activeJobs, signedInId, wantBackgroundLocation, locationDenied, liveRestartTick]);
+  }, [hasEnRouteJob, signedInId, wantBackgroundLocation, locationDenied, liveRestartTick]);
 
   // Tap the status bar to scroll to the top (same as Haven Customer). iOS
   // scrolls the page, not the app's inner scroll areas, when the status bar
