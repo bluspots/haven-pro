@@ -55,6 +55,47 @@ function havenAppleMapsUrl(point) {
   return "https://maps.apple.com/?daddr=" + havenFixed6(point.lat) + "," + havenFixed6(point.lng) + "&dirflg=d";
 }
 
+// ── One "Navigate" button (founder approved 2026-11-11, draft) ──────────────
+// The Pro picks Apple Maps, Google Maps or Waze once; Navigate then opens that
+// app straight into driving directions to the job's exact point. The choice is
+// kept on this device only (which apps are installed differs per phone). The
+// URL carries only the destination: the map app uses the phone's own current
+// location as the start, so the Pro's location is never put in a link.
+const HAVEN_NAV_APP_KEY = "haven_pro_nav_app_v1";
+const HAVEN_NAV_APPS = [
+  { id: "apple", label: "Apple Maps" },
+  { id: "google", label: "Google Maps" },
+  { id: "waze", label: "Waze" },
+];
+function havenNavAppLabel(id) {
+  const a = HAVEN_NAV_APPS.find(x => x.id === id);
+  return a ? a.label : "";
+}
+// Driving directions to the exact point in the chosen app, or null.
+function havenNavigationUrl(app, point) {
+  if (!point) return null;
+  const lat = havenFixed6(point.lat), lng = havenFixed6(point.lng);
+  if (app === "apple") return "https://maps.apple.com/?daddr=" + lat + "," + lng + "&dirflg=d";
+  if (app === "google") return "https://www.google.com/maps/dir/?api=1&destination=" + lat + "," + lng + "&travelmode=driving&dir_action=navigate";
+  if (app === "waze") return "https://waze.com/ul?ll=" + lat + "," + lng + "&navigate=yes";
+  return null;
+}
+// The saved choice ("apple" | "google" | "waze"), or "" (ask on first tap).
+function havenReadNavApp() {
+  try {
+    const v = typeof window !== "undefined" && window.localStorage ? window.localStorage.getItem(HAVEN_NAV_APP_KEY) : null;
+    return HAVEN_NAV_APPS.some(a => a.id === v) ? v : "";
+  } catch (e) { return ""; }
+}
+// Saves a choice; "" clears it (ask again next time). Storage failing is fine.
+function havenSaveNavApp(id) {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    if (HAVEN_NAV_APPS.some(a => a.id === id)) window.localStorage.setItem(HAVEN_NAV_APP_KEY, id);
+    else window.localStorage.removeItem(HAVEN_NAV_APP_KEY);
+  } catch (e) {}
+}
+
 // What to say when there is no exact point (contract §5 of the Pro #71 brief).
 function havenDestinationMessage(dest) {
   if (!dest || dest.state === "loading") return { text: "Loading location…", retry: false };
@@ -151,11 +192,36 @@ function HavenEnRouteNavigation(props) {
       }));
   }
 
-  const apple = havenAppleMapsUrl(point);
-  const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center" });
+  const btn = (primary) => ({ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 46, padding: "0 10px", borderRadius: 12, textDecoration: "none", fontSize: 13.5, fontWeight: 800, fontFamily: font, background: primary ? T.cta : T.w, color: primary ? "#fff" : T.tx, border: primary ? "none" : "1px solid " + T.bd, textAlign: "center", cursor: "pointer" });
   // Address is shown only when the server sends it (today it is always null; REQ-04 open).
   const addressLine = point && dest.address && dest.address.line ? dest.address.line : null;
-  const googleLabel = point ? "🗺️ " + (hasOrigin ? "Google Maps directions" : "Open in Google Maps") : "🗺️ " + havenCityOnlyLinkLabel(city);
+
+  // Navigate: one button; the first tap asks which app (remembered on this device).
+  const [navApp, setNavApp] = React.useState(havenReadNavApp());
+  const [choosing, setChoosing] = React.useState(false);
+  const navUrl = havenNavigationUrl(navApp, point);
+  const pick = (id) => { havenSaveNavApp(id); setNavApp(id); setChoosing(false); };
+  let navArea = null;
+  if (point) {
+    if (choosing || !navUrl) {
+      navArea = h("div", { "data-testid": "nav-chooser", role: "group", "aria-label": "Navigate with", style: { padding: "4px 12px 12px" } },
+        h("div", { style: { fontSize: 13, fontWeight: 800, color: T.tx, fontFamily: font, margin: "4px 2px 8px" } }, "Navigate with"),
+        h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+          HAVEN_NAV_APPS.map(a => h("a", {
+            key: a.id, "data-nav-app": a.id, href: havenNavigationUrl(a.id, point), target: "_blank", rel: "noopener noreferrer",
+            onClick: () => pick(a.id), style: { ...btn(false), minWidth: 96 },
+          }, a.label))),
+        h("div", { style: { fontSize: 11.5, fontWeight: 600, color: T.ts, fontFamily: font, margin: "8px 2px 0", lineHeight: 1.4 } },
+          "We'll remember your choice on this phone. Change it any time here or in Settings."));
+    } else {
+      navArea = h("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: 12 } },
+        h("a", { "data-testid": "navigate-button", "data-nav-app": navApp, href: navUrl, target: "_blank", rel: "noopener noreferrer", style: { ...btn(true), flexDirection: "column", gap: 1, minHeight: 52 } },
+          h("span", null, "Navigate"),
+          h("span", { style: { fontSize: 11.5, fontWeight: 600, opacity: 0.9 } }, "with " + havenNavAppLabel(navApp))),
+        h("button", { type: "button", "data-testid": "navigate-change", onClick: () => setChoosing(true),
+          style: { minHeight: 52, padding: "0 14px", borderRadius: 12, border: "1px solid " + T.bd, background: T.w, color: T.tx, fontSize: 13, fontWeight: 700, fontFamily: font, cursor: "pointer" } }, "Change"));
+    }
+  }
 
   return h("div", { "data-testid": "assigned-job-map", style: { borderRadius: 18, overflow: "hidden", marginBottom: 16, border: "1px solid " + T.bd, background: T.w } },
     h("div", { style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px" } },
@@ -164,8 +230,9 @@ function HavenEnRouteNavigation(props) {
         h("div", { style: { fontSize: 13, fontWeight: 700, color: T.tx, fontFamily: font } }, point ? (city ? "Job location · " + city : "Job location") : (city ? "Job in " + city : "Job location")),
         addressLine && h("div", { "data-testid": "assigned-address", style: { fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: font, marginTop: 2 } }, addressLine))),
     mapArea,
-    h("div", { style: { display: "flex", gap: 8, padding: 12, flexWrap: "wrap" } },
-      apple && h("a", { href: apple, target: "_blank", rel: "noopener noreferrer", style: btn(true) }, "Open in Apple Maps"),
-      // Without a point the city search is secondary styling: it is not navigation to the job.
-      (point || city) && h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(!!point && !apple) }, googleLabel)));
+    navArea,
+    // Without a point there is no navigation to the job: only a city-level search,
+    // secondary styling, labelled as such.
+    !point && city && h("div", { style: { display: "flex", gap: 8, padding: 12, flexWrap: "wrap" } },
+      h("a", { href: mapsUrl, target: "_blank", rel: "noopener noreferrer", style: btn(false) }, "🗺️ " + havenCityOnlyLinkLabel(city))));
 }

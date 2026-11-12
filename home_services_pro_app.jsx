@@ -4620,6 +4620,7 @@ export default function HavenProApp() {
               <div style={{ position: "absolute", top: 2.5, left: theme === "dark" ? 21 : 2.5, width: 22, height: 22, borderRadius: "50%", background: "#FFFFFF", boxShadow: "0 1px 3px rgba(0,0,0,.25)", transition: "left .18s ease" }} />
             </button>
           </div>
+          {navRow("🧭", "Navigation app", havenNavAppLabel(havenReadNavApp()) || "Ask when I tap Navigate", () => setProfileView("navApp"))}
           {navRow("❓", "Help & Support", `${FAQ_ITEMS.length} common questions answered`, () => setProfileView("helpSupport"))}
           {devTestPanel("account state", [
             { label: "Jump to Marketplace Ready", onClick: devJumpToMarketplaceReady },
@@ -4629,7 +4630,32 @@ export default function HavenProApp() {
     );
   }
 
+  // Settings → Navigation app: which map app "Navigate" opens (this phone only).
+  function navAppScreen() {
+    const current = havenReadNavApp();
+    const choose = (id) => { havenSaveNavApp(id); setProfileView("settings"); };
+    const options = HAVEN_NAV_APPS.map(a => ({ id: a.id, label: a.label })).concat([{ id: "", label: "Ask when I tap Navigate" }]);
+    return (
+      <div className="hp-scroll" style={{ flex: 1, overflowY: "auto" }} {...swipeBackHandlers(() => setProfileView("settings"))}>
+        {backHeader("Navigation app", () => setProfileView("settings"))}
+        <div style={{ padding: "0 20px 32px" }} role="radiogroup" aria-label="Navigation app">
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ts, fontFamily: FONT, margin: "0 2px 12px", lineHeight: 1.45 }}>
+            Navigate on a job opens this app with driving directions to the job. Saved on this phone only.
+          </div>
+          {options.map(o => (
+            <button key={o.id || "ask"} type="button" role="radio" aria-checked={current === o.id} data-nav-option={o.id || "ask"} onClick={() => choose(o.id)}
+              style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: T.w, border: `1px solid ${current === o.id ? T.pg : T.bd}`, borderRadius: 14, padding: "14px", marginBottom: 8, cursor: "pointer", fontFamily: FONT }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: T.tx }}>{o.label}</span>
+              {current === o.id ? <span aria-hidden="true" style={{ color: T.pg, fontWeight: 800 }}>✓</span> : null}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   function profileScreen(view = profileView) {
+    if (view === "navApp") return navAppScreen();
     if (view === "edit" && editDraft) return editProfileScreen();
     if (view === "categories" && categoriesDraft) return manageCategoriesScreen();
     if (view === "settings") return settingsScreen();
